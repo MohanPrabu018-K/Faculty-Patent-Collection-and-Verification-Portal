@@ -1,0 +1,49 @@
+# Python
+*.pyc
+__pycache__/
+*.pyo
+venv/
+.venv/
+/backend/.venv/
+.env
+*.env.local
+.env.production
+.env.*.local
+
+# Env files: ignore every variant, keep only the committed *.example templates
+.env.*
+!.env.example
+
+# Node
+node_modules/
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.env
+/frontend/.env.production
+/frontend/.env.*.local
+/frontend/.env*
+!/frontend/.env.production.example
+
+# Logs / caches
+*.log
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Generated test / build artifacts (regenerated locally, never source)
+/frontend/test-results/
+/frontend/playwright-report/
+/frontend/tsconfig.tsbuildinfo
+
+# Local editor / tooling scaffolding (not part of the project)
+.claude/
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+storage/
+/backend/storage/

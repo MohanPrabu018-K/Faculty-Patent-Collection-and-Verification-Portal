@@ -1,0 +1,177 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 900" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#374151"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1d4ed8"/>
+    </marker>
+    <linearGradient id="header" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#1e3a5f"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="pipeline" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#eff6ff"/>
+      <stop offset="100%" stop-color="#dbeafe"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="900" fill="#f8fafc"/>
+
+  <!-- Title bar -->
+  <rect x="0" y="0" width="1200" height="70" fill="url(#header)"/>
+  <text x="600" y="30" text-anchor="middle" fill="#ffffff" font-size="22" font-weight="700">Faculty Profile Portal — End-to-End Workflow</text>
+  <text x="600" y="52" text-anchor="middle" fill="#c7d9f5" font-size="13">Login → JWT → CSRF → Upload → PostgreSQL → BackgroundTasks → Orchestrator → 11 Agents → PostgreSQL → UI Status</text>
+
+  <!-- ==================== LEFT COLUMN: System Architecture ==================== -->
+  <text x="40" y="110" fill="#1e3a5f" font-size="16" font-weight="700">System Architecture</text>
+
+  <!-- Browser -->
+  <rect x="40" y="125" width="300" height="60" rx="8" fill="#ffffff" stroke="#1d4ed8" stroke-width="2"/>
+  <text x="190" y="150" text-anchor="middle" fill="#1e3a5f" font-size="14" font-weight="700">🌐 Browser (React SPA)</text>
+  <text x="190" y="170" text-anchor="middle" fill="#64748b" font-size="11">localhost:5173 · never trusted for AuthZ</text>
+
+  <!-- FastAPI -->
+  <rect x="40" y="225" width="300" height="60" rx="8" fill="#ffffff" stroke="#1d4ed8" stroke-width="2"/>
+  <text x="190" y="250" text-anchor="middle" fill="#1e3a5f" font-size="14" font-weight="700">⚡ FastAPI API Layer</text>
+  <text x="190" y="270" text-anchor="middle" fill="#64748b" font-size="11">AuthN/AuthZ · RBAC · CSRF · Rate limit · Validation</text>
+
+  <!-- PostgreSQL -->
+  <rect x="40" y="325" width="300" height="60" rx="8" fill="#ffffff" stroke="#0f766e" stroke-width="2"/>
+  <text x="190" y="350" text-anchor="middle" fill="#0f766e" font-size="14" font-weight="700">🐘 PostgreSQL 16</text>
+  <text x="190" y="370" text-anchor="middle" fill="#64748b" font-size="11">Single source of truth · controlled data</text>
+
+  <!-- OCR.Space -->
+  <rect x="40" y="425" width="300" height="60" rx="8" fill="#ffffff" stroke="#dc2626" stroke-width="2"/>
+  <text x="190" y="450" text-anchor="middle" fill="#dc2626" font-size="14" font-weight="700">🌩️ OCR.Space (free API)</text>
+  <text x="190" y="470" text-anchor="middle" fill="#64748b" font-size="11">External OCR · HTTP 429 retry/backoff · degrades gracefully</text>
+
+  <!-- BackgroundTasks -->
+  <rect x="40" y="525" width="300" height="60" rx="8" fill="#ffffff" stroke="#d97706" stroke-width="2"/>
+  <text x="190" y="550" text-anchor="middle" fill="#d97706" font-size="14" font-weight="700">⚙️ FastAPI BackgroundTasks</text>
+  <text x="190" y="570" text-anchor="middle" fill="#64748b" font-size="11">In-process pipeline runner · no broker · no queue</text>
+
+  <!-- Storage -->
+  <rect x="40" y="625" width="300" height="60" rx="8" fill="#ffffff" stroke="#7c3aed" stroke-width="2"/>
+  <text x="190" y="650" text-anchor="middle" fill="#7c3aed" font-size="14" font-weight="700">🗄️ Private Storage</text>
+  <text x="190" y="670" text-anchor="middle" fill="#64748b" font-size="11">Uploaded certificates + evidence · not web-served</text>
+
+  <!-- Arrows between architecture layers -->
+  <line x1="190" y1="185" x2="190" y2="223" stroke="#374151" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="190" y1="285" x2="190" y2="323" stroke="#374151" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="120" y1="285" x2="120" y2="523" stroke="#374151" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="190" y1="285" x2="190" y2="423" stroke="#374151" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+  <line x1="190" y1="585" x2="190" y2="623" stroke="#374151" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- ==================== RIGHT COLUMN: Processing Pipeline ==================== -->
+  <text x="400" y="110" fill="#1e3a5f" font-size="16" font-weight="700">Real Processing Pipeline (11 Deterministic Agents)</text>
+
+  <!-- Pipeline background box -->
+  <rect x="400" y="125" width="770" height="740" rx="10" fill="url(#pipeline)" stroke="#1d4ed8" stroke-width="1.5"/>
+
+  <!-- Step 1: Login -->
+  <rect x="420" y="145" width="720" height="52" rx="6" fill="#ffffff" stroke="#1d4ed8" stroke-width="1.5"/>
+  <text x="440" y="168" fill="#1e3a5f" font-size="13" font-weight="700">1. Faculty Login</text>
+  <text x="440" y="186" fill="#64748b" font-size="11">Argon2id verify → JWT (HttpOnly SameSite=Lax cookie) + CSRF token (double-submit)</text>
+
+  <line x1="780" y1="197" x2="780" y2="215" stroke="#1d4ed8" stroke-width="2" marker-end="url(#arrow-blue)"/>
+
+  <!-- Step 2: Upload -->
+  <rect x="420" y="217" width="720" height="52" rx="6" fill="#ffffff" stroke="#1d4ed8" stroke-width="1.5"/>
+  <text x="440" y="240" fill="#1e3a5f" font-size="13" font-weight="700">2. Upload Certificate</text>
+  <text x="440" y="258" fill="#64748b" font-size="11">File validation (extension + MIME + magic bytes + size) → IpRecord/IpFile/ProcessingJob created</text>
+
+  <line x1="780" y1="269" x2="780" y2="287" stroke="#1d4ed8" stroke-width="2" marker-end="url(#arrow-blue)"/>
+
+  <!-- Step 3: Queue -->
+  <rect x="420" y="289" width="720" height="52" rx="6" fill="#ffffff" stroke="#1d4ed8" stroke-width="1.5"/>
+  <text x="440" y="312" fill="#1e3a5f" font-size="13" font-weight="700">3. Schedule BackgroundTask</text>
+  <text x="440" y="330" fill="#64748b" font-size="11">background_tasks.add_task(run_document_pipeline) → runs in the FastAPI process after 202 response</text>
+
+  <line x1="780" y1="341" x2="780" y2="359" stroke="#1d4ed8" stroke-width="2" marker-end="url(#arrow-blue)"/>
+
+  <!-- Step 4: Orchestrator -->
+  <rect x="420" y="361" width="720" height="52" rx="6" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.5"/>
+  <text x="440" y="384" fill="#1e3a5f" font-size="13" font-weight="700">4. AI Orchestrator</text>
+  <text x="440" y="402" fill="#64748b" font-size="11">AI assists · rules validate · evidence supports · humans confirm uncertainty</text>
+
+  <!-- Agents grid -->
+  <text x="440" y="438" fill="#1e3a5f" font-size="13" font-weight="700">11 Deterministic Agents (in order)</text>
+
+  <!-- Row 1 -->
+  <rect x="420" y="450" width="168" height="44" rx="5" fill="#ffffff" stroke="#64748b" stroke-width="1"/>
+  <text x="504" y="470" text-anchor="middle" fill="#1e3a5f" font-size="11" font-weight="600">1. Classification</text>
+  <text x="504" y="484" text-anchor="middle" fill="#64748b" font-size="10">PATENT / DESIGN / OTHER</text>
+
+  <rect x="598" y="450" width="168" height="44" rx="5" fill="#ffffff" stroke="#64748b" stroke-width="1"/>
+  <text x="682" y="470" text-anchor="middle" fill="#1e3a5f" font-size="11" font-weight="600">2. QR Analysis</text>
+  <text x="682" y="484" text-anchor="middle" fill="#64748b" font-size="10">QR detection + decode</text>
+
+  <rect x="776" y="450" width="168" height="44" rx="5" fill="#ffffff" stroke="#64748b" stroke-width="1"/>
+  <text x="860" y="470" text-anchor="middle" fill="#1e3a5f" font-size="11" font-weight="600">3. OCR Extraction</text>
+  <text x="860" y="484" text-anchor="middle" fill="#64748b" font-size="10">OCR.Space API + field extraction</text>
+
+  <rect x="954" y="450" width="168" height="44" rx="5" fill="#ffffff" stroke="#64748b" stroke-width="1"/>
+  <text x="1038" y="470" text-anchor="middle" fill="#1e3a5f" font-size="11" font-weight="600">4. Understanding</text>
+  <text x="1038" y="484" text-anchor="middle" fill="#64748b" font-size="10">Layout / text understanding</text>
+
+  <!-- Row 2 -->
+  <rect x="420" y="504" width="168" height="44" rx="5" fill="#ffffff" stroke="#64748b" stroke-width="1"/>
+  <text x="504" y="524" text-anchor="middle" fill="#1e3a5f" font-size="11" font-weight="600">5. Verification</text>
+  <text x="504" y="538" text-anchor="middle" fill="#64748b" font-size="10">Official source + fallback</text>
+
+  <rect x="598" y="504" width="168" height="44" rx="5" fill="#ffffff" stroke="#64748b" stroke-width="1"/>
+  <text x="682" y="524" text-anchor="middle" fill="#1e3a5f" font-size="11" font-weight="600">6. Identity</text>
+  <text x="682" y="538" text-anchor="middle" fill="#64748b" font-size="10">Faculty identity resolution</text>
+
+  <rect x="776" y="504" width="168" height="44" rx="5" fill="#ffffff" stroke="#64748b" stroke-width="1"/>
+  <text x="860" y="524" text-anchor="middle" fill="#1e3a5f" font-size="11" font-weight="600">7. Duplicate</text>
+  <text x="860" y="538" text-anchor="middle" fill="#64748b" font-size="10">Duplicate detection</text>
+
+  <rect x="954" y="504" width="168" height="44" rx="5" fill="#ffffff" stroke="#64748b" stroke-width="1"/>
+  <text x="1038" y="524" text-anchor="middle" fill="#1e3a5f" font-size="11" font-weight="600">8. Conflict</text>
+  <text x="1038" y="538" text-anchor="middle" fill="#64748b" font-size="10">Conflict resolution (C1-C8)</text>
+
+  <!-- Row 3 -->
+  <rect x="420" y="558" width="168" height="44" rx="5" fill="#ffffff" stroke="#64748b" stroke-width="1"/>
+  <text x="504" y="578" text-anchor="middle" fill="#1e3a5f" font-size="11" font-weight="600">9. Association</text>
+  <text x="504" y="592" text-anchor="middle" fill="#64748b" font-size="10">Contributor/association</text>
+
+  <rect x="598" y="558" width="168" height="44" rx="5" fill="#ffffff" stroke="#64748b" stroke-width="1"/>
+  <text x="682" y="578" text-anchor="middle" fill="#1e3a5f" font-size="11" font-weight="600">10. Data Quality</text>
+  <text x="682" y="592" text-anchor="middle" fill="#64748b" font-size="10">Field/evidence quality</text>
+
+  <rect x="776" y="558" width="168" height="44" rx="5" fill="#ffffff" stroke="#64748b" stroke-width="1"/>
+  <text x="860" y="578" text-anchor="middle" fill="#1e3a5f" font-size="11" font-weight="600">11. Analytics</text>
+  <text x="860" y="592" text-anchor="middle" fill="#64748b" font-size="10">Summary analytics</text>
+
+  <line x1="780" y1="602" x2="780" y2="640" stroke="#1d4ed8" stroke-width="2" marker-end="url(#arrow-blue)"/>
+
+  <!-- Step 5: Persist -->
+  <rect x="420" y="642" width="720" height="52" rx="6" fill="#ffffff" stroke="#0f766e" stroke-width="1.5"/>
+  <text x="440" y="665" fill="#0f766e" font-size="13" font-weight="700">5. Persist to PostgreSQL</text>
+  <text x="440" y="683" fill="#64748b" font-size="11">Extracted fields · processing jobs · verification attempts · duplicate/conflict cases</text>
+
+  <line x1="780" y1="694" x2="780" y2="712" stroke="#1d4ed8" stroke-width="2" marker-end="url(#arrow-blue)"/>
+
+  <!-- Step 6: Final status -->
+  <rect x="420" y="714" width="720" height="52" rx="6" fill="#ffffff" stroke="#1d4ed8" stroke-width="1.5"/>
+  <text x="440" y="737" fill="#1e3a5f" font-size="13" font-weight="700">6. Final UI Status</text>
+  <text x="440" y="755" fill="#64748b" font-size="11">Browser polls /faculty/{id}/status → processing_status: AWAITING_REVIEW · COMPLETED · FAILED</text>
+
+  <!-- ==================== LEGEND ==================== -->
+  <text x="40" y="820" fill="#1e3a5f" font-size="14" font-weight="700">Legend</text>
+  <rect x="40" y="835" width="16" height="16" fill="#ffffff" stroke="#1d4ed8" stroke-width="1.5"/>
+  <text x="64" y="848" fill="#374151" font-size="12">Frontend/API</text>
+  <rect x="170" y="835" width="16" height="16" fill="#ffffff" stroke="#0f766e" stroke-width="1.5"/>
+  <text x="194" y="848" fill="#374151" font-size="12">Database</text>
+  <rect x="290" y="835" width="16" height="16" fill="#ffffff" stroke="#dc2626" stroke-width="1.5"/>
+  <text x="314" y="848" fill="#374151" font-size="12">OCR.Space</text>
+  <rect x="400" y="835" width="16" height="16" fill="#ffffff" stroke="#d97706" stroke-width="1.5"/>
+  <text x="424" y="848" fill="#374151" font-size="12">BackgroundTasks</text>
+  <rect x="560" y="835" width="16" height="16" fill="#ffffff" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="584" y="848" fill="#374151" font-size="12">Storage</text>
+  <rect x="660" y="835" width="16" height="16" fill="#ffffff" stroke="#64748b" stroke-width="1.5"/>
+  <text x="684" y="848" fill="#374151" font-size="12">Agents</text>
+</svg>

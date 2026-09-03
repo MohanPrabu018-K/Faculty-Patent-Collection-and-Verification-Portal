@@ -1,0 +1,37 @@
+# Keep the backend image build context small and secret-free.
+.git
+.gitignore
+.env
+.env.*
+*.env.local
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.venv/
+**/venv/
+
+# Frontend is deployed separately as a static site — never needed in the API image.
+frontend/
+
+# Local dev artefacts / docs / plans
+storage/
+backend/storage/
+*.log
+plans/
+AUDIT_REPORT.md
+CHATGPT_PROMPT.md
+PROJECT_BLUEPRINT.md
+REMAINING_WORK.md
+
+# Test-only helper scripts are not needed at runtime (create_test_users.py IS kept
+# in backend/ for the one-time admin seed — it is not excluded here).
+scripts/
+backend/tests/
+backend/test_upload.py
+backend/check_users.py
+backend/setup_test_user.py
+backend/run_server.py
+backend/update_enum.py
+
