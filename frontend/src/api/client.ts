@@ -1,4 +1,8 @@
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1';
+const RAW_API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1').replace(/\/+$/, '');
+// Every path in this client is relative to the API's /api/v1 mount (e.g. '/auth/me').
+// Accept VITE_API_BASE_URL with or without the '/api/v1' suffix so a deployment
+// env set to the bare API origin doesn't turn every request into a 404.
+const API_BASE = /\/api\/v\d+$/.test(RAW_API_BASE) ? RAW_API_BASE : `${RAW_API_BASE}/api/v1`;
 
 export class ApiError extends Error {
   status: number;
