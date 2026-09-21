@@ -119,23 +119,32 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const { headers: _headers, ...rest } = init;
   const method = (init.method || 'GET').toUpperCase();
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
     ...(_headers as Record<string, string> | undefined),
   };
+  if (method !== 'GET') headers['Content-Type'] = headers['Content-Type'] ?? 'application/json';
   if (method !== 'GET' && !path.startsWith('/auth/')) {
     const csrf = readCsrfToken();
     if (csrf && !headers['X-CSRF-Token']) headers['X-CSRF-Token'] = csrf;
   }
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...rest,
-    credentials: 'include',
-    headers,
-  });
-  if (!response.ok) {
-    throw new ApiError(response.status, await response.text());
+  try {
+    const response = await fetch(`${API_BASE}${path}`, {
+      ...rest,
+      credentials: 'include',
+      headers,
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      throw new ApiError(response.status, body || `Request failed with status ${response.status}`);
+    }
+    if (response.status === 204) return undefined as T;
+    return response.json() as Promise<T>;
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    if (err instanceof TypeError && err.message === 'Failed to fetch') {
+      throw new ApiError(0, 'Unable to connect to the server. Please check your network connection and try again.');
+    }
+    throw new ApiError(0, err instanceof Error ? err.message : 'A network error occurred');
   }
-  if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
 }
 
 async function requestWithBody<T>(path: string, body: unknown, init: RequestInit = {}): Promise<T> {
@@ -146,16 +155,25 @@ async function multipartRequest<T>(path: string, formData: FormData, csrfToken?:
   const headers: Record<string, string> = {};
   const csrf = csrfToken || readCsrfToken();
   if (csrf) headers['X-CSRF-Token'] = csrf;
-  const response = await fetch(`${API_BASE}${path}`, {
-    method: 'POST',
-    credentials: 'include',
-    headers,
-    body: formData,
-  });
-  if (!response.ok) {
-    throw new ApiError(response.status, await response.text());
+  try {
+    const response = await fetch(`${API_BASE}${path}`, {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body: formData,
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      throw new ApiError(response.status, body || `Upload failed with status ${response.status}`);
+    }
+    return response.json() as Promise<T>;
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    if (err instanceof TypeError && err.message === 'Failed to fetch') {
+      throw new ApiError(0, 'Unable to connect to the server. Please check your network connection and try again.');
+    }
+    throw new ApiError(0, err instanceof Error ? err.message : 'A network error occurred');
   }
-  return response.json() as Promise<T>;
 }
 
 export const api = {
@@ -164,45 +182,63 @@ export const api = {
   refresh: () => request('/auth/refresh', { method: 'POST' }),
   me: () => request<AuthUser>('/auth/me'),
   csrf: () => request<{ csrf_token: string }>('/auth/csrf', { method: 'POST' }),
+  forgotPassword: (email: string) => requestWithBody<{ message: string }>('/auth/forgot-password', { email }, { method: 'POST' }),
+  resetPassword: (token: string, newPassword: string) => requestWithBody<{ message: string }>('/auth/reset-password', { token, new_password: newPassword }, { method: 'POST' }),
   facultyDashboard: () => request<FacultyDashboardResponse>('/faculty/dashboard'),
-  facultyRecords: (params = '') => request<FacultyRecordsResponse>(`/faculty/my-records${params}`),
+  facultyRecords: (params = '', signal?: AbortSignal) => request<FacultyRecordsResponse>(`/faculty/my-records${params}`, { signal }),
   facultyRecordStatus: (recordId: string) => request<RecordStatusResponse>(`/faculty/${recordId}/status`),
   facultyRecordReview: (recordId: string, corrections: Record<string, unknown>) => requestWithBody(`/faculty/${recordId}/review`, { corrections }, { method: 'POST' }),
+  recordFileUrl: (recordId: string, fileId?: string) => `${API_BASE}/ip-records/${recordId}/file${fileId ? `?file_id=${encodeURIComponent(fileId)}` : ''}`,
+  downloadRecordFile: async (recordId: string, fileId: string, filename: string) => {
+    const response = await fetch(`${API_BASE}/ip-records/${recordId}/file?file_id=${encodeURIComponent(fileId)}`, { credentials: 'include' });
+    if (!response.ok) throw new ApiError(response.status, await response.text());
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  },
   upload: async (file: File, csrfToken?: string) => {
     const form = new FormData();
     form.append('file', file);
     return multipartRequest<Record<string, unknown>>('/uploads/', form, csrfToken);
   },
   facultyProfile: () => request<FacultyProfileResponse>('/faculty/profile'),
-  facultyHistory: (params = '') => request<FacultyHistoryResponse>(`/faculty/history${params}`),
+  facultyHistory: (params = '', signal?: AbortSignal) => request<FacultyHistoryResponse>(`/faculty/history${params}`, { signal }),
   associations: () => request<AssociationListResponse>('/associations/'),
   associationsPending: () => request<{ requests: AssociationRow[]; count: number }>('/associations/pending'),
   sendAssociation: (recipientFacultyId: string, body: { record_id: string; reason?: string; message?: string }) => requestWithBody(`/associations/?recipient_faculty_id=${encodeURIComponent(recipientFacultyId)}`, body, { method: 'POST' }),
   respondAssociation: (requestId: string, action: AssociationAction, reason?: string) => requestWithBody(`/associations/${requestId}/respond?action=${action}`, { reason }, { method: 'POST' }),
   clarifyAssociation: (requestId: string, message: string) => requestWithBody(`/associations/${requestId}/clarify`, { message }, { method: 'POST' }),
   cancelAssociation: (requestId: string) => request(`/associations/${requestId}/cancel`, { method: 'POST' }),
-  notifications: (params = '') => request<NotificationListResponse>(`/notifications/${params}`),
-  notificationsUnreadCount: () => request<{ unread_count: number }>('/notifications/unread-count'),
+  notifications: (params = '', signal?: AbortSignal) => request<NotificationListResponse>(`/notifications/${params}`, { signal }),
+  notificationsUnreadCount: (signal?: AbortSignal) => request<{ unread_count: number }>('/notifications/unread-count', { signal }),
   markNotificationRead: (id: string) => request(`/notifications/${id}/read`, { method: 'POST' }),
   markAllNotificationsRead: () => request<{ marked_read: number }>('/notifications/read-all', { method: 'POST' }),
   deleteNotification: (id: string) => request(`/notifications/${id}`, { method: 'DELETE' }),
   adminDashboard: () => request<AdminDashboardResponse>('/admin/dashboard'),
-  adminFaculty: (params = '') => request<{ faculty: Array<Record<string, unknown>>; total: number; page: number; per_page: number }>(`/admin/faculty${params}`),
+  adminFaculty: (params = '', signal?: AbortSignal) => request<{ faculty: Array<Record<string, unknown>>; total: number; page: number; per_page: number }>(`/admin/faculty${params}`, { signal }),
   adminFacultyDetail: (id: string) => request<Record<string, unknown>>(`/admin/faculty/${id}`),
-  adminCreateFaculty: (body: Record<string, unknown>) => requestWithBody<{ id: string }>('/admin/faculty', body, { method: 'POST' }),
+  adminCreateFaculty: (body: Record<string, unknown>) => requestWithBody<{ id: string; email: string; faculty_id: string; message: string; temporary_password?: string; temporary_password_generated?: boolean }>('/admin/faculty', body, { method: 'POST' }),
   adminUpdateFaculty: (id: string, body: Record<string, unknown>) => requestWithBody(`/admin/faculty/${id}`, body, { method: 'PATCH' }),
   adminActivateFaculty: (id: string) => request(`/admin/faculty/${id}/activate`, { method: 'POST' }),
   adminDeactivateFaculty: (id: string) => request(`/admin/faculty/${id}/deactivate`, { method: 'POST' }),
   adminDepartments: () => request<{ departments: Array<Record<string, unknown>>; total: number }>('/admin/departments?per_page=100'),
   adminDesignations: () => request<{ designations: Array<Record<string, unknown>>; total: number }>('/admin/designations?per_page=100'),
-  adminRecords: (params = '') => request<{ records: Array<Record<string, unknown>>; total: number; page: number; per_page: number }>(`/admin/ip-records${params}`),
-  adminMasterRecords: (params = '') => request(`/admin/master-ip-records${params}`),
+  adminRecords: (params = '', signal?: AbortSignal) => request<{ records: Array<Record<string, unknown>>; total: number; page: number; per_page: number }>(`/admin/ip-records${params}`, { signal }),
+  adminMasterRecords: (params = '', signal?: AbortSignal) => request(`/admin/master-ip-records${params}`, { signal }),
   adminRecordDetail: (recordId: string) => request<AdminIpRecord>(`/admin/ip-records/${recordId}`),
+  adminUpdateRecord: (recordId: string, body: Record<string, unknown>) => requestWithBody(`/admin/ip-records/${recordId}`, body, { method: 'PATCH' }),
+  adminGrantPatent: (recordId: string) => requestWithBody(`/admin/ip-records/${recordId}/grant`, {}, { method: 'POST' }),
   adminVerifications: (params = '') => request<{ verifications: Array<Record<string, unknown>>; total: number; page: number; per_page: number }>(`/admin/verifications${params}`),
-  adminAuditLogs: (params = '') => request<AuditLogResponse>(`/audit/${params}`),
+  adminAuditLogs: (params = '', signal?: AbortSignal) => request<AuditLogResponse>(`/audit/${params}`, { signal }),
   adminAuditStats: () => request<Record<string, number>>('/audit/stats'),
   adminSettings: () => request<AdminSettingsResponse>('/admin/settings'),
-  search: (params = '') => request<SearchResponse>(`/search/${params}`),
+  search: (params = '', signal?: AbortSignal) => request<SearchResponse>(`/search/${params}`, { signal }),
   searchSuggestions: (q: string) => request<{ suggestions: string[] }>(`/search/suggestions?q=${encodeURIComponent(q)}`),
   adminDuplicates: (params = '') => request<{ duplicates: Array<Record<string, unknown>>; total: number; page: number; per_page: number }>(`/admin/duplicates${params}`),
   adminConflicts: (params = '') => request<{ conflicts: Array<Record<string, unknown>>; total: number; page: number; per_page: number }>(`/admin/conflicts${params}`),
@@ -211,12 +247,12 @@ export const api = {
   adminResolveDuplicate: (caseId: string, keepRecordId: string, notes?: string, action: 'resolve' | 'dismiss' = 'resolve') => requestWithBody(`/admin/duplicates/${caseId}/resolve`, { action, kept_record_id: keepRecordId, notes }, { method: 'POST' }),
   adminResolveConflict: (conflictId: string, resolution: string, notes?: string) => requestWithBody(`/admin/conflicts/${conflictId}/resolve`, { action: 'resolve', resolution, notes }, { method: 'POST' }),
   hodDashboard: () => request<HodDashboardResponse>('/hod/dashboard'),
-  hodFaculty: (params = '') => request<{ faculty: Array<Record<string, unknown>>; count: number; department_id: string }>(`/hod/faculty${params}`),
-  hodDocuments: (params = '') => request<{ documents: Array<Record<string, unknown>>; total: number; page: number; per_page: number; total_pages: number }>(`/hod/documents${params}`),
+  hodFaculty: (params = '', signal?: AbortSignal) => request<{ faculty: Array<Record<string, unknown>>; count: number; department_id: string }>(`/hod/faculty${params}`, { signal }),
+  hodDocuments: (params = '', signal?: AbortSignal) => request<{ documents: Array<Record<string, unknown>>; total: number; page: number; per_page: number; total_pages: number }>(`/hod/documents${params}`, { signal }),
   hodDuplicates: () => request<{ duplicates: Array<Record<string, unknown>>; count: number }>('/hod/duplicates'),
   hodConflicts: () => request<{ conflicts: Array<Record<string, unknown>>; count: number }>('/hod/conflicts'),
   hodReports: () => request<Record<string, unknown>>('/hod/reports'),
-  hodAudit: (params = '') => request<{ audit_entries: Array<Record<string, unknown>>; total: number; page: number; per_page: number; total_pages: number }>(`/hod/audit${params}`),
+  hodAudit: (params = '', signal?: AbortSignal) => request<{ audit_entries: Array<Record<string, unknown>>; total: number; page: number; per_page: number; total_pages: number }>(`/hod/audit${params}`, { signal }),
   hodReminders: (body: { kind?: string }) => requestWithBody('/hod/reminders', body, { method: 'POST' }),
   resolveDuplicate: (caseId: string, keepRecordId: string, action: 'resolve' | 'dismiss' = 'resolve', notes?: string) =>
     requestWithBody(`/duplicates/${caseId}/resolve?keep_record_id=${encodeURIComponent(keepRecordId)}`, { action, notes }, { method: 'POST' }),
@@ -225,13 +261,17 @@ export const api = {
   excelImportPreview: (formData: FormData) => multipartRequest<ExcelPreviewResponse>('/admin/excel-import/preview', formData),
   excelImportRun: (formData: FormData) => multipartRequest<ExcelImportResult>('/admin/excel-import/import', formData),
   analyticsOverview: () => request<AnalyticsOverview>('/analytics/overview'),
-  analyticsByFaculty: (params = '') => request<{ faculty: Array<Record<string, unknown>>; total: number; page: number; per_page: number }>(`/analytics/by-faculty${params}`),
-  analyticsByDepartment: (params = '') => request<{ departments: Array<Record<string, unknown>>; total: number; page: number; per_page: number }>(`/analytics/by-department${params}`),
+  analyticsByFaculty: (params = '', signal?: AbortSignal) => request<{ faculty: Array<Record<string, unknown>>; total: number; page: number; per_page: number }>(`/analytics/by-faculty${params}`, { signal }),
+  analyticsByDepartment: (params = '', signal?: AbortSignal) => request<{ departments: Array<Record<string, unknown>>; total: number; page: number; per_page: number }>(`/analytics/by-department${params}`, { signal }),
   analyticsTrends: (params = '') => request<{ trends: Array<{ date: string; value: number }> }>(`/analytics/trends${params}`),
-  createExport: (format = 'csv', filters?: Record<string, unknown>) =>
-    requestWithBody<{ job_id: string; format: string; status: string; created_at: string }>(`/exports/?format=${format}`, filters ?? {}, { method: 'POST' }),
+  createExport: (format = 'csv', filters?: Record<string, unknown>, selectedFields?: string[]) =>
+    requestWithBody<{ job_id: string; format: string; status: string; created_at: string }>(`/exports/?format=${format}`, { filters: filters ?? {}, selected_fields: selectedFields ?? null }, { method: 'POST' }),
   exportStatus: (jobId: string) => request<Record<string, unknown>>(`/exports/${jobId}`),
   exportDownloadUrl: (jobId: string) => `${API_BASE}/exports/${jobId}/download`,
+  institutionalStatus: (recordId: string) => request<{ record_id: string; official_verification_status: string; verification_status: string; workflow_state: string; final_verification: Record<string, unknown> | null; institutional: Record<string, unknown> | null; history: Array<Record<string, unknown>> }>(`/verification/institutional/${recordId}`),
+  institutionalVerify: (recordId: string, body: { decision: 'verify' | 'reject' | 'clarification'; remarks?: string; evidence_ref?: string }) => requestWithBody<{ record_id: string; decision: string; institutional_status: string; official_verification_status: string; final_verification_status: string; workflow_state: string; missing_conditions: string[]; attempt_id: string }>(`/verification/institutional/${recordId}`, body, { method: 'POST' }),
+  pendingAssociationsReport: (params = '', signal?: AbortSignal) => request<{ associations: Array<Record<string, unknown>>; total: number; pending_count: number; by_status: Record<string, number>; page: number; per_page: number }>(`/admin/reports/pending-associations${params}`, { signal }),
+  adminUpdateSettings: (body: Record<string, unknown>) => requestWithBody<{ max_upload_mb: number; message: string }>('/admin/settings', body, { method: 'PATCH' }),
 };
 
 export type ExcelPreviewRow = { row_num: number; data: Record<string, string>; errors: string[]; unknown_faculty: boolean };

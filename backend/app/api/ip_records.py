@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import structlog
 from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.core.config import upload_settings
 from app.core.database import get_async_session
 from app.core.exceptions import NotFoundError, PortalError
 from app.core.logging import log_audit
@@ -115,6 +119,86 @@ async def get_ip_record(
         raise PortalError(message="Not authorized", error_code="AUTHORIZATION_ERROR", status_code=403)
 
     return _record_to_dict(record)
+
+
+def _resolve_requested_file(files: list, file_id: str | None) -> IpFile | None:
+    for f in files:
+        if not file_id or f.id == file_id:
+            return f
+    return None
+
+
+@router.get("/{record_id}/file", status_code=status.HTTP_200_OK)
+async def download_ip_record_file(
+    record_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+    file_id: str | None = Query(None, description="specific stored file; defaults to the first file on the record"),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Download the raw stored file for an IP record (AA1, blueprint §14).
+
+    Authorization (IDOR-safe):
+    - super_admin: any record
+    - hod_admin: only records from the HOD's own department
+    - faculty: only records uploaded by the requesting faculty
+
+    The response filename is the original sanitized name; content is served
+    from the private storage root the uploader's key identifies.
+    """
+    user_role = current_user.get("role", "")
+    user_id = current_user.get("id")
+
+    record = (await db.execute(select(IpRecord).where(IpRecord.id == record_id))).scalar_one_or_none()
+    if not record:
+        raise NotFoundError("IP record", record_id)
+
+    from app.models.base import IpFile
+
+    if user_role == "super_admin":
+        pass
+    elif user_role == "hod_admin":
+        hod_dept = current_user.get("department_id")
+        if hod_dept and record.department_id and str(hod_dept) == str(record.department_id):
+            pass
+        else:
+            raise PortalError(message="Not authorized", error_code="AUTHORIZATION_ERROR", status_code=403)
+    elif record.uploader_id == user_id:
+        pass
+    else:
+        raise PortalError(message="Not authorized", error_code="AUTHORIZATION_ERROR", status_code=403)
+
+    files_result = await db.execute(
+        select(IpFile).where(IpFile.ip_record_id == record_id).order_by(IpFile.created_at)
+    )
+    files = files_result.scalars().all()
+    if not files:
+        raise NotFoundError("IP record file", record_id)
+
+    selected = _resolve_requested_file(files, file_id)
+    if not selected:
+        raise NotFoundError("IP record file", file_id or record_id)
+
+    storage_root = Path(upload_settings.local_storage_root)
+    file_path = (storage_root / selected.storage_key).resolve()
+    if not str(file_path).startswith(str(storage_root.resolve())):
+        raise PortalError(message="Invalid storage path", error_code="AUTHORIZATION_ERROR", status_code=403)
+    if not file_path.is_file():
+        raise NotFoundError("Stored file", selected.storage_key)
+
+    log_audit(
+        actor=user_id,
+        action="IP_RECORD_FILE_DOWNLOADED",
+        target_type="ip_record",
+        target_id=record_id,
+        status="success",
+        after={"filename": selected.original_filename, "file_size_bytes": selected.file_size_bytes},
+    )
+    return FileResponse(
+        path=str(file_path),
+        media_type=selected.mime_type or "application/octet-stream",
+        filename=selected.original_filename,
+    )
 
 
 @router.patch("/{record_id}", status_code=status.HTTP_200_OK)

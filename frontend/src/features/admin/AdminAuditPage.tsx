@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { api, type AuditLogRow } from '../../api/client';
 import {
-  SectionCard, StatCard, StatusBadge, LoadingBlock, ErrorBlock, EmptyState,
+  SectionCard, StatCard, StatusBadge, ErrorBlock, EmptyState,
   Toolbar, TableWrap, Pagination, Modal, formatDateTime, display,
 } from '../../components/ui';
+import { useDebounce } from '../../hooks/useDebounce';
 
 const ACTION_OPTIONS = [
   '', 'UPLOAD', 'RECORD_REVIEWED', 'DUPLICATE_DETECTED', 'DUPLICATE_RESOLVED',
@@ -23,7 +24,9 @@ export function AdminAuditPage() {
   const [action, setAction] = useState('');
   const [entityType, setEntityType] = useState('');
   const [actorId, setActorId] = useState('');
+  const debouncedActorId = useDebounce(actorId, 400);
   const [entityId, setEntityId] = useState('');
+  const debouncedEntityId = useDebounce(entityId, 400);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [detail, setDetail] = useState<AuditLogRow | null>(null);
@@ -32,21 +35,21 @@ export function AdminAuditPage() {
     const q = new URLSearchParams({ page: String(page), per_page: '25' });
     if (action) q.set('action', action);
     if (entityType) q.set('entity_type', entityType);
-    if (actorId.trim()) q.set('actor_id', actorId.trim());
-    if (entityId.trim()) q.set('entity_id', entityId.trim());
+    if (debouncedActorId.trim()) q.set('actor_id', debouncedActorId.trim());
+    if (debouncedEntityId.trim()) q.set('entity_id', debouncedEntityId.trim());
     if (startDate) q.set('start_date', startDate);
     if (endDate) q.set('end_date', endDate);
     return `?${q.toString()}`;
-  }, [page, action, entityType, actorId, entityId, startDate, endDate]);
+  }, [page, action, entityType, debouncedActorId, debouncedEntityId, startDate, endDate]);
 
-  const list = useQuery({ queryKey: ['admin-audit', params], queryFn: () => api.adminAuditLogs(params) });
+  const list = useQuery({ queryKey: ['admin-audit', params], queryFn: ({ signal }) => api.adminAuditLogs(params, signal), placeholderData: keepPreviousData });
   const stats = useQuery({ queryKey: ['admin-audit-stats'], queryFn: api.adminAuditStats });
-
-  if (list.isLoading) return <LoadingBlock label="Loading audit trail…" />;
-  if (list.error) return <ErrorBlock error={list.error} />;
 
   const rows = list.data?.audit_logs ?? [];
   const totalPages = list.data ? Math.max(1, Math.ceil(list.data.total / list.data.per_page)) : 1;
+
+  if (list.isLoading && !list.data) return <div className="loading-inline" style={{ padding: '24px 0' }}><span className="spinner" /><span>Loading audit trail…</span></div>;
+  if (list.error && !list.data) return <ErrorBlock error={list.error} />;
 
   const reset = () => { setAction(''); setEntityType(''); setActorId(''); setEntityId(''); setStartDate(''); setEndDate(''); setPage(1); };
 
@@ -79,10 +82,19 @@ export function AdminAuditPage() {
           <input className="toolbar-input" type="date" value={endDate} onChange={(e) => { setEndDate(e.target.value); setPage(1); }} aria-label="End date" />
         </Toolbar>
 
-        {rows.length === 0 ? (
+        {list.error && list.data ? (
+          <div className="alert alert-error" role="alert" style={{ marginBottom: 12 }}>
+            Refresh failed: {list.error instanceof Error ? list.error.message : String(list.error)}{' '}
+            <button className="btn btn-sm btn-secondary" onClick={() => void list.refetch()} disabled={list.isFetching}>Retry</button>
+          </div>
+        ) : null}
+
+        {rows.length === 0 && !list.isFetching ? (
           <EmptyState message="No audit events match the current filters." />
         ) : (
-          <TableWrap>
+          <div className={list.isFetching && list.data ? 'table-fetching' : ''}>
+            {list.isFetching && list.data ? <div className="table-fetching-indicator"><span className="spinner" /> Updating…</div> : null}
+            <TableWrap>
             <table className="data-table">
               <thead>
                 <tr><th>Timestamp</th><th>Actor</th><th>Role</th><th>Department</th><th>Action</th><th>Entity</th><th>Target</th><th></th></tr>
@@ -103,6 +115,7 @@ export function AdminAuditPage() {
               </tbody>
             </table>
           </TableWrap>
+          </div>
         )}
         <Pagination page={page} totalPages={totalPages} onChange={setPage} disabled={list.isFetching} />
       </SectionCard>

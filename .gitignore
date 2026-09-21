@@ -34,6 +34,7 @@ node_modules/
 /frontend/test-results/
 /frontend/playwright-report/
 /frontend/tsconfig.tsbuildinfo
+/openapi.json
 
 # Local editor / tooling scaffolding (not part of the project)
 .claude/
@@ -47,3 +48,20 @@ Thumbs.db
 # Project specific
 storage/
 /backend/storage/
+
+# Local session/auth artifacts (never commit)
+/backend/login.json
+/backend/auth-cookies.txt
+/backend/cookies.txt
+/cookies.txt
+
+# One-off DB diagnostic / reset helper scripts (local machine only)
+/backend/reset_e2e.py
+/backend/setup_e2e_users.py
+/backend/fix_e2e_dept.py
+/backend/migrate_add_is_archived.py
+/backend/check_db.py
+/backend/inspect_records.py
+/backend/verify_p0_final.py
+/backend/setup_contributor.py
+/fix_association.py

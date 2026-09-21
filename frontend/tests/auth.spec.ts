@@ -53,14 +53,18 @@ test.describe('Authentication', () => {
 
   test('valid admin login redirects to admin dashboard', async ({ page }) => {
     await loginViaUi(page, USERS.admin.email, USERS.admin.password);
-    await expect(page).toHaveURL(/\/faculty\/dashboard/);
+    await expect(page).toHaveURL(/\/admin\/dashboard/);
     await expect(page.getByText(USERS.admin.fullName)).toBeVisible();
     // Admin sees the admin navigation link (role-based visibility).
-    await expect(page.getByRole('link', { name: 'Admin' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Review Queues' })).toBeVisible();
   });
+});
+
+test.describe('Authenticated session handling', () => {
+  test.use({ storageState: 'tests/.auth/faculty.json' });
 
   test('JWT is not exposed in localStorage/sessionStorage after login', async ({ page }) => {
-    await loginViaUi(page, USERS.facultyA.email, USERS.facultyA.password);
+    await page.goto('/faculty/dashboard');
     await expect(page).toHaveURL(/\/faculty\/dashboard/);
     const storage = await page.evaluate(() => ({
       local: { ...localStorage },
@@ -73,16 +77,20 @@ test.describe('Authentication', () => {
   });
 
   test('faculty logout redirects to login and protects dashboard', async ({ page }) => {
-    await loginViaUi(page, USERS.facultyA.email, USERS.facultyA.password);
+    await page.goto('/faculty/dashboard');
     await expect(page).toHaveURL(/\/faculty\/dashboard/);
     await page.getByRole('button', { name: 'Logout' }).click();
     await expect(page).toHaveURL(/\/login/);
     await page.goto('/faculty/dashboard');
     await expect(page).toHaveURL(/\/login/);
   });
+});
+
+test.describe('Admin session handling', () => {
+  test.use({ storageState: 'tests/.auth/admin.json' });
 
   test('admin logout redirects to login', async ({ page }) => {
-    await loginViaUi(page, USERS.admin.email, USERS.admin.password);
+    await page.goto('/faculty/dashboard');
     await expect(page).toHaveURL(/\/faculty\/dashboard/);
     await page.getByRole('button', { name: 'Logout' }).click();
     await expect(page).toHaveURL(/\/login/);

@@ -35,3 +35,18 @@ backend/setup_test_user.py
 backend/run_server.py
 backend/update_enum.py
 
+# Destructive / diagnostic local scripts must never enter the image
+backend/reset_e2e.py
+backend/setup_e2e_users.py
+backend/fix_e2e_dept.py
+backend/migrate_add_is_archived.py
+backend/check_db.py
+backend/inspect_records.py
+backend/verify_p0_final.py
+backend/setup_contributor.py
+backend/login.json
+backend/auth-cookies.txt
+backend/cookies.txt
+cookies.txt
+fix_association.py
+

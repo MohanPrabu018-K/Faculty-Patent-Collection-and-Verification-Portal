@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any
 
 import structlog
+from app.core.database import get_session
 from app.core.logging import log_audit
+from app.models.base import AssociationRequest, User
+from app.services.notifications import get_notification_service, NotificationType, NotificationPriority
 
 logger = structlog.get_logger()
+
+# Association reminder/expiry configuration
+DEFAULT_ASSOCIATION_EXPIRY_DAYS = 14
+REMINDER_BEFORE_EXPIRY_DAYS = 3
 
 
 # --- Data Classes ---
@@ -363,19 +370,310 @@ class AssociationService:
         }
     
     async def _notify_recipient(self, request: AssociationRequest, event: str = "created"):
-        """Send notification to recipient (placeholder)."""
-        self.logger.info("notification_sent", 
-                        notification_event=event, 
-                        recipient=request.recipient_id,
-                        request_id=request.id)
-        # In production, integrate with notification service
+        """Send notification to recipient."""
+        try:
+            service = get_notification_service()
+            # Use target_faculty_id for SQLAlchemy model, recipient_id for dataclass
+            recipient_id = getattr(request, 'target_faculty_id', None) or getattr(request, 'recipient_id', None)
+            if not recipient_id:
+                return
+            
+            if event == "created":
+                await service.create_notification(
+                    user_id=recipient_id,
+                    notification_type=NotificationType.ASSOCIATION_REQUEST,
+                    title="Association Request Received",
+                    message=f"You have received a new association request for an IP record. Please review and respond.",
+                    priority=NotificationPriority.HIGH,
+                    related_entity_type="association_request",
+                    related_entity_id=request.id,
+                    action_url=f"/faculty/associations",
+                    action_label="Review Request",
+                )
+            elif event == "cancelled":
+                await service.create_notification(
+                    user_id=recipient_id,
+                    notification_type=NotificationType.ASSOCIATION_REQUEST,
+                    title="Association Request Cancelled",
+                    message=f"The association request has been cancelled by the requester.",
+                    priority=NotificationPriority.MEDIUM,
+                    related_entity_type="association_request",
+                    related_entity_id=request.id,
+                )
+            elif event == "clarification_response":
+                await service.create_notification(
+                    user_id=recipient_id,
+                    notification_type=NotificationType.ASSOCIATION_CLARIFICATION,
+                    title="Clarification Provided",
+                    message=f"The requester has provided clarification on the association request.",
+                    priority=NotificationPriority.HIGH,
+                    related_entity_type="association_request",
+                    related_entity_id=request.id,
+                    action_url=f"/faculty/associations",
+                    action_label="Review Request",
+                )
+            elif event == "expired":
+                await service.create_notification(
+                    user_id=recipient_id,
+                    notification_type=NotificationType.ASSOCIATION_REQUEST,
+                    title="Association Request Expired",
+                    message=f"You did not respond to an association request for IP record {request.record_id} before it expired.",
+                    priority=NotificationPriority.MEDIUM,
+                    related_entity_type="association_request",
+                    related_entity_id=request.id,
+                    action_url=f"/faculty/associations",
+                    action_label="View Details",
+                    metadata={"expired": True, "missed_by_recipient": True},
+                )
+        except Exception as e:
+            recipient_id = getattr(request, 'target_faculty_id', None) or getattr(request, 'recipient_id', None)
+            self.logger.warning("notification_failed", recipient=recipient_id, request_id=request.id, error=str(e))
     
     async def _notify_requester(self, request: AssociationRequest, event: str = "responded"):
-        """Send notification to requester (placeholder)."""
-        self.logger.info("notification_sent",
-                        notification_event=event,
-                        requester=request.requester_id,
-                        request_id=request.id)
+        """Send notification to requester."""
+        try:
+            service = get_notification_service()
+            
+            if event == "approve":
+                await service.create_notification(
+                    user_id=request.requester_id,
+                    notification_type=NotificationType.ASSOCIATION_APPROVED,
+                    title="Association Request Approved",
+                    message=f"Your association request has been approved.",
+                    priority=NotificationPriority.HIGH,
+                    related_entity_type="association_request",
+                    related_entity_id=request.id,
+                    action_url=f"/faculty/associations",
+                    action_label="View Details",
+                )
+            elif event == "reject":
+                await service.create_notification(
+                    user_id=request.requester_id,
+                    notification_type=NotificationType.ASSOCIATION_REJECTED,
+                    title="Association Request Rejected",
+                    message=f"Your association request was rejected.",
+                    priority=NotificationPriority.HIGH,
+                    related_entity_type="association_request",
+                    related_entity_id=request.id,
+                )
+            elif event == "clarification":
+                await service.create_notification(
+                    user_id=request.requester_id,
+                    notification_type=NotificationType.ASSOCIATION_CLARIFICATION,
+                    title="Clarification Requested",
+                    message=f"The recipient has requested clarification on your association request.",
+                    priority=NotificationPriority.HIGH,
+                    related_entity_type="association_request",
+                    related_entity_id=request.id,
+                    action_url=f"/faculty/associations",
+                    action_label="Provide Clarification",
+                )
+            elif event == "not_me":
+                await service.create_notification(
+                    user_id=request.requester_id,
+                    notification_type=NotificationType.ASSOCIATION_NOT_ME,
+                    title="Association Marked 'Not Me'",
+                    message=f"The recipient indicated this association is not for them.",
+                    priority=NotificationPriority.MEDIUM,
+                    related_entity_type="association_request",
+                    related_entity_id=request.id,
+                )
+            elif event == "expired":
+                await service.create_notification(
+                    user_id=request.requester_id,
+                    notification_type=NotificationType.ASSOCIATION_REQUEST,
+                    title="Association Request Expired",
+                    message=f"Your association request has expired without a response.",
+                    priority=NotificationPriority.MEDIUM,
+                    related_entity_type="association_request",
+                    related_entity_id=request.id,
+                    action_url=f"/faculty/associations",
+                    action_label="View Details",
+                    metadata={"expired": True},
+                )
+        except Exception as e:
+            self.logger.warning("notification_failed", requester=request.requester_id, request_id=request.id, error=str(e))
+
+    async def check_and_send_reminders(self) -> int:
+        """Check for pending association requests that need reminders.
+
+        Sends reminders for requests that are approaching expiry.
+        Returns the number of reminders sent.
+        """
+        from app.core.database import get_session
+        from sqlalchemy import select
+        from app.models.base import AssociationRequest
+
+        session = get_session()
+        try:
+            # Find pending requests that haven't had a reminder sent
+            # and are within the reminder window
+            reminder_cutoff = datetime.now(UTC) + timedelta(days=REMINDER_BEFORE_EXPIRY_DAYS)
+
+            pending_requests = session.execute(
+                select(AssociationRequest).where(
+                    AssociationRequest.status == "PENDING",
+                    AssociationRequest.expires_at.isnot(None),
+                    AssociationRequest.expires_at <= reminder_cutoff,
+                    AssociationRequest.reminder_sent_at.is_(None),
+                )
+            ).scalars().all()
+
+            reminders_sent = 0
+            for request in pending_requests:
+                try:
+                    await self._send_reminder(request)
+                    request.reminder_sent_at = datetime.now(UTC)
+                    session.add(request)
+                    reminders_sent += 1
+                except Exception as e:
+                    self.logger.warning("reminder_failed", 
+                                      request_id=request.id, 
+                                      error=str(e))
+
+            if reminders_sent > 0:
+                session.commit()
+                self.logger.info("reminders_sent", count=reminders_sent)
+
+            return reminders_sent
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    async def check_and_expire_requests(self) -> int:
+        """Check for and expire overdue association requests.
+
+        Returns the number of requests expired.
+        """
+        from app.core.database import get_session
+        from sqlalchemy import select
+        from app.models.base import AssociationRequest
+
+        session = get_session()
+        try:
+            # Find pending requests that have passed their expiry date
+            now = datetime.now(UTC)
+
+            expired_requests = session.execute(
+                select(AssociationRequest).where(
+                    AssociationRequest.status == "PENDING",
+                    AssociationRequest.expires_at.isnot(None),
+                    AssociationRequest.expires_at < now,
+                )
+            ).scalars().all()
+
+            expired_count = 0
+            for request in expired_requests:
+                try:
+                    old_status = request.status
+                    request.status = "EXPIRED"
+                    request.updated_at = datetime.now(UTC)
+
+                    # Log audit
+                    from app.core.logging import log_audit
+                    log_audit(
+                        actor="system",
+                        action="ASSOCIATION_REQUEST_EXPIRED",
+                        target_type="association_request",
+                        target_id=request.id,
+                        status="expired",
+                        before={"status": old_status},
+                        after={"status": "EXPIRED"},
+                        extra={
+                            "record_id": request.record_id,
+                            "requester_id": request.requester_id,
+                            "recipient_id": request.target_faculty_id,
+                        },
+                    )
+
+                    # Notify requester
+                    await self._notify_requester_expired(request)
+
+                    # Notify recipient (they missed the deadline)
+                    await self._notify_recipient_expired(request)
+
+                    session.add(request)
+                    expired_count += 1
+                except Exception as e:
+                    self.logger.warning("expiry_failed",
+                                      request_id=request.id,
+                                      error=str(e))
+
+            if expired_count > 0:
+                session.commit()
+                self.logger.info("requests_expired", count=expired_count)
+
+            return expired_count
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    async def _send_reminder(self, request: "AssociationRequest"):
+        """Send a reminder notification for an expiring association request."""
+        service = get_notification_service()
+        # Use target_faculty_id for SQLAlchemy model, recipient_id for dataclass
+        recipient_id = getattr(request, 'target_faculty_id', None) or getattr(request, 'recipient_id', None)
+        if not recipient_id:
+            return
+        await service.create_notification(
+            user_id=recipient_id,
+            notification_type=NotificationType.ASSOCIATION_REQUEST,
+            title="Association Request Reminder",
+            message=f"Your association request for IP record {request.record_id} will expire in {REMINDER_BEFORE_EXPIRY_DAYS} days. Please review and respond.",
+            priority=NotificationPriority.HIGH,
+            related_entity_type="association_request",
+            related_entity_id=request.id,
+            action_url=f"/faculty/associations",
+            action_label="Review Request",
+            metadata={"reminder": True, "expires_at": request.expires_at.isoformat() if request.expires_at else None},
+        )
+
+    async def _notify_requester_expired(self, request: "AssociationRequest"):
+        """Notify requester that their request expired."""
+        try:
+            service = get_notification_service()
+            await service.create_notification(
+                user_id=request.requester_id,
+                notification_type=NotificationType.ASSOCIATION_REQUEST,
+                title="Association Request Expired",
+                message=f"Your association request for IP record {request.record_id} has expired without a response.",
+                priority=NotificationPriority.MEDIUM,
+                related_entity_type="association_request",
+                related_entity_id=request.id,
+                action_url=f"/faculty/associations",
+                action_label="View Details",
+                metadata={"expired": True},
+            )
+        except Exception as e:
+            self.logger.warning("notification_failed", requester=request.requester_id, request_id=request.id, error=str(e))
+
+    async def _notify_recipient_expired(self, request: "AssociationRequest"):
+        """Notify recipient that they missed an association request."""
+        try:
+            service = get_notification_service()
+            # Use target_faculty_id for SQLAlchemy model, recipient_id for dataclass
+            recipient_id = getattr(request, 'target_faculty_id', None) or getattr(request, 'recipient_id', None)
+            if not recipient_id:
+                return
+            await service.create_notification(
+                user_id=recipient_id,
+                notification_type=NotificationType.ASSOCIATION_REQUEST,
+                title="Association Request Expired",
+                message=f"You did not respond to an association request for IP record {request.record_id} before it expired.",
+                priority=NotificationPriority.MEDIUM,
+                related_entity_type="association_request",
+                related_entity_id=request.id,
+                action_url=f"/faculty/associations",
+                action_label="View Details",
+                metadata={"expired": True, "missed_by_recipient": True},
+            )
+        except Exception as e:
+            recipient_id = getattr(request, 'target_faculty_id', None) or getattr(request, 'recipient_id', None)
+            self.logger.warning("notification_failed", recipient=recipient_id, request_id=request.id, error=str(e))
 
 
 # --- Global Service ---

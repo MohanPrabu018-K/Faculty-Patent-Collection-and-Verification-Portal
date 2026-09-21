@@ -1,13 +1,10 @@
 import { test, expect } from '@playwright/test';
-import { USERS, loginViaUi } from './helpers';
 
 test.describe('Faculty pages', () => {
-  test.beforeEach(async ({ page }) => {
-    await loginViaUi(page, USERS.facultyA.email, USERS.facultyA.password);
-    await expect(page).toHaveURL(/\/faculty\/dashboard/);
-  });
+  test.use({ storageState: 'tests/.auth/faculty.json' });
 
   test('dashboard renders stats and navigation', async ({ page }) => {
+    await page.goto('/faculty/dashboard');
     await expect(page.getByText('Faculty submission overview')).toBeVisible();
     await expect(page.getByText('Total submissions')).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Recent submissions' })).toBeVisible();
@@ -38,7 +35,7 @@ test.describe('Faculty pages', () => {
 
   test('associations page loads with empty state or data', async ({ page }) => {
     await page.goto('/faculty/associations');
-    await expect(page.getByRole('heading', { name: 'Associations' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Association Requests' })).toBeVisible();
     // Either an empty state or association cards are rendered — no raw error.
     await expect(page.locator('body')).not.toContainText('ApiError');
   });

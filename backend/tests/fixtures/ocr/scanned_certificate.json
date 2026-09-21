@@ -1,0 +1,1 @@
+{"case":"scanned_certificate","preprocessing":["grayscale","autocontrast","threshold_otsu"],"source":"tesseract"}

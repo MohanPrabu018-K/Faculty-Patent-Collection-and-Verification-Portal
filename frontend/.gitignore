@@ -1,0 +1,14 @@
+tests/.auth/
+node_modules/
+dist/
+playwright-report/
+test-results/
+dev-server.log
+hardening-results/
+playwright-report-e2e/
+tests/hardening-screenshots/
+tests/*.png
+admin-output.txt
+test-output.txt
+vite.err
+playwright-hardening.tmp.ts

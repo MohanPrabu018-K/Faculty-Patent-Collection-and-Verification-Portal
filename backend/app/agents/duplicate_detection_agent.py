@@ -35,19 +35,12 @@ class DuplicateDetectionAgent:
             warnings: list[str] = []
             conflicts: list[dict[str, Any]] = []
             
-            # Get extracted fields (coerce list/dict provenance values to scalars)
-            extracted_data_input = input_data.context.get("extracted_data", {}) if input_data.context else {}
-
-            def _scalar(value):
-                if isinstance(value, list):
-                    value = value[0] if value else None
-                if isinstance(value, dict):
-                    value = value.get("value") or value.get("name") or value.get("text")
-                return value
-
-            patent_number = _scalar(extracted_data_input.get("patent_number"))
-            design_number = _scalar(extracted_data_input.get("design_number"))
-            inventors = extracted_data_input.get("inventors", []) or []
+            # Read canonical data from context (already scalar values)
+            canonical_data = input_data.context.get("canonical_data", {}) if input_data.context else {}
+            
+            patent_number = canonical_data.get("patent_number")
+            design_number = canonical_data.get("design_number")
+            inventors = canonical_data.get("inventors", []) or []
             
             # Compute the file fingerprint directly (never rely on context).
             file_hash = None
@@ -77,14 +70,24 @@ class DuplicateDetectionAgent:
             duplicate_checks: list[dict[str, Any]] = []
             existing_records = self._load_existing_records(patent_number, design_number)
             
+            # Get current upload's master_ip_id to exclude self-matches (re-uploads)
+            current_master_ip_id = canonical_data.get("master_ip_id")
+            
             if patent_number or design_number:
                 new_record = {
                     "patent_number": patent_number,
                     "design_number": design_number,
                     "inventors": inventors,
+                    "master_ip_id": current_master_ip_id,
                 }
                 dup_candidates = await dd_service.check_for_duplicates(new_record, existing_records, input_data.file_data)
-
+                
+                # Filter out self-matches (same master_ip_id = re-upload)
+                filtered_candidates = []
+                for c in dup_candidates:
+                    if c.record_id != current_master_ip_id:
+                        filtered_candidates.append(c)
+                
                 if patent_number:
                     duplicate_checks.append({
                         "type": "patent_number",
@@ -100,8 +103,8 @@ class DuplicateDetectionAgent:
                         "existing_case": None,
                     })
                 
-                if dup_candidates:
-                    best = dup_candidates[0]
+                if filtered_candidates:
+                    best = filtered_candidates[0]
                     conflicts.append({
                         "type": "duplicate_record",
                         "description": f"Possible duplicate detected for record {best.record_id}",
@@ -111,30 +114,21 @@ class DuplicateDetectionAgent:
                     })
                     warnings.append("Possible duplicate record detected - requires review before proceeding")
             
-            # File fingerprint was already computed above and included in
-            # existing_records comparison; record it as evidence only.
+            # File fingerprint comparison for re-upload detection
             if file_hash:
                 duplicate_checks.append({
                     "type": "file_fingerprint",
                     "is_duplicate": False,
                     "confidence": 0.0,
                     "existing_case": None,
+                    "fingerprint": file_hash,
                 })
             
             # Check inventor similarity if inventors available
             if inventors:
-                # Preserve the semantic inventor values, but never assume numeric items.
-                normalized_inventors = []
-                for inventor in inventors:
-                    if isinstance(inventor, dict):
-                        value = inventor.get("value") or inventor.get("name") or inventor.get("text")
-                        if value:
-                            normalized_inventors.append(value)
-                    elif inventor:
-                        normalized_inventors.append(str(inventor))
                 duplicate_checks.append({
                     "type": "inventor_combination",
-                    "inventors": normalized_inventors or inventors,
+                    "inventors": inventors,
                 })
             
             # Calculate overall confidence
@@ -247,6 +241,7 @@ class DuplicateDetectionAgent:
                     "filing_date": r.filing_date.isoformat() if r.filing_date else None,
                     "fingerprint": fingerprints.get(r.id),
                     "uploader_id": r.uploader_id,
+                    "master_ip_id": r.master_ip_id,
                 }
                 for r in records
             ]

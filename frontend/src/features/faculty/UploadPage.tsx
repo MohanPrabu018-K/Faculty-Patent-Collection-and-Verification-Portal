@@ -14,6 +14,15 @@ export function UploadPage() {
 
   const preview = useMemo(() => file ? { name: file.name, sizeKb: (file.size / 1024).toFixed(1), type: file.type || 'application/octet-stream' } : null, [file]);
 
+  const cancelFile = () => {
+    setFile(null);
+    setResult(null);
+    setError('');
+    if (inputRef.current) {
+      inputRef.current.value = '';
+    }
+  };
+
   const submit = async () => {
     if (!file) return;
     setLoading(true);
@@ -48,7 +57,14 @@ export function UploadPage() {
         <input ref={inputRef} aria-label="Choose file" type="file" accept=".pdf,.png,.jpg,.jpeg" onChange={(e) => setFile(e.target.files?.[0] || null)} />
         <div className="dropzone-copy"><strong>Drag and drop a PDF or image here</strong><span>Or use the file picker to select a certificate document.</span></div>
       </div>
-      {preview && <div className="section-card compact-card"><div><strong>{preview.name}</strong><div className="muted">{preview.sizeKb} KB ? {preview.type}</div></div></div>}
+      {preview && (
+        <div className="section-card compact-card">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div><strong>{preview.name}</strong><div className="muted">{preview.sizeKb} KB · {preview.type}</div></div>
+            <button className="btn btn-ghost btn-sm" onClick={cancelFile}>Cancel</button>
+          </div>
+        </div>
+      )}
       <div className="row">
         <button className="btn btn-primary" disabled={!file || loading} onClick={submit}>{loading ? 'Uploading...' : 'Submit upload'}</button>
         {result && <button className="btn btn-secondary" onClick={() => navigate(`/faculty/records/${result.ip_record_id as string}`)}>Open record</button>}

@@ -1,8 +1,8 @@
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { api, type HistoryEvent } from '../../api/client';
-import { SectionCard, LoadingBlock, ErrorBlock, EmptyState, Pagination, formatDateTime } from '../../components/ui';
+import { SectionCard, ErrorBlock, EmptyState, Pagination, formatDateTime } from '../../components/ui';
 
 const ACTION_LABELS: Record<string, string> = {
   UPLOAD: 'Document uploaded',
@@ -29,20 +29,27 @@ function label(action: string) {
 export function FacultyHistoryPage() {
   const [page, setPage] = useState(1);
   const params = `?page=${page}&per_page=25`;
-  const { data, isLoading, error, isFetching } = useQuery({
+  const { data, isLoading, error, isFetching, refetch } = useQuery({
     queryKey: ['faculty-history', params],
-    queryFn: () => api.facultyHistory(params),
+    queryFn: ({ signal }) => api.facultyHistory(params, signal),
+    placeholderData: keepPreviousData,
   });
-
-  if (isLoading) return <LoadingBlock label="Loading history…" />;
-  if (error) return <ErrorBlock error={error} />;
 
   const events = data?.events ?? [];
   const totalPages = data?.total_pages ?? 1;
 
+  if (isLoading && !data) return <div className="loading-inline" style={{ padding: '24px 0' }}><span className="spinner" /><span>Loading history…</span></div>;
+  if (error && !data) return <ErrorBlock error={error} />;
+
   return (
     <SectionCard title="Activity History" subtitle="Every recorded action on your account and submissions.">
-      {events.length === 0 ? (
+      {error && data ? (
+        <div className="alert alert-error" role="alert" style={{ marginBottom: 12 }}>
+          Refresh failed: {error instanceof Error ? error.message : String(error)}{' '}
+          <button className="btn btn-sm btn-secondary" onClick={() => void refetch()} disabled={isFetching}>Retry</button>
+        </div>
+      ) : null}
+      {events.length === 0 && !isFetching ? (
         <EmptyState message="No recorded activity yet." />
       ) : (
         <div className="timeline">

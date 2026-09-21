@@ -142,7 +142,7 @@ python -m alembic -c alembic.ini heads         # show latest revision
 python -m alembic -c alembic.ini history       # full history
 ```
 
-Current state of this repo: **`005 (head)` — schema up to date, no pending
+Current state of this repo: **`007 (head)` — schema up to date, no pending
 migrations.** On a brand-new database:
 
 ```bash

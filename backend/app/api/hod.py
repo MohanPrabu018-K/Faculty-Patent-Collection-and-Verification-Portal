@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query, Request, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_department_scope, require_hod_admin
@@ -35,23 +35,60 @@ def _ensure_department(user: dict) -> str:
 @router.get("/dashboard", status_code=status.HTTP_200_OK)
 async def dashboard(current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
     department_id = _ensure_department(current_user)
-    total_faculty = (await db.execute(select(func.count()).select_from(User).where(User.role == "faculty", User.department_id == department_id))).scalar_one()
-    total_documents = (await db.execute(select(func.count()).select_from(IpRecord).where(IpRecord.department_id == department_id))).scalar_one()
-    verified = (await db.execute(select(func.count()).select_from(IpRecord).where(IpRecord.department_id == department_id, IpRecord.verification_status == "VERIFIED"))).scalar_one()
-    pending = (await db.execute(select(func.count()).select_from(IpRecord).where(IpRecord.department_id == department_id, IpRecord.processing_status.in_(["PENDING", "QUEUED", "PROCESSING", "AWAITING_REVIEW"])))).scalar_one()
-    rejected = (await db.execute(select(func.count()).select_from(IpRecord).where(IpRecord.department_id == department_id, IpRecord.processing_status == "FAILED"))).scalar_one()
-    requires_approval = (await db.execute(select(func.count()).select_from(AssociationRequest).where(AssociationRequest.status.in_(["PENDING", "CLARIFICATION_REQUESTED"]), AssociationRequest.ip_record_id.in_(select(IpRecord.id).where(IpRecord.department_id == department_id))))).scalar_one()
-    conflicts = (await db.execute(select(func.count()).select_from(ConflictCase).where(ConflictCase.ip_record_id.in_(select(IpRecord.id).where(IpRecord.department_id == department_id))))).scalar_one()
-    duplicates = (await db.execute(select(func.count()).select_from(DuplicateCase).where(or_(DuplicateCase.ip_record_id_1.in_(select(IpRecord.id).where(IpRecord.department_id == department_id)), DuplicateCase.ip_record_id_2.in_(select(IpRecord.id).where(IpRecord.department_id == department_id)))))).scalar_one()
-    pending_associations = (await db.execute(select(func.count()).select_from(AssociationRequest).where(AssociationRequest.status == "PENDING", AssociationRequest.ip_record_id.in_(select(IpRecord.id).where(IpRecord.department_id == department_id))))).scalar_one()
+    record_ids_sub = select(IpRecord.id).where(IpRecord.department_id == department_id).subquery()
+
+    # Group 1: User counts — single query with filter
+    total_faculty = (await db.execute(
+        select(func.count()).select_from(User).where(User.role == "faculty", User.department_id == department_id)
+    )).scalar_one()
+
+    # Group 2: IpRecord counts — single query with filter() for multiple conditions
+    ip_row = (await db.execute(
+        select(
+            func.count().label("total"),
+            func.count().filter(IpRecord.verification_status == "VERIFIED").label("verified"),
+            func.count().filter(IpRecord.processing_status.in_(["PENDING", "QUEUED", "PROCESSING", "AWAITING_REVIEW"])).label("pending"),
+            func.count().filter(IpRecord.processing_status == "FAILED").label("rejected"),
+        ).where(IpRecord.department_id == department_id)
+    )).one()
+
+    # Group 3: Cross-table counts using IpRecord subquery — each needs its own
+    # table join so we keep them sequential (safe on same session).
+    requires_approval = (await db.execute(
+        select(func.count()).select_from(AssociationRequest).where(
+            AssociationRequest.status.in_(["PENDING", "CLARIFICATION_REQUESTED"]),
+            AssociationRequest.ip_record_id.in_(select(record_ids_sub.c.id)),
+        )
+    )).scalar_one()
+
+    conflicts = (await db.execute(
+        select(func.count()).select_from(ConflictCase).where(
+            ConflictCase.ip_record_id.in_(select(record_ids_sub.c.id))
+        )
+    )).scalar_one()
+
+    duplicates = (await db.execute(
+        select(func.count()).select_from(DuplicateCase).where(or_(
+            DuplicateCase.ip_record_id_1.in_(select(record_ids_sub.c.id)),
+            DuplicateCase.ip_record_id_2.in_(select(record_ids_sub.c.id)),
+        ))
+    )).scalar_one()
+
+    pending_associations = (await db.execute(
+        select(func.count()).select_from(AssociationRequest).where(
+            AssociationRequest.status == "PENDING",
+            AssociationRequest.ip_record_id.in_(select(record_ids_sub.c.id)),
+        )
+    )).scalar_one()
+
     return {
         "department_id": department_id,
         "kpis": {
             "total_faculty": total_faculty,
-            "total_documents": total_documents,
-            "verified": verified,
-            "pending": pending,
-            "rejected": rejected,
+            "total_documents": ip_row.total,
+            "verified": ip_row.verified,
+            "pending": ip_row.pending,
+            "rejected": ip_row.rejected,
             "requires_approval": requires_approval,
             "conflicts": conflicts,
             "duplicates": duplicates,
@@ -74,14 +111,34 @@ async def faculty(current_user: dict = Depends(get_current_user), search: str | 
         for d in (await db.execute(select(Designation))).scalars().all()
     }
 
+    # Single grouped query for all counts instead of N+1 per-faculty queries
+    user_ids = [u.id for u in rows]
+    counts_map: dict[str, dict] = {}
+    if user_ids:
+        base = (
+            select(
+                IpRecord.uploader_id,
+                func.count().label("total"),
+                func.count().filter(IpRecord.verification_status == "VERIFIED").label("verified"),
+                func.count().filter(IpRecord.processing_status.in_(["PENDING", "QUEUED", "PROCESSING", "AWAITING_REVIEW"])).label("pending"),
+                func.count().filter(IpRecord.processing_status == "FAILED").label("rejected"),
+                func.count().filter(IpRecord.ip_type == "PATENT").label("patents"),
+            )
+            .where(IpRecord.uploader_id.in_(user_ids))
+            .group_by(IpRecord.uploader_id)
+        )
+        for row in (await db.execute(base)).all():
+            counts_map[row.uploader_id] = {
+                "documents": row.total,
+                "verified": row.verified,
+                "pending": row.pending,
+                "rejected": row.rejected,
+                "patents": row.patents,
+            }
+
+    empty_counts = {"documents": 0, "patents": 0, "verified": 0, "pending": 0, "rejected": 0}
     out = []
     for u in rows:
-        base = select(func.count()).select_from(IpRecord).where(IpRecord.uploader_id == u.id)
-        total = (await db.execute(base)).scalar_one()
-        verified = (await db.execute(base.where(IpRecord.verification_status == "VERIFIED"))).scalar_one()
-        pending = (await db.execute(base.where(IpRecord.processing_status.in_(["PENDING", "QUEUED", "PROCESSING", "AWAITING_REVIEW"])))).scalar_one()
-        rejected = (await db.execute(base.where(IpRecord.processing_status == "FAILED"))).scalar_one()
-        patents = (await db.execute(base.where(IpRecord.ip_type == "PATENT"))).scalar_one()
         out.append({
             "id": u.id,
             "faculty_id": u.faculty_id,
@@ -91,7 +148,7 @@ async def faculty(current_user: dict = Depends(get_current_user), search: str | 
             "designation_id": u.designation_id,
             "designation_name": desig_map.get(u.designation_id),
             "is_active": u.is_active,
-            "counts": {"documents": total, "patents": patents, "verified": verified, "pending": pending, "rejected": rejected},
+            "counts": counts_map.get(u.id, empty_counts),
         })
     return {"faculty": out, "count": len(out), "department_id": department_id}
 
@@ -110,7 +167,11 @@ async def documents(
     query = select(IpRecord, User.full_name, User.faculty_id).join(User, User.id == IpRecord.uploader_id).where(IpRecord.department_id == department_id)
     count_query = select(func.count()).select_from(IpRecord).where(IpRecord.department_id == department_id)
     if status_filter:
-        cond = or_(IpRecord.processing_status == status_filter, IpRecord.verification_status == status_filter, IpRecord.workflow_state == status_filter)
+        cond = or_(
+            cast(IpRecord.processing_status, String) == status_filter,
+            cast(IpRecord.verification_status, String) == status_filter,
+            IpRecord.workflow_state == status_filter,
+        )
         query = query.where(cond)
         count_query = count_query.where(cond)
     if ip_type:
@@ -144,6 +205,8 @@ async def documents(
                 "ip_type": r.ip_type,
                 "patent_number": r.patent_number,
                 "design_number": r.design_number,
+                "application_number": r.application_number,
+                "grant_date": r.grant_date.isoformat() if r.grant_date else None,
                 "uploader_id": r.uploader_id,
                 "faculty_name": fname,
                 "faculty_id": fid,

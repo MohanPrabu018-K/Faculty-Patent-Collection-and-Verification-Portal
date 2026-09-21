@@ -87,7 +87,7 @@ class BaseSettingsBase(BaseSettings):
 
 class AppSettings(BaseSettingsBase):
     app_name: str = Field(default="Faculty Patent Collection Portal", alias="APP_NAME")
-    secret_key: str = Field(default="change-me-in-production", alias="SECRET_KEY")
+    secret_key: str = Field(default="", alias="SECRET_KEY")
     jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
     jwt_access_token_minutes: int = Field(default=30, alias="JWT_ACCESS_TOKEN_MINUTES")
     jwt_refresh_token_days: int = Field(default=7, alias="JWT_REFRESH_TOKEN_DAYS")
@@ -132,6 +132,25 @@ class AppSettings(BaseSettingsBase):
         return normalized
 
     @model_validator(mode="after")
+    def _cookie_samesite_browser_guard(self):
+        """Coerce an unusable SameSite=None-without-Secure combo to Lax.
+
+        Browsers reject `Set-Cookie: ...; SameSite=None` without the Secure
+        flag, so the access_token cookie would be silently dropped on plain
+        HTTP localhost and every subsequent browser request (e.g. /auth/me)
+        would 401 even though login returned 200. Production keeps the
+        fail-fast guard in `_production_guards`; this only repairs local
+        development / test misconfiguration.
+        """
+        if (
+            self.cookie_samesite == "none"
+            and not self.cookie_secure
+            and (self.app_env or "").strip().lower() not in _PROD_ENVS
+        ):
+            self.cookie_samesite = "lax"
+        return self
+
+    @model_validator(mode="after")
     def _production_guards(self):
         """Fail fast when APP_ENV is a production environment but the security
         configuration still holds development defaults. Never triggers for
@@ -159,7 +178,7 @@ class AppSettings(BaseSettingsBase):
 
 
 class DatabaseSettings(BaseSettingsBase):
-    database_url: str = Field(default="postgresql+asyncpg://faculty_user:change-me@localhost:5432/faculty_portal", alias="DATABASE_URL")
+    database_url: str = Field(default="", alias="DATABASE_URL")
 
     @field_validator("database_url")
     @classmethod
@@ -285,6 +304,37 @@ class RateLimitSettings(BaseSettingsBase):
         return value
 
 
+class SmtpSettings(BaseSettingsBase):
+    """SMTP configuration for transactional email (password reset, etc.)."""
+    smtp_enabled: bool = Field(default=False, alias="SMTP_ENABLED")
+    smtp_host: str = Field(default="", alias="SMTP_HOST")
+    smtp_port: int = Field(default=587, alias="SMTP_PORT")
+    smtp_username: str = Field(default="", alias="SMTP_USERNAME")
+    smtp_password: str = Field(default="", alias="SMTP_PASSWORD")
+    smtp_from_email: str = Field(default="noreply@faculty-portal.local", alias="SMTP_FROM_EMAIL")
+    smtp_from_name: str = Field(default="Faculty Patent Portal", alias="SMTP_FROM_NAME")
+    smtp_use_tls: bool = Field(default=True, alias="SMTP_USE_TLS")
+    smtp_timeout_seconds: int = Field(default=15, alias="SMTP_TIMEOUT_SECONDS")
+    reset_token_expiry_hours: int = Field(default=1, alias="RESET_TOKEN_EXPIRY_HOURS")
+    frontend_reset_url: str = Field(default="http://localhost:5173", alias="FRONTEND_RESET_URL")
+
+
+class SchedulerSettings(BaseSettingsBase):
+    """Scheduler configuration for background jobs."""
+    enabled: bool = Field(default=True, alias="SCHEDULER_ENABLED")
+    reminder_interval_hours: int = Field(default=24, alias="SCHEDULER_REMINDER_INTERVAL_HOURS")
+    expiry_check_interval_hours: int = Field(default=24, alias="SCHEDULER_EXPIRY_CHECK_INTERVAL_HOURS")
+    reminder_before_expiry_days: int = Field(default=3, alias="SCHEDULER_REMINDER_BEFORE_EXPIRY_DAYS")
+    default_expiry_days: int = Field(default=14, alias="SCHEDULER_DEFAULT_EXPIRY_DAYS")
+
+    @field_validator("reminder_interval_hours", "expiry_check_interval_hours", "reminder_before_expiry_days", "default_expiry_days")
+    @classmethod
+    def _validate_positive_ints(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("Scheduler settings must be positive integers")
+        return value
+
+
 app_settings = AppSettings()
 database_settings = DatabaseSettings()
 verification_settings = VerificationSettings()
@@ -292,6 +342,8 @@ ocr_space_settings = OcrSpaceSettings()
 local_ocr_settings = LocalOcrSettings()
 upload_settings = UploadSettings()
 rate_limit_settings = RateLimitSettings()
+smtp_settings = SmtpSettings()
+scheduler_settings = SchedulerSettings()
 
 
 def get_settings():
@@ -303,4 +355,5 @@ def get_settings():
         "local_ocr": local_ocr_settings,
         "upload": upload_settings,
         "rate_limit": rate_limit_settings,
+        "smtp": smtp_settings,
     }

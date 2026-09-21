@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError, api, type AssociationAction, type AssociationRow } from '../../api/client';
-import { SectionCard, StatusBadge, LoadingBlock, ErrorBlock, EmptyState, Modal, formatDateTime } from '../../components/ui';
+import { SectionCard, StatusBadge, ErrorBlock, EmptyState, Modal, formatDateTime } from '../../components/ui';
 import { useAuth } from '../../stores/auth';
 import { useToast } from '../../stores/toast';
 
@@ -58,7 +58,7 @@ export function AssociationsPage() {
 
   const busy = respond.isPending || clarify.isPending || cancel.isPending;
 
-  if (isLoading) return <LoadingBlock label="Loading associations…" />;
+  if (isLoading && !data) return <div className="loading-inline" style={{ padding: '24px 0' }}><span className="spinner" /><span>Loading associations…</span></div>;
   if (error) return <ErrorBlock error={error} />;
 
   const incomingPending = (data?.associations ?? []).filter((r) => r.recipient_id === user?.id && RESPONDABLE.has(r.status)).length;

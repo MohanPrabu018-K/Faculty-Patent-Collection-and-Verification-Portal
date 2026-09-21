@@ -59,6 +59,75 @@ def _safe_import(name: str):
         return None
 
 
+def _is_valid_url(value: str) -> bool:
+    """Check if payload is a plausible URL (http/https with netloc)."""
+    if not value or not isinstance(value, str):
+        return False
+    v = value.strip()
+    if len(v) < 8:
+        return False
+    if not v.lower().startswith(("http://", "https://")):
+        return False
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(v)
+        return bool(parsed.netloc and "." in parsed.netloc)
+    except Exception:
+        return False
+
+
+def _is_ip_india_url(value: str) -> bool:
+    """Heuristic IP-India URL recognition without rejecting legitimate non-IP-India QRs."""
+    if not _is_valid_url(value):
+        return False
+    try:
+        from urllib.parse import urlparse
+
+        host = urlparse(value).netloc.lower()
+        # Accept primary and proxy variants
+        return (
+            "ipindia.gov.in" in host
+            or "iprsearch" in host
+            or "inpass" in host
+            or "search.ipindia" in host
+        )
+    except Exception:
+        return False
+
+
+def _validate_qr_payload(payload: str) -> tuple[bool, str]:
+    """Validate a decoded QR payload, returning (is_valid, reason)."""
+    if payload is None:
+        return False, "null payload"
+    if not isinstance(payload, str):
+        payload = str(payload)
+    stripped = payload.strip()
+    if not stripped:
+        return False, "empty payload"
+    if len(stripped) < 3:
+        return False, "payload too short"
+    # Allow any non-empty payload; URL validation is advisory, not rejecting
+    return True, "ok"
+
+
+def _prepare_qr_variants(image) -> list[tuple[str, Any]]:
+    """Create deterministic variants for robust QR decoding (no paid deps)."""
+    variants: list[tuple[str, Any]] = [("original", image)]
+    try:
+        # Grayscale already handled via cv2 path; add rotated variants for practical deskew
+        variants.append(("rotated_90", image.rotate(90, expand=True)))
+        variants.append(("rotated_180", image.rotate(180, expand=True)))
+        variants.append(("rotated_270", image.rotate(270, expand=True)))
+        # Low-quality / small QR: 2x upscale via nearest/bilinear
+        w, h = image.size
+        if max(w, h) < 1200:
+            variants.append(("upscaled_2x", image.resize((w * 2, h * 2))))
+    except Exception:
+        pass
+    return variants
+
+
 def classify_document(text: str, filename: str) -> dict:
     """Deterministic keyword-based document classification (no AI/LLM)."""
     raw_text = text or ""
@@ -74,6 +143,11 @@ def classify_document(text: str, filename: str) -> dict:
         "design no",
         "design registration",
         "registered design",
+        "registration of design",
+        "design act",
+        "industrial design",
+        "ornamental",
+        "locarno",
     ]
     strong_patent_signals = [
         "patent",
@@ -81,16 +155,28 @@ def classify_document(text: str, filename: str) -> dict:
         "patent no",
         "application number",
         "grant date",
+        "date of grant",
         "inventor",
+        "patentee",
+        "claims",
+        "specification",
     ]
 
     design_score = sum(1 for kw in strong_design_signals if kw in text_lower) + (2 if design_number_match else 0)
     patent_score = sum(1 for kw in strong_patent_signals if kw in text_lower) + (2 if patent_number_match or application_number_match else 0)
 
-    if design_number_match and design_score >= patent_score:
+    if design_number_match:
         return {"ip_type": "DESIGN_REGISTRATION", "confidence": min(0.9 + design_score * 0.03, 0.99)}
-    if patent_number_match or application_number_match or patent_score > 0:
+    if patent_number_match or application_number_match:
         return {"ip_type": "PATENT", "confidence": min(0.9 + patent_score * 0.03, 0.99)}
+    if design_score > patent_score and design_score >= 2:
+        return {"ip_type": "DESIGN_REGISTRATION", "confidence": min(0.7 + design_score * 0.05, 0.95)}
+    if patent_score > design_score and patent_score >= 2:
+        return {"ip_type": "PATENT", "confidence": min(0.7 + patent_score * 0.05, 0.95)}
+    if patent_score > 0:
+        return {"ip_type": "PATENT", "confidence": min(0.6 + patent_score * 0.05, 0.85)}
+    if design_score > 0:
+        return {"ip_type": "DESIGN_REGISTRATION", "confidence": min(0.6 + design_score * 0.05, 0.85)}
     return {"ip_type": "UNKNOWN_OTHER", "confidence": 0.5}
 
 
@@ -439,6 +525,96 @@ def _ocr_with_ocrspace(image_bytes: bytes, page_number: int = 1) -> OCRPageResul
     )
 
 
+def _ocr_preprocess_variants(image_bytes: bytes) -> list[bytes]:
+    """Deterministic, free preprocessing variants for scanned-image OCR.
+
+    Embedded-text PDFs bypass this entirely (process_document fast path).
+    For true scans we try: original, grayscale+contrast, thresholded, upscaled.
+    All variants are closed deterministically; failures fall back to original.
+    """
+    variants: list[bytes] = [image_bytes]
+    try:
+        from PIL import Image, ImageEnhance, ImageOps
+        import io as _io
+
+        # Load once
+        try:
+            img = Image.open(_io.BytesIO(image_bytes))
+        except Exception:
+            return variants
+
+        # Grayscale + autocontrast + slight contrast boost
+        try:
+            gray = img.convert("L")
+            # Autocontrast normalizes brightness range
+            try:
+                gray = ImageOps.autocontrast(gray, cutoff=1)
+            except Exception:
+                pass
+            # Contrast enhance 1.4x
+            try:
+                enhancer = ImageEnhance.Contrast(gray)
+                gray = enhancer.enhance(1.4)
+            except Exception:
+                pass
+            # Convert back to RGB for engines that expect RGB
+            if gray.mode != "RGB":
+                gray_rgb = gray.convert("RGB")
+            else:
+                gray_rgb = gray
+            buf = _io.BytesIO()
+            gray_rgb.save(buf, format="PNG")
+            variants.append(buf.getvalue())
+        except Exception:
+            pass
+
+        # Thresholded variant via OpenCV Otsu (if available)
+        try:
+            cv2 = _safe_import("cv2")
+            if cv2 is not None:
+                import numpy as _np
+
+                # Use grayscale variant if we created it, else original
+                pil_for_thresh = gray if "gray" in locals() else img.convert("L")
+                arr = _np.array(pil_for_thresh)
+                # Otsu threshold
+                _, thresh = cv2.threshold(arr, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                # Back to PIL
+                thresh_pil = Image.fromarray(thresh)
+                # Ensure RGB
+                if thresh_pil.mode != "RGB":
+                    thresh_pil = thresh_pil.convert("RGB")
+                buf2 = _io.BytesIO()
+                thresh_pil.save(buf2, format="PNG")
+                variants.append(buf2.getvalue())
+        except Exception:
+            pass
+
+        # Upscaled 2x for small/low-res scans (deterministic, no interpolation artifacts for OCR)
+        try:
+            w, h = img.size
+            if max(w, h) < 1200:
+                up = img.resize((w * 2, h * 2), Image.LANCZOS if hasattr(Image, "LANCZOS") else Image.BICUBIC)
+                buf3 = _io.BytesIO()
+                # Preserve mode
+                up.save(buf3, format="PNG")
+                variants.append(buf3.getvalue())
+        except Exception:
+            pass
+
+        # Deduplicate by bytes length/content hash to avoid redundant OCR
+        seen = set()
+        deduped: list[bytes] = []
+        for v in variants:
+            h = hash(v)
+            if h not in seen:
+                seen.add(h)
+                deduped.append(v)
+        return deduped if deduped else [image_bytes]
+    except Exception:
+        return [image_bytes]
+
+
 def _ocr_image_bytes(image_bytes: bytes, page_number: int = 1) -> OCRPageResult:
     """OCR a single image with the local-first, ₹0-cost engine chain:
 
@@ -451,11 +627,16 @@ def _ocr_image_bytes(image_bytes: bytes, page_number: int = 1) -> OCRPageResult:
     explicitly enabled — it is never required for normal operation.
     """
     local_warnings: list[str] = []
-    for engine in (_ocr_with_paddle, _ocr_with_tesseract):
-        result = engine(image_bytes, page_number)
-        local_warnings.extend(result.warnings)
-        if result.text.strip():
-            return result
+    # Try deterministic preprocessing variants before falling back to external OCR.Space
+    variants = _ocr_preprocess_variants(image_bytes)
+    for idx, variant in enumerate(variants):
+        for engine in (_ocr_with_paddle, _ocr_with_tesseract):
+            result = engine(variant, page_number)
+            local_warnings.extend(result.warnings)
+            if result.text.strip():
+                if idx > 0:
+                    result.warnings = list(result.warnings) + [f"OCR succeeded on preprocessed variant {idx}"]
+                return result
 
     skip_reason: str | None = None
     try:
@@ -574,6 +755,7 @@ def decode_qr_payloads(file_bytes: bytes, filename: str | None = None) -> QRResu
     warnings: list[str] = []
     evidence: list[dict[str, Any]] = []
     payloads: list[str] = []
+    raw_payloads: list[str] = []  # includes empty/invalid for diagnostics
     cv2 = _safe_import("cv2")
     pyzbar = _safe_import("pyzbar.pyzbar")
     pil = _safe_import("PIL.Image")
@@ -604,11 +786,12 @@ def decode_qr_payloads(file_bytes: bytes, filename: str | None = None) -> QRResu
         try:
             image_sources.append(("original", pil.open(io.BytesIO(file_bytes))))
         except Exception as inner_exc:
-            return QRResult(success=False, qr_data=[], source="none", warnings=warnings + [f"Image decode failed: {inner_exc}"], evidence=[])
+            return QRResult(success=False, qr_data=[], source="unavailable", warnings=warnings + [f"Image decode failed: {inner_exc}"], evidence=[])
 
     if cv2 is not None:
         try:
             import numpy as np
+
             arr = np.frombuffer(file_bytes, dtype=np.uint8)
             decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             if decoded is not None:
@@ -617,30 +800,191 @@ def decode_qr_payloads(file_bytes: bytes, filename: str | None = None) -> QRResu
         except Exception as exc:
             warnings.append(f"OpenCV QR preprocessing skipped: {exc}")
 
+    if not image_sources:
+        return QRResult(success=False, qr_data=[], source="unavailable", warnings=["No image sources for QR decode"], evidence=[])
+
+    # Collect across all pages/variants without early exit — preserves multiple QRs
+    detected_source = "none"
     for label, candidate in image_sources:
-        try:
+        # Deterministic variants: original + rotated + upscaled (for low-quality)
+        variants = _prepare_qr_variants(candidate)
+        for vlabel, variant in variants:
+            full_label = f"{label}:{vlabel}" if vlabel != "original" else label
+            # pyzbar primary
             if pyzbar is not None:
-                decoded = pyzbar.decode(candidate)
-                for item in decoded:
-                    payload = item.data.decode("utf-8", errors="replace").strip()
-                    if payload and payload not in payloads:
-                        payloads.append(payload)
-                        evidence.append({"source": label, "type": item.type, "payload": payload})
-                if payloads:
-                    return QRResult(success=True, qr_data=payloads, source="pyzbar", warnings=warnings, evidence=evidence)
-        except Exception as exc:
-            warnings.append(f"QR decode skipped for {label}: {exc}")
+                try:
+                    decoded = pyzbar.decode(variant)
+                    for item in decoded:
+                        try:
+                            payload = item.data.decode("utf-8", errors="replace").strip()
+                        except Exception:
+                            payload = ""
+                        raw_payloads.append(payload)
+                        is_valid, _ = _validate_qr_payload(payload)
+                        # Track even empty for diagnostics
+                        if payload and payload not in payloads and is_valid:
+                            payloads.append(payload)
+                            evidence.append(
+                                {
+                                    "source": full_label,
+                                    "type": getattr(item, "type", "QRCODE"),
+                                    "payload": payload,
+                                    "is_valid": True,
+                                    "is_ip_india": _is_ip_india_url(payload),
+                                    "is_url": _is_valid_url(payload),
+                                }
+                            )
+                            if detected_source == "none":
+                                detected_source = "pyzbar"
+                        elif payload == "" and payload not in payloads:
+                            # empty payload — record as invalid but keep evidence
+                            evidence.append(
+                                {
+                                    "source": full_label,
+                                    "type": getattr(item, "type", "QRCODE"),
+                                    "payload": payload,
+                                    "is_valid": False,
+                                    "reason": "empty payload",
+                                }
+                            )
+                except Exception as exc:
+                    warnings.append(f"QR decode skipped for {full_label}: {exc}")
 
-        if cv2 is not None:
-            try:
-                detector = cv2.QRCodeDetector()
-                data, _, _ = detector.detectAndDecode(candidate)
-                if data and data not in payloads:
-                    payloads.append(data)
-                    evidence.append({"source": label, "type": "QRCodeDetector", "payload": data})
-                    return QRResult(success=True, qr_data=payloads, source="opencv", warnings=warnings, evidence=evidence)
-            except Exception as exc:
-                warnings.append(f"OpenCV QR detector failed for {label}: {exc}")
+            # OpenCV fallback per variant — requires numpy array, not PIL
+            if cv2 is not None:
+                try:
+                    import numpy as _np
 
-    return QRResult(success=False, qr_data=[], source="none", warnings=warnings or ["No QR code detected"], evidence=evidence)
+                    # Convert PIL Image → numpy (RGB → BGR for OpenCV)
+                    try:
+                        if hasattr(variant, "convert"):
+                            _pil_for_cv = variant.convert("RGB")
+                            _np_img = _np.array(_pil_for_cv)
+                            _np_img = cv2.cvtColor(_np_img, cv2.COLOR_RGB2BGR)
+                        else:
+                            _np_img = _np.array(variant)
+                    except Exception as conv_exc:
+                        warnings.append(f"OpenCV PIL→numpy conversion failed for {full_label}: {conv_exc}")
+                        _np_img = None
+
+                    if _np_img is not None:
+                        detector = cv2.QRCodeDetector()
+                        # Use detectAndDecodeMulti when available for multiple QRs per variant
+                        data = None
+                        try:
+                            # Newer OpenCV supports detectAndDecodeMulti — handle varying return signatures
+                            result_multi = detector.detectAndDecodeMulti(_np_img)
+                            # Normalize to (retval, decoded_info)
+                            retval_multi = False
+                            decoded_info_multi = None
+                            if isinstance(result_multi, tuple):
+                                if len(result_multi) == 4:
+                                    retval_multi, decoded_info_multi, _, _ = result_multi
+                                elif len(result_multi) == 3:
+                                    retval_multi, decoded_info_multi, _ = result_multi
+                                elif len(result_multi) == 2:
+                                    retval_multi, decoded_info_multi = result_multi
+                                elif len(result_multi) == 1:
+                                    retval_multi = bool(result_multi[0])
+                                else:
+                                    retval_multi = False
+                            elif isinstance(result_multi, bool):
+                                retval_multi = result_multi
+                            if retval_multi and decoded_info_multi is not None:
+                                # decoded_info may be tuple/list of strings
+                                try:
+                                    iterable = decoded_info_multi if isinstance(decoded_info_multi, (list, tuple)) else [decoded_info_multi]
+                                except Exception:
+                                    iterable = []
+                                for d in iterable:
+                                    if d:
+                                        d = d.strip()
+                                        raw_payloads.append(d)
+                                        is_valid, _ = _validate_qr_payload(d)
+                                        if d and d not in payloads and is_valid:
+                                            payloads.append(d)
+                                            evidence.append(
+                                                {
+                                                    "source": full_label,
+                                                    "type": "QRCodeDetector",
+                                                    "payload": d,
+                                                    "is_valid": True,
+                                                    "is_ip_india": _is_ip_india_url(d),
+                                                    "is_url": _is_valid_url(d),
+                                                }
+                                            )
+                                            if detected_source == "none":
+                                                detected_source = "opencv"
+                                        elif d == "":
+                                            evidence.append({"source": full_label, "type": "QRCodeDetector", "payload": d, "is_valid": False, "reason": "empty payload"})
+                                # If multi returned something, skip single
+                                if payloads:
+                                    continue
+                        except (AttributeError, ValueError, TypeError) as e:
+                            # No QR or API mismatch — not a warning, just continue to single
+                            pass
+                        # Single QR fallback — handle varying return signatures
+                        try:
+                            result_single = detector.detectAndDecode(_np_img)
+                            if isinstance(result_single, tuple):
+                                if len(result_single) == 3:
+                                    data, _, _ = result_single
+                                elif len(result_single) == 2:
+                                    data, _ = result_single
+                                elif len(result_single) == 1:
+                                    data = result_single[0]
+                                else:
+                                    data = None
+                            else:
+                                data = result_single
+                        except Exception as e:
+                            warnings.append(f"OpenCV QR detector failed for {full_label}: {e}")
+                            data = None
+                    if data is not None:
+                        data = data.strip()
+                        raw_payloads.append(data)
+                        is_valid, _ = _validate_qr_payload(data)
+                        if data and data not in payloads and is_valid:
+                            payloads.append(data)
+                            evidence.append(
+                                {
+                                    "source": full_label,
+                                    "type": "QRCodeDetector",
+                                    "payload": data,
+                                    "is_valid": True,
+                                    "is_ip_india": _is_ip_india_url(data),
+                                    "is_url": _is_valid_url(data),
+                                }
+                            )
+                            if detected_source == "none":
+                                detected_source = "opencv"
+                        elif data == "":
+                            # Empty decode — still evidence but not valid
+                            # Avoid duplicate empty evidence
+                            if not any(e.get("payload") == "" and e.get("source") == full_label for e in evidence):
+                                evidence.append({"source": full_label, "type": "QRCodeDetector", "payload": data, "is_valid": False, "reason": "empty payload"})
+                except Exception as exc:
+                    warnings.append(f"OpenCV QR detector failed for {full_label}: {exc}")
+
+    # Post-collection validation and source distinction
+    if payloads:
+        # Preserve all valid payloads; do not lose multiple
+        return QRResult(success=True, qr_data=list(payloads), source=detected_source, warnings=warnings, evidence=evidence)
+
+    # No valid payloads — distinguish unavailable vs detected-but-invalid vs empty
+    if raw_payloads:
+        # At least one decode attempt produced a payload (even if empty/invalid)
+        has_empty = any(p == "" for p in raw_payloads)
+        has_invalid = any(p and not _validate_qr_payload(p)[0] for p in raw_payloads)
+        if has_empty:
+            warnings.append("QR detected but payload empty/invalid")
+            return QRResult(success=False, qr_data=[], source="invalid", warnings=warnings, evidence=evidence)
+        if has_invalid:
+            warnings.append("QR detected but payload invalid")
+            return QRResult(success=False, qr_data=[], source="invalid", warnings=warnings, evidence=evidence)
+
+    # Truly no QR
+    if not warnings:
+        warnings.append("No QR code detected")
+    return QRResult(success=False, qr_data=[], source="none", warnings=warnings, evidence=evidence)
 

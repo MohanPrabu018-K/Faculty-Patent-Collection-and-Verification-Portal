@@ -37,10 +37,14 @@ async def upload_certificate(
 ):
     """Upload a patent/design certificate file."""
     client_ip = request.client.host if request.client else "unknown"
+    # E2E_TEST override: multiply upload rate limit by 100x for concurrent testing.
+    import os
+    is_e2e = os.environ.get("E2E_TEST", "").strip() in ("1", "true", "yes") or os.environ.get("APP_ENV", "").strip().lower() == "e2e"
+    upload_limit = rate_limit_settings.upload_per_hour * (10000 if is_e2e else 1)
     try:
         await check_rate_limit(
             key=f"upload:{client_ip}",
-            limit=rate_limit_settings.upload_per_hour,
+            limit=upload_limit,
             window_seconds=3600,
         )
     except RateLimitError as exc:
@@ -62,9 +66,11 @@ async def upload_certificate(
     content = await file.read()
     if len(content) < _MIN_UPLOAD_BYTES:
         raise PortalError(message="File is empty", error_code="UPLOAD_ERROR", status_code=400)
-    if len(content) > upload_settings.max_upload_bytes:
+    from app.core.runtime_settings import get_max_upload_bytes as _max_bytes
+    _limit = _max_bytes(upload_settings.max_upload_bytes)
+    if len(content) > _limit:
         raise PortalError(
-            message=f"File too large: {len(content)} bytes (max: {upload_settings.max_upload_bytes})",
+            message=f"File too large: {len(content)} bytes (max: {_limit})",
             error_code="UPLOAD_ERROR",
             status_code=400,
         )

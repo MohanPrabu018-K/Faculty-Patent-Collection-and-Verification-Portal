@@ -32,16 +32,17 @@ export function StatusBadge({ value }: { value: string | null | undefined }) {
 }
 
 export function LoadingBlock({ label = 'Loading…' }: { label?: string }) {
-  return <div className="page-center">{label}</div>;
+  return <div className="loading-inline"><span className="spinner" /><span>{label}</span></div>;
 }
 
 export function ErrorBlock({ error }: { error: unknown }) {
   let message = 'Something went wrong.';
   if (error && typeof error === 'object' && 'message' in error) message = String((error as { message: unknown }).message);
   else if (typeof error === 'string') message = error;
-  // Surface a friendly line for the common auth/permission cases.
   if (/\b403\b/.test(message) || /AUTHORIZATION/i.test(message)) message = 'You are not authorized to view this.';
-  else if (/\b401\b|\b400\b/.test(message) && /credential/i.test(message)) message = 'Your session has expired. Please sign in again.';
+  else if (/\b401\b/.test(message) && /credential/i.test(message)) message = 'Your session has expired. Please sign in again.';
+  else if (/\b400\b/.test(message) && /credential/i.test(message)) message = 'Your session has expired. Please sign in again.';
+  else if (/\b0\b/.test(message) || /network|connect/i.test(message)) message = 'Unable to connect to the server. Please check your network connection and try again.';
   return <div className="alert alert-error">{message}</div>;
 }
 

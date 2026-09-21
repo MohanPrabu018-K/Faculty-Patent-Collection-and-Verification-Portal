@@ -204,6 +204,9 @@ class IpRecord(Base):
     processing_status = Column(processing_status_enum(), default="PENDING", nullable=False, index=True)
     workflow_state = Column(String, default="UPLOADED", nullable=False, index=True)
 
+    # Archive flag (A5: admin can archive/unarchive records)
+    is_archived = Column(Boolean, default=False, nullable=False, index=True)
+
     # Official source linkage
     official_source = Column(String, nullable=True)
     official_source_url = Column(String, nullable=True)
@@ -224,6 +227,9 @@ class IpRecord(Base):
     certificate_type = Column(String, nullable=True)
     source_reference = Column(String, nullable=True)
     document_type = Column(String, default="CERTIFICATE", nullable=False)
+
+    # Canonical structured data (scalar fields, separate from evidence)
+    canonical_data = Column(JSON, nullable=True)
 
     # Timestamps
     created_at = Column(DateTime, default=lambda: utcnow(), nullable=False)
@@ -421,6 +427,7 @@ class AssociationRequest(Base):
     responder_id = Column(String, ForeignKey("user.id"), nullable=True, index=True)
     responded_at = Column(DateTime, nullable=True)
     reminder_sent_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
 
     # Timestamps
     created_at = Column(DateTime, default=lambda: utcnow(), nullable=False)
@@ -457,6 +464,9 @@ class DuplicateCase(Base):
     resolved_by = Column(String, ForeignKey("user.id"), nullable=True, index=True)
     resolved_at = Column(DateTime, nullable=True)
     resolution_notes = Column(Text, nullable=True)
+
+    # Re-upload detection
+    fingerprint_match = Column(Boolean, nullable=True, default=False)
 
     # Relationships
     ip_record_1 = relationship(
@@ -660,6 +670,9 @@ class MasterIpRecord(Base):
     official_source_url = Column(String, nullable=True)
     official_verification_status = Column(String, nullable=True)
     workflow_state = Column(String, default="UPLOADED", nullable=False, index=True)
+
+    # Final verification decision (auditable)
+    verification_decision = Column(JSON, nullable=True)
 
     created_at = Column(DateTime, default=lambda: utcnow(), nullable=False)
     updated_at = Column(

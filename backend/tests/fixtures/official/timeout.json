@@ -1,0 +1,5 @@
+{
+  "error": "Simulated timeout after 15s",
+  "status": "timeout",
+  "note": "Fixture for timeout handling — adapter should return VERIFICATION_REQUIRED with timeout error"
+}

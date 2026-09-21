@@ -30,24 +30,20 @@ class DocumentUnderstandingAgent:
         start_time = time.time()
         
         try:
-            from app.services.extraction import StructuredExtractionService
-            
             extracted_data: dict[str, Any] = {}
-            evidence_list: List[dict[str, Any]] = []
-            warnings: List[str] = []
-            conflicts: List[dict[str, Any]] = []
+            evidence_list: list[dict[str, Any]] = []
+            warnings: list[str] = []
+            conflicts: list[dict[str, Any]] = []
             
-            # Get OCR text from input context or previous agent
+            # Get OCR text from input context
             ocr_text = ""
             if input_data.context and "ocr_text" in input_data.context:
                 ocr_text = input_data.context["ocr_text"]
-            elif input_data.file_data:
-                # Perform quick OCR to get text
-                from app.services.ocr_pipeline import perform_ocr
-                ocr_result = perform_ocr(input_data.file_data)
-                ocr_text = ocr_result.get("text", "")
             
-            if not ocr_text.strip():
+            # Read canonical data from context (set by orchestrator after OCR Extraction)
+            canonical_data = input_data.context.get("canonical_data", {}) if input_data.context else {}
+            
+            if not ocr_text.strip() and not canonical_data:
                 return AgentOutput(
                     agent_name=self.name,
                     status=AgentStatus.SUCCESS,
@@ -55,50 +51,53 @@ class DocumentUnderstandingAgent:
                     confidence=0.1,
                     confidence_level=ConfidenceLevel.LOW,
                     evidence=[],
-                    warnings=["No text available for document understanding"],
+                    warnings=["No text or canonical data available for document understanding"],
                     conflicts=[],
                     requires_human_review=False,
                     processing_time=time.time() - start_time,
                 )
             
-            extraction_service = StructuredExtractionService()
+            ip_type = canonical_data.get("ip_type") or input_data.ip_type or "UNKNOWN_OTHER"
             
-            # Perform extraction which includes some understanding
-            # We reuse the extraction service but focus on higher-level understanding
-            ip_type = input_data.ip_type or "UNKNOWN_OTHER"
-            extraction_result = extraction_service.extract_from_text(ocr_text, ip_type)
-            
-            extracted_data = extraction_result.get("normalized_fields", {})
-            extracted_data["ip_type"] = ip_type
-            
-            # Add understanding-specific fields
+            # Add understanding-specific fields based on canonical data
             understanding_data = {
                 "text_length": len(ocr_text),
-                "has_title": "title" in extraction_result.get("normalized_fields", {}),
-                "has_dates": any("date" in k.lower() for k in extraction_result.get("normalized_fields", {}).keys()) or "registration_date" in extraction_result.get("normalized_fields", {}),
-                "has_inventors": "inventors" in extraction_result.get("normalized_fields", {}),
-                "has_applicant": "applicant" in extraction_result.get("normalized_fields", {}),
+                "has_title": bool(canonical_data.get("title")),
+                "has_dates": any(k in canonical_data for k in ["filing_date", "grant_date", "registration_date", "certificate_date", "published_date"]),
+                "has_inventors": bool(canonical_data.get("inventors")),
+                "has_applicant": bool(canonical_data.get("applicant")),
+                "contributor_count": len(canonical_data.get("contributors", [])),
             }
+            
+            # Merge canonical data into extracted_data for downstream agents
+            extracted_data.update(canonical_data)
             extracted_data.update(understanding_data)
             
-            # Build evidence chain
-            evidence_list = extraction_result.get("evidence", [])
+            # Build evidence chain from canonical data
+            evidence_list = [
+                {"field": k, "value": v, "source": "canonical"}
+                for k, v in canonical_data.items()
+                if v is not None
+            ]
             
-            # Calculate confidence based on completeness
-            evidence_count = len(extraction_result.get("evidence", {}))
-            if evidence_count >= 5:
-                confidence = 0.7
-                confidence_level = ConfidenceLevel.MEDIUM
-            elif evidence_count >= 3:
-                confidence = 0.5
+            # Calculate confidence based on canonical data completeness
+            core_fields = ["title", "inventors", "applicant", "patent_number", "design_number"]
+            filled = sum(1 for f in core_fields if canonical_data.get(f))
+            completeness = filled / len(core_fields)
+            
+            if completeness >= 0.8:
+                confidence = 0.8
+                confidence_level = ConfidenceLevel.HIGH
+            elif completeness >= 0.5:
+                confidence = 0.6
                 confidence_level = ConfidenceLevel.MEDIUM
             else:
-                confidence = 0.3
+                confidence = 0.4
                 confidence_level = ConfidenceLevel.LOW
-                warnings.append("Limited fields extracted - document may be partially legible")
+                warnings.append("Limited canonical fields extracted - document may be partially legible")
             
             # Check review requirements
-            requires_review = confidence < 0.5 or not understanding_data.get("has_title")
+            requires_review = confidence < 0.5 or not canonical_data.get("title")
             
             processing_time = time.time() - start_time
             
@@ -111,7 +110,7 @@ class DocumentUnderstandingAgent:
                 evidence=evidence_list,
                 warnings=warnings,
                 conflicts=conflicts,
-                recommendation=extracted_data.get("patent_number") or extracted_data.get("design_number"),
+                recommendation=canonical_data.get("patent_number") or canonical_data.get("design_number"),
                 requires_human_review=requires_review,
                 processing_time=processing_time,
             )

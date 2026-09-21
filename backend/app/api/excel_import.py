@@ -14,7 +14,7 @@ from app.api.deps import get_current_user, require_super_admin
 from app.core.database import get_async_session
 from app.core.exceptions import PortalError
 from app.core.logging import log_audit
-from app.models.base import IpRecord, User
+from app.models.base import Department, IpRecord, User
 
 router = APIRouter(prefix="/api/v1/admin/excel-import", tags=["excel-import"], dependencies=[Depends(require_super_admin)])
 
@@ -140,6 +140,10 @@ async def import_xlsx(current_user: dict = Depends(get_current_user), file: Uplo
             if not faculty:
                 failed += 1
                 continue
+            dept_name = None
+            if faculty.department_id is not None:
+                _dept = (await db.execute(select(Department).where(Department.id == faculty.department_id))).scalar_one_or_none()
+                dept_name = _dept.name if _dept else None
             patent_number = data.get("patent_number")
             duplicate = None
             if patent_number:
@@ -158,6 +162,8 @@ async def import_xlsx(current_user: dict = Depends(get_current_user), file: Uplo
                 uploader_id=faculty.id,
                 department_id=faculty.department_id,
                 designation_id=faculty.designation_id,
+                historical_department_id=faculty.department_id,
+                historical_department_name=dept_name,
                 processing_status="QUEUED",
                 verification_status="UNVERIFIED",
                 document_type=data.get("document_type") or "CERTIFICATE",

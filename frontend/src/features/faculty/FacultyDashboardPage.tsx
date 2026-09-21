@@ -11,7 +11,7 @@ function display(value: unknown) {
 export function FacultyDashboardPage() {
   const { data, isLoading, error } = useQuery({ queryKey: ['faculty-dashboard'], queryFn: api.facultyDashboard });
 
-  if (isLoading) return <div className="page-center">Loading dashboard...</div>;
+  if (isLoading && !data) return <div className="loading-inline" style={{ padding: '24px 0' }}><span className="spinner" /><span>Loading dashboard…</span></div>;
   if (error) return <div className="alert alert-error">{String(error)}</div>;
 
   const summary = data?.records_summary ?? { total: 0, pending: 0, processing: 0, completed: 0, awaiting_review: 0, failed: 0 };

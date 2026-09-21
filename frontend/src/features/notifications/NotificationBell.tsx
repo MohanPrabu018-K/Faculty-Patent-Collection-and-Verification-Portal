@@ -13,14 +13,14 @@ export function NotificationBell() {
 
   const unread = useQuery({
     queryKey: ['notifications-unread'],
-    queryFn: api.notificationsUnreadCount,
-    refetchInterval: 30_000,
-    refetchOnWindowFocus: true,
+    queryFn: ({ signal }) => api.notificationsUnreadCount(signal),
+    refetchInterval: () => (document.hidden ? false : 30_000),
+    refetchOnWindowFocus: false,
   });
 
   const list = useQuery({
     queryKey: ['notifications', 'recent'],
-    queryFn: () => api.notifications('?per_page=8'),
+    queryFn: ({ signal }) => api.notifications('?per_page=8', signal),
     enabled: open,
   });
 

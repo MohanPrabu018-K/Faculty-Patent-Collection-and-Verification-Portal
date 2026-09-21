@@ -1,21 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import {
-  SectionCard, StatusBadge, LoadingBlock, ErrorBlock, EmptyState,
+  SectionCard, StatusBadge, ErrorBlock, EmptyState,
   Toolbar, TableWrap, Pagination, formatDate, display,
 } from '../../components/ui';
 import { useAuth } from '../../stores/auth';
-
-function useDebounced<T>(value: T, ms = 350): T {
-  const [v, setV] = useState(value);
-  useEffect(() => {
-    const t = setTimeout(() => setV(value), ms);
-    return () => clearTimeout(t);
-  }, [value, ms]);
-  return v;
-}
+import { useDebounce } from '../../hooks/useDebounce';
 
 export function SearchPage() {
   const { user } = useAuth();
@@ -23,7 +15,7 @@ export function SearchPage() {
   const [ipType, setIpType] = useState('');
   const [verification, setVerification] = useState('');
   const [page, setPage] = useState(1);
-  const debounced = useDebounced(term, 350);
+  const debounced = useDebounce(term, 350);
 
   useEffect(() => { setPage(1); }, [debounced, ipType, verification]);
 
@@ -35,9 +27,10 @@ export function SearchPage() {
     return `?${q.toString()}`;
   }, [debounced, ipType, verification, page]);
 
-  const { data, isLoading, isFetching, error } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ['search', params],
-    queryFn: () => api.search(params),
+    queryFn: ({ signal }) => api.search(params, signal),
+    placeholderData: keepPreviousData,
   });
 
   const scopeNote =
@@ -81,15 +74,23 @@ export function SearchPage() {
         {isFetching ? 'Searching…' : data ? `${data.total} result${data.total === 1 ? '' : 's'} · ${data.query_time_ms} ms` : ''}
       </div>
 
-      {isLoading ? (
-        <LoadingBlock label="Searching…" />
-      ) : error ? (
+      {isLoading && !data ? (
+        <div className="loading-inline" style={{ padding: '16px 0' }}><span className="spinner" /><span>Searching…</span></div>
+      ) : error && !data ? (
         <ErrorBlock error={error} />
-      ) : rows.length === 0 ? (
+      ) : rows.length === 0 && !isFetching ? (
         <EmptyState message={debounced.trim() || ipType || verification ? 'No records match your search.' : 'Type to search across records you can access.'} />
       ) : (
         <>
-          <TableWrap>
+          {error && data ? (
+            <div className="alert alert-error" role="alert" style={{ marginBottom: 12 }}>
+              Refresh failed: {error instanceof Error ? error.message : String(error)}{' '}
+              <button className="btn btn-sm btn-secondary" onClick={() => void refetch()} disabled={isFetching}>Retry</button>
+            </div>
+          ) : null}
+          <div className={isFetching && data ? 'table-fetching' : ''}>
+            {isFetching && data ? <div className="table-fetching-indicator"><span className="spinner" /> Updating…</div> : null}
+            <TableWrap>
             <table className="data-table">
               <thead>
                 <tr><th>Record</th><th>Type</th><th>Number</th><th>Faculty</th><th>Department</th><th>Verification</th><th>Created</th></tr>
@@ -114,6 +115,7 @@ export function SearchPage() {
               </tbody>
             </table>
           </TableWrap>
+          </div>
           <Pagination page={page} totalPages={data?.total_pages ?? 1} onChange={setPage} disabled={isFetching} />
         </>
       )}

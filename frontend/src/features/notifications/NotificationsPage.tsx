@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, type NotificationRow } from '../../api/client';
-import { SectionCard, StatusBadge, LoadingBlock, ErrorBlock, EmptyState, Pagination, formatDateTime } from '../../components/ui';
+import { SectionCard, StatusBadge, ErrorBlock, EmptyState, Pagination, formatDateTime } from '../../components/ui';
 import { useToast } from '../../stores/toast';
 
 export function NotificationsPage() {
@@ -13,9 +13,10 @@ export function NotificationsPage() {
   const navigate = useNavigate();
 
   const params = `?page=${page}&per_page=20${unreadOnly ? '&unread_only=true' : ''}`;
-  const { data, isLoading, error, isFetching } = useQuery({
+  const { data, isLoading, error, isFetching, refetch } = useQuery({
     queryKey: ['notifications', params],
-    queryFn: () => api.notifications(params),
+    queryFn: ({ signal }) => api.notifications(params, signal),
+    placeholderData: keepPreviousData,
   });
 
   const refresh = async () => {
@@ -36,11 +37,11 @@ export function NotificationsPage() {
     onError: () => notify('error', 'Failed to remove'),
   });
 
-  if (isLoading) return <LoadingBlock label="Loading notifications…" />;
-  if (error) return <ErrorBlock error={error} />;
-
   const items = data?.notifications ?? [];
   const totalPages = data ? Math.max(1, Math.ceil(data.total / data.per_page)) : 1;
+
+  if (isLoading && !data) return <div className="loading-inline" style={{ padding: '24px 0' }}><span className="spinner" /><span>Loading notifications…</span></div>;
+  if (error && !data) return <ErrorBlock error={error} />;
 
   const open = (n: NotificationRow) => {
     if (!n.is_read) markRead.mutate(n.id);
@@ -61,7 +62,13 @@ export function NotificationsPage() {
         </div>
       }
     >
-      {items.length === 0 ? (
+      {error && data ? (
+        <div className="alert alert-error" role="alert" style={{ marginBottom: 12 }}>
+          Refresh failed: {error instanceof Error ? error.message : String(error)}{' '}
+          <button className="btn btn-sm btn-secondary" onClick={() => void refetch()} disabled={isFetching}>Retry</button>
+        </div>
+      ) : null}
+      {items.length === 0 && !isFetching ? (
         <EmptyState message={unreadOnly ? 'No unread notifications.' : 'No notifications yet.'} />
       ) : (
         <div className="stack">

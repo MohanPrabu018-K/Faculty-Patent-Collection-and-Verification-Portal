@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/v1/exports", tags=["exports"])
 async def create_export_job(
     request: Request,
     current_user: dict = Depends(get_current_user),
-    format: str = Query("csv", pattern="^(csv|excel|json|pdf)$"),
+    format: str = Query("csv", pattern="^(csv|excel|json|pdf|docx)$"),
     filters: dict | None = None,
 ):
     """Create an export job using the real export service."""
@@ -47,6 +47,6 @@ async def download_export(
     if not file_data:
         return JSONResponse(status_code=404, content={"error": "FILE_NOT_FOUND", "message": "Export file not found"})
     filename = f"export_{job_id}.{job.get('format', 'csv')}"
-    media_types = {"csv": "text/csv", "excel": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "json": "application/json", "pdf": "application/pdf"}
+    media_types = {"csv": "text/csv", "excel": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "json": "application/json", "pdf": "application/pdf", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
     return StreamingResponse(io.BytesIO(file_data), media_type=media_types.get(job.get('format', 'csv'), "application/octet-stream"), headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 

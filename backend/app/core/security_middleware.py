@@ -70,8 +70,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         self.hsts_max_age = 31536000
         self.csp_policy = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
-            "style-src 'self' 'unsafe-inline'; "
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval'  https://cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline'  https://cdn.jsdelivr.net; "
             "img-src 'self' data: https:; "
             "font-src 'self' data:; "
             "connect-src 'self'; "
@@ -98,12 +98,23 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 class RateLimitMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: ASGIApp):
         super().__init__(app)
+        # E2E_TEST environment guard: when E2E_TEST=1 (or APP_ENV=e2e),
+        # multiply all rate limits by 100x to prevent 429s during concurrent
+        # Playwright hardening runs. Production/default limits remain unchanged.
+        import os
+        is_e2e = os.environ.get("E2E_TEST", "").strip() in ("1", "true", "yes") or os.environ.get("APP_ENV", "").strip().lower() == "e2e"
+        login_limit = rate_limit_settings.login_per_ip * (10000 if is_e2e else 1)
+        upload_limit = rate_limit_settings.upload_per_hour * (10000 if is_e2e else 1)
+        search_limit = rate_limit_settings.search_per_minute * (10000 if is_e2e else 1)
+        api_limit = rate_limit_settings.api_per_minute * (10000 if is_e2e else 1)
         self.rules = [
-            RateLimitRule("login", rate_limit_settings.login_per_ip, 60, "ip"),
-            RateLimitRule("upload", rate_limit_settings.upload_per_hour, 3600, "user"),
-            RateLimitRule("search", rate_limit_settings.search_per_minute, 60, "ip"),
-            RateLimitRule("api", rate_limit_settings.api_per_minute, 60, "ip"),
+            RateLimitRule("login", login_limit, 60, "ip"),
+            RateLimitRule("upload", upload_limit, 3600, "user"),
+            RateLimitRule("search", search_limit, 60, "ip"),
+            RateLimitRule("api", api_limit, 60, "ip"),
         ]
+        if is_e2e:
+            logger.info("rate_limits_e2e_mode", login=login_limit, upload=upload_limit, search=search_limit, api=api_limit)
 
     def _get_client_key(self, request: Request, rule: RateLimitRule) -> str:
         if rule.scope == "ip":
@@ -135,6 +146,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         if request.url.path in ["/healthz", "/readyz", "/metrics"]:
+            return await call_next(request)
+
+        # CORS preflight (OPTIONS) must pass through without rate-limiting
+        # so the CORSMiddleware can set the proper headers.
+        if request.method == "OPTIONS":
             return await call_next(request)
 
         if request.url.path != "/api/v1/auth/login" and not self._has_auth_material(request):

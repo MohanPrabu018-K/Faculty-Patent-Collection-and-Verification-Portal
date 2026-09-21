@@ -1,0 +1,5 @@
+{
+  "error": "HTTP 500 Internal Server Error",
+  "status": 500,
+  "note": "Fixture for HTTP 500 handling — adapter should return VERIFICATION_REQUIRED"
+}

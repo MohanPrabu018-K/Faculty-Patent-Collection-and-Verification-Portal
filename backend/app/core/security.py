@@ -1,4 +1,5 @@
 import secrets
+import string
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,36 @@ def hash_password(plain_text: str) -> str:
     Returns the hash string suitable for storage.
     """
     return _password_hasher.hash(plain_text)
+
+
+# Alphabet for generated temporary passwords. Excluded characters are the ones
+# that are visually ambiguous (0/O, 1/l/I) and characters that are difficult to
+# type or that are likely to break shell quoting / URL encoding when copied.
+_TEMP_PW_LOWER = string.ascii_lowercase.replace("l", "")
+_TEMP_PW_UPPER = string.ascii_uppercase.replace("I", "").replace("O", "")
+_TEMP_PW_DIGITS = string.digits.replace("0", "").replace("1", "")
+_TEMP_PW_SPECIAL = "@#$%&*+?=_-"
+_TEMP_PW_ALPHABET = _TEMP_PW_LOWER + _TEMP_PW_UPPER + _TEMP_PW_DIGITS + _TEMP_PW_SPECIAL
+
+
+def generate_temporary_password(length: int = 18) -> str:
+    """Generate a cryptographically secure temporary password.
+
+    Uses the standard-library ``secrets`` module (never ``random``). Guarantees
+    at least one lowercase, one uppercase, one digit and one special character,
+    and excludes visually ambiguous characters.
+    """
+    if length < 4:
+        raise ValueError("length must be at least 4")
+    chars = [
+        secrets.choice(_TEMP_PW_LOWER),
+        secrets.choice(_TEMP_PW_UPPER),
+        secrets.choice(_TEMP_PW_DIGITS),
+        secrets.choice(_TEMP_PW_SPECIAL),
+    ]
+    chars += [secrets.choice(_TEMP_PW_ALPHABET) for _ in range(length - 4)]
+    secrets.SystemRandom().shuffle(chars)
+    return "".join(chars)
 
 
 def verify_password(plain_text: str, hashed: str) -> bool:

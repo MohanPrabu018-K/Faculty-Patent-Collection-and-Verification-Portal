@@ -1,11 +1,11 @@
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../../api/client';
-import { SectionCard, StatCard, LoadingBlock, ErrorBlock, formatDate, display } from '../../components/ui';
+import { SectionCard, StatCard, ErrorBlock, formatDate, display } from '../../components/ui';
 
 export function FacultyProfilePage() {
   const { data, isLoading, error } = useQuery({ queryKey: ['faculty-profile'], queryFn: api.facultyProfile });
 
-  if (isLoading) return <LoadingBlock label="Loading profile…" />;
+  if (isLoading && !data) return <div className="loading-inline" style={{ padding: '24px 0' }}><span className="spinner" /><span>Loading profile…</span></div>;
   if (error) return <ErrorBlock error={error} />;
   if (!data) return <ErrorBlock error="Profile unavailable" />;
 

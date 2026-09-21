@@ -11,11 +11,13 @@ from app.agents.data_quality_agent import DataQualityAgent
 from app.agents.document_understanding_agent import DocumentUnderstandingAgent
 from app.agents.duplicate_detection_agent import DuplicateDetectionAgent
 from app.agents.faculty_identity_agent import FacultyIdentityResolutionAgent
+from app.agents.final_verification_agent import FinalVerificationAgent
 from app.agents.ocr_extraction_agent import OCRExtractionAgent
 from app.agents.qr_agent import QRAnalysisAgent
 from app.agents.report_analytics_agent import ReportAnalyticsAgent
 from app.agents.verification_agent import VerificationAgent
 from app.core.ai_contracts import AgentOutput, AgentStatus, ConfidenceLevel, OrchestratorInput, OrchestratorOutput
+from app.services.canonical import normalize_canonical_data, validate_canonical_data
 
 AGENT_ORDER = [
     "DocumentClassificationAgent",
@@ -28,6 +30,7 @@ AGENT_ORDER = [
     "ConflictResolutionAgent",
     "AssociationRecommendationAgent",
     "DataQualityAgent",
+    "FinalVerificationAgent",
     "ReportAnalyticsAgent",
 ]
 
@@ -45,6 +48,7 @@ class AIOrchestrator:
             "ConflictResolutionAgent": ConflictResolutionAgent,
             "AssociationRecommendationAgent": AssociationRecommendationAgent,
             "DataQualityAgent": DataQualityAgent,
+            "FinalVerificationAgent": FinalVerificationAgent,
             "ReportAnalyticsAgent": ReportAnalyticsAgent,
         }
         self._retry_delay = 0.5
@@ -84,6 +88,22 @@ class AIOrchestrator:
                     context.update(agent_result.extracted_data)
                     if "ip_type" in agent_result.extracted_data:
                         context["ip_type"] = agent_result.extracted_data["ip_type"]
+                
+                # CANONICAL NORMALIZATION: After OCRExtractionAgent, create canonical_data.
+                # This is the SINGLE normalization point - all downstream agents read
+                # canonical_data. OCRExtractionAgent flattens its `normalized_fields`
+                # evidence structure into its own extracted_data, so canonical_data is
+                # derived from that flattened (still evidence-wrapped) output.
+                if agent_name == "OCRExtractionAgent" and agent_result.extracted_data:
+                    canonical_data = normalize_canonical_data(agent_result.extracted_data)
+                    # Validate canonical data
+                    validation_errors = validate_canonical_data(canonical_data)
+                    if validation_errors:
+                        agent_result.warnings.extend([f"Canonical validation: {e}" for e in validation_errors])
+                    context["canonical_data"] = canonical_data
+                    # Also store in extracted_data for backward compatibility with orchestrator_task
+                    context["extracted_data"]["canonical_data"] = canonical_data
+                
                 if agent_result.requires_human_review:
                     output.overall_requires_human_review = True
                 if agent_result.status == AgentStatus.ERROR:

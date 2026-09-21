@@ -1,18 +1,19 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import {
-  SectionCard, StatCard, StatusBadge, LoadingBlock, ErrorBlock, EmptyState,
+  SectionCard, StatCard, StatusBadge, ErrorBlock, EmptyState,
   Toolbar, TableWrap, Pagination, Modal, formatDateTime, formatDate, display,
 } from '../../components/ui';
 import { useToast } from '../../stores/toast';
+import { useDebounce } from '../../hooks/useDebounce';
 
 /* --------------------------------- Dashboard -------------------------------- */
 
 export function HodDashboardPage() {
   const { data, isLoading, error } = useQuery({ queryKey: ['hod-dashboard'], queryFn: api.hodDashboard });
-  if (isLoading) return <LoadingBlock label="Loading department dashboard…" />;
+  if (isLoading && !data) return <div className="loading-inline" style={{ padding: '24px 0' }}><span className="spinner" /><span>Loading department dashboard…</span></div>;
   if (error) return <ErrorBlock error={error} />;
   const k = data?.kpis ?? {};
   return (
@@ -35,15 +36,20 @@ export function HodDashboardPage() {
 
 export function HodFacultyPage() {
   const [search, setSearch] = useState('');
+  const debouncedSearch = useDebounce(search, 400);
   const [activeOnly, setActiveOnly] = useState(false);
-  const { data, isLoading, error } = useQuery({ queryKey: ['hod-faculty'], queryFn: () => api.hodFaculty() });
+  // Server-side search if available, else client-side debounced
+  const params = useMemo(() => debouncedSearch.trim() ? `?search=${encodeURIComponent(debouncedSearch.trim())}` : '', [debouncedSearch]);
+  const { data, isLoading, error, isFetching, refetch } = useQuery({ queryKey: ['hod-faculty', params], queryFn: ({ signal }) => api.hodFaculty(params, signal), placeholderData: keepPreviousData });
 
-  if (isLoading) return <LoadingBlock label="Loading department faculty…" />;
-  if (error) return <ErrorBlock error={error} />;
+  if (isLoading && !data) return <div className="loading-inline" style={{ padding: '24px 0' }}><span className="spinner" /><span>Loading department faculty…</span></div>;
+  if (error && !data) return <ErrorBlock error={error} />;
 
+  // If backend already filtered via search param, no need for client filter; keep as fallback for small datasets
   const rows = (data?.faculty ?? []).filter((f) => {
+    if (debouncedSearch.trim() && params) return true; // server already filtered
     const hay = `${f.full_name} ${f.faculty_id} ${f.email}`.toLowerCase();
-    return (!search || hay.includes(search.toLowerCase())) && (!activeOnly || f.is_active);
+    return (!debouncedSearch || hay.includes(debouncedSearch.toLowerCase())) && (!activeOnly || f.is_active);
   });
 
   return (
@@ -55,10 +61,18 @@ export function HodFacultyPage() {
           <span className="muted">Active only</span>
         </label>
       </Toolbar>
-      {rows.length === 0 ? (
+      {error && data ? (
+        <div className="alert alert-error" role="alert" style={{ marginBottom: 12 }}>
+          Refresh failed: {error instanceof Error ? error.message : String(error)}{' '}
+          <button className="btn btn-sm btn-secondary" onClick={() => void refetch()} disabled={isFetching}>Retry</button>
+        </div>
+      ) : null}
+      {rows.length === 0 && !isFetching ? (
         <EmptyState message="No faculty match your filters." />
       ) : (
-        <TableWrap>
+        <div className={isFetching && data ? 'table-fetching' : ''}>
+          {isFetching && data ? <div className="table-fetching-indicator"><span className="spinner" /> Updating…</div> : null}
+          <TableWrap>
           <table className="data-table">
             <thead>
               <tr><th>Name</th><th>Faculty ID</th><th>Designation</th><th>Documents</th><th>Patents</th><th>Verified</th><th>Pending</th><th>Rejected</th><th>Status</th></tr>
@@ -83,6 +97,7 @@ export function HodFacultyPage() {
             </tbody>
           </table>
         </TableWrap>
+        </div>
       )}
     </SectionCard>
   );
@@ -91,23 +106,45 @@ export function HodFacultyPage() {
 /* --------------------------------- Documents ------------------------------- */
 
 export function HodDocumentsPage() {
+  const client = useQueryClient();
+  const { notify } = useToast();
   const [page, setPage] = useState(1);
   const [status, setStatus] = useState('');
   const [search, setSearch] = useState('');
+  const debouncedSearch = useDebounce(search, 400);
+  const [verifyTarget, setVerifyTarget] = useState<Record<string, unknown> | null>(null);
+  const [verifyRemarks, setVerifyRemarks] = useState('');
+  const [verifyEvidenceRef, setVerifyEvidenceRef] = useState('');
 
   const params = useMemo(() => {
     const q = new URLSearchParams({ page: String(page), per_page: '20' });
     if (status) q.set('status', status);
-    if (search) q.set('search', search);
+    if (debouncedSearch.trim()) q.set('search', debouncedSearch.trim());
     return `?${q.toString()}`;
-  }, [page, status, search]);
+  }, [page, status, debouncedSearch]);
 
-  const { data, isLoading, error, isFetching } = useQuery({ queryKey: ['hod-documents', params], queryFn: () => api.hodDocuments(params) });
+  const { data, isLoading, error, isFetching, refetch } = useQuery({ queryKey: ['hod-documents', params], queryFn: ({ signal }) => api.hodDocuments(params, signal), placeholderData: keepPreviousData });
 
-  if (isLoading) return <LoadingBlock label="Loading department documents…" />;
-  if (error) return <ErrorBlock error={error} />;
+  const verifyMutation = useMutation({
+    mutationFn: ({ recordId, decision, remarks, evidenceRef }: { recordId: string; decision: 'verify' | 'reject' | 'clarification'; remarks?: string; evidenceRef?: string }) =>
+      api.institutionalVerify(recordId, { decision, remarks, evidence_ref: evidenceRef }),
+    onSuccess: async (result) => {
+      notify('success', `Institutional verification recorded: ${result.decision}. Final status: ${result.final_verification_status}`);
+      setVerifyTarget(null);
+      setVerifyRemarks('');
+      setVerifyEvidenceRef('');
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['hod-documents'] }),
+        client.invalidateQueries({ queryKey: ['hod-dashboard'] }),
+      ]);
+    },
+    onError: (e) => notify('error', e instanceof Error ? e.message : 'Verification failed'),
+  });
 
   const docs = data?.documents ?? [];
+
+  if (isLoading && !data) return <div className="loading-inline" style={{ padding: '24px 0' }}><span className="spinner" /><span>Loading department documents…</span></div>;
+  if (error && !data) return <ErrorBlock error={error} />;
 
   return (
     <SectionCard title="Department Documents" subtitle={`${data?.total ?? 0} documents in your department.`}>
@@ -116,29 +153,38 @@ export function HodDocumentsPage() {
         <select className="toolbar-input" value={status} onChange={(e) => { setStatus(e.target.value); setPage(1); }} aria-label="Filter by status">
           <option value="">All statuses</option>
           <option value="AWAITING_REVIEW">Awaiting review</option>
-          <option value="VERIFICATION_REQUIRED">Verification required</option>
+          <option value="VERIFICATION_REQUIRED">Verification required (needs manual official check)</option>
           <option value="VERIFIED">Verified</option>
           <option value="DUPLICATE_REVIEW">Duplicate review</option>
           <option value="FAILED">Failed</option>
         </select>
       </Toolbar>
-      {docs.length === 0 ? (
+      {error && data ? (
+        <div className="alert alert-error" role="alert" style={{ marginBottom: 12 }}>
+          Refresh failed: {error instanceof Error ? error.message : String(error)}{' '}
+          <button className="btn btn-sm btn-secondary" onClick={() => void refetch()} disabled={isFetching}>Retry</button>
+        </div>
+      ) : null}
+      {docs.length === 0 && !isFetching ? (
         <EmptyState message="No documents match your filters." />
       ) : (
-        <TableWrap>
+        <div className={isFetching && data ? 'table-fetching' : ''}>
+          {isFetching && data ? <div className="table-fetching-indicator"><span className="spinner" /> Updating…</div> : null}
+          <TableWrap>
           <table className="data-table">
             <thead>
-              <tr><th>Document</th><th>Faculty</th><th>Type</th><th>Uploaded</th><th>Processing</th><th>Verification</th><th>Flags</th></tr>
+              <tr><th>Document</th><th>Faculty</th><th>Type</th><th>Grant Date</th><th>Uploaded</th><th>Processing</th><th>Verification</th><th>Flags</th><th>Actions</th></tr>
             </thead>
             <tbody>
               {docs.map((d) => (
                 <tr key={String(d.id)}>
                   <td>
-                    <strong>{display(d.title || d.patent_number || d.design_number || d.id)}</strong>
+                    <strong><Link className="link" to={`/faculty/records/${d.id}`}>{display(d.title || d.patent_number || d.design_number || d.id)}</Link></strong>
                     <div className="muted">{display(d.id)}</div>
                   </td>
                   <td>{display(d.faculty_name)}<div className="muted">{display(d.faculty_id)}</div></td>
                   <td>{display(d.ip_type)}</td>
+                  <td>{d.grant_date ? formatDate(d.grant_date) : '—'}</td>
                   <td>{formatDate(d.created_at)}</td>
                   <td><StatusBadge value={String(d.processing_status || 'UNKNOWN')} /></td>
                   <td><StatusBadge value={String(d.verification_status || 'UNKNOWN')} /></td>
@@ -149,13 +195,72 @@ export function HodDocumentsPage() {
                       {!d.has_duplicate && !d.has_conflict ? <span className="muted">—</span> : null}
                     </div>
                   </td>
+                  <td>
+                    <div className="btn-row">
+                      <Link className="link" to={`/faculty/records/${d.id}`}>View</Link>
+                      {String(d.verification_status) !== 'VERIFIED' && (
+                        <button className="btn btn-sm btn-primary" onClick={() => { setVerifyTarget(d); setVerifyRemarks(''); setVerifyEvidenceRef(''); }}>
+                          Manual Verify
+                        </button>
+                      )}
+                    </div>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </TableWrap>
+        </div>
       )}
       <Pagination page={page} totalPages={data?.total_pages ?? 1} onChange={setPage} disabled={isFetching} />
+
+      {verifyTarget && (
+        <Modal
+          title="HOD Manual Official Verification"
+          onClose={() => { setVerifyTarget(null); setVerifyRemarks(''); setVerifyEvidenceRef(''); }}
+          footer={
+            <>
+              <button className="btn btn-secondary" onClick={() => { setVerifyTarget(null); setVerifyRemarks(''); setVerifyEvidenceRef(''); }}>Cancel</button>
+              <button className="btn btn-secondary" disabled={verifyMutation.isPending} onClick={() => verifyMutation.mutate({ recordId: String(verifyTarget.id), decision: 'reject', remarks: verifyRemarks || undefined, evidenceRef: verifyEvidenceRef || undefined })}>
+                {verifyMutation.isPending ? 'Saving…' : 'Reject'}
+              </button>
+              <button className="btn btn-primary" disabled={verifyMutation.isPending} onClick={() => verifyMutation.mutate({ recordId: String(verifyTarget.id), decision: 'verify', remarks: verifyRemarks || undefined, evidenceRef: verifyEvidenceRef || undefined })}>
+                {verifyMutation.isPending ? 'Saving…' : 'Confirm Verified'}
+              </button>
+            </>
+          }
+        >
+          <div className="stack">
+            <div className="alert alert-info" style={{ background: '#eef3fb', color: 'var(--primary)', border: '1px solid #cdd8ea' }}>
+              <strong>Manual Official Verification</strong>
+              <p style={{ margin: '6px 0 0', fontSize: 13 }}>
+                By clicking "Confirm Verified", you certify that you have manually checked this record against the official IP portal
+                and the submitted details match. This is an institutional verification — not an automated IP India verification.
+              </p>
+            </div>
+            <div className="detail-field">
+              <span>Record</span>
+              <strong>{display(verifyTarget.title || verifyTarget.patent_number || verifyTarget.design_number || verifyTarget.id)}</strong>
+            </div>
+            <div className="detail-field">
+              <span>Faculty</span>
+              <strong>{display(verifyTarget.faculty_name)}</strong>
+            </div>
+            <div className="detail-field">
+              <span>Current verification status</span>
+              <strong><StatusBadge value={String(verifyTarget.verification_status || 'UNKNOWN')} /></strong>
+            </div>
+            <label className="field">
+              <span>Remarks (optional)</span>
+              <textarea className="toolbar-input" rows={3} placeholder="e.g. Checked IP India portal on 2025-01-15, patent number matches" value={verifyRemarks} onChange={(e) => setVerifyRemarks(e.target.value)} />
+            </label>
+            <label className="field">
+              <span>Evidence reference (optional)</span>
+              <input className="toolbar-input" placeholder="e.g. IP India screenshot URL or reference number" value={verifyEvidenceRef} onChange={(e) => setVerifyEvidenceRef(e.target.value)} />
+            </label>
+          </div>
+        </Modal>
+      )}
     </SectionCard>
   );
 }
@@ -166,6 +271,7 @@ export function HodDuplicatesPage() {
   const client = useQueryClient();
   const { notify } = useToast();
   const [confirmCase, setConfirmCase] = useState<Record<string, unknown> | null>(null);
+  const [confirmReject, setConfirmReject] = useState<Record<string, unknown> | null>(null);
   const { data, isLoading, error } = useQuery({ queryKey: ['hod-duplicates'], queryFn: () => api.hodDuplicates() });
 
   const resolve = useMutation({
@@ -182,7 +288,21 @@ export function HodDuplicatesPage() {
     onError: (e) => notify('error', e instanceof Error ? e.message : 'Failed to resolve'),
   });
 
-  if (isLoading) return <LoadingBlock label="Loading duplicates…" />;
+  const reject = useMutation({
+    mutationFn: ({ id }: { id: string }) => api.resolveDuplicate(id, '', 'dismiss'),
+    onSuccess: async () => {
+      notify('success', 'Duplicate case rejected');
+      setConfirmReject(null);
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['hod-duplicates'] }),
+        client.invalidateQueries({ queryKey: ['hod-dashboard'] }),
+        client.invalidateQueries({ queryKey: ['hod-documents'] }),
+      ]);
+    },
+    onError: (e) => notify('error', e instanceof Error ? e.message : 'Failed to reject'),
+  });
+
+  if (isLoading && !data) return <div className="loading-inline" style={{ padding: '24px 0' }}><span className="spinner" /><span>Loading duplicates…</span></div>;
   if (error) return <ErrorBlock error={error} />;
 
   const rows = data?.duplicates ?? [];
@@ -209,7 +329,12 @@ export function HodDuplicatesPage() {
                   <td><StatusBadge value={String(d.status || 'OPEN')} /></td>
                   <td>
                     {String(d.status) === 'OPEN'
-                      ? <button className="btn btn-sm btn-primary" disabled={resolve.isPending} onClick={() => setConfirmCase(d)}>Resolve</button>
+                      ? (
+                        <div className="btn-row">
+                          <button className="btn btn-sm btn-primary" disabled={resolve.isPending} onClick={() => setConfirmCase(d)}>Resolve</button>
+                          <button className="btn btn-sm btn-danger" disabled={reject.isPending} onClick={() => setConfirmReject(d)}>Reject</button>
+                        </div>
+                      )
                       : <span className="muted">{display(d.resolution_notes) || '—'}</span>}
                   </td>
                 </tr>
@@ -238,6 +363,26 @@ export function HodDuplicatesPage() {
           <p>Mark this duplicate case resolved, keeping record <strong>{String(confirmCase.ip_record_id_1).slice(0, 8)}…</strong> as the canonical one.</p>
         </Modal>
       )}
+      {confirmReject && (
+        <Modal
+          title="Reject duplicate case"
+          onClose={() => setConfirmReject(null)}
+          footer={
+            <>
+              <button className="btn btn-secondary" onClick={() => setConfirmReject(null)}>Cancel</button>
+              <button
+                className="btn btn-danger"
+                disabled={reject.isPending}
+                onClick={() => reject.mutate({ id: String(confirmReject.id) })}
+              >
+                Reject duplicate
+              </button>
+            </>
+          }
+        >
+          <p>Reject this duplicate case. Both records will remain but the duplicate flag will be dismissed.</p>
+        </Modal>
+      )}
     </SectionCard>
   );
 }
@@ -263,7 +408,7 @@ export function HodConflictsPage() {
     onError: (e) => notify('error', e instanceof Error ? e.message : 'Failed to resolve'),
   });
 
-  if (isLoading) return <LoadingBlock label="Loading conflicts…" />;
+  if (isLoading && !data) return <div className="loading-inline" style={{ padding: '24px 0' }}><span className="spinner" /><span>Loading conflicts…</span></div>;
   if (error) return <ErrorBlock error={error} />;
 
   const rows = data?.conflicts ?? [];
@@ -327,7 +472,7 @@ export function HodReportsPage() {
     onError: () => notify('error', 'Failed to send reminders'),
   });
 
-  if (isLoading) return <LoadingBlock label="Loading department report…" />;
+  if (isLoading && !data) return <div className="loading-inline" style={{ padding: '24px 0' }}><span className="spinner" /><span>Loading department report…</span></div>;
   if (error) return <ErrorBlock error={error} />;
 
   const summary = (data?.summary ?? {}) as Record<string, number>;
@@ -411,22 +556,31 @@ function Bars({ data }: { data: Record<string, number> }) {
 
 export function HodAuditPage() {
   const [page, setPage] = useState(1);
-  const { data, isLoading, error, isFetching } = useQuery({
+  const { data, isLoading, error, isFetching, refetch } = useQuery({
     queryKey: ['hod-audit', page],
-    queryFn: () => api.hodAudit(`?page=${page}&per_page=25`),
+    queryFn: ({ signal }) => api.hodAudit(`?page=${page}&per_page=25`, signal),
+    placeholderData: keepPreviousData,
   });
-
-  if (isLoading) return <LoadingBlock label="Loading department audit…" />;
-  if (error) return <ErrorBlock error={error} />;
 
   const rows = data?.audit_entries ?? [];
 
+  if (isLoading && !data) return <div className="loading-inline" style={{ padding: '24px 0' }}><span className="spinner" /><span>Loading department audit…</span></div>;
+  if (error && !data) return <ErrorBlock error={error} />;
+
   return (
     <SectionCard title="Department Audit" subtitle={`${data?.total ?? 0} recorded actions for your department.`}>
-      {rows.length === 0 ? (
+      {error && data ? (
+        <div className="alert alert-error" role="alert" style={{ marginBottom: 12 }}>
+          Refresh failed: {error instanceof Error ? error.message : String(error)}{' '}
+          <button className="btn btn-sm btn-secondary" onClick={() => void refetch()} disabled={isFetching}>Retry</button>
+        </div>
+      ) : null}
+      {rows.length === 0 && !isFetching ? (
         <EmptyState message="No audit activity for your department yet." />
       ) : (
-        <TableWrap>
+        <div className={isFetching && data ? 'table-fetching' : ''}>
+          {isFetching && data ? <div className="table-fetching-indicator"><span className="spinner" /> Updating…</div> : null}
+          <TableWrap>
           <table className="data-table">
             <thead><tr><th>Action</th><th>Actor</th><th>Entity</th><th>Details</th><th>When</th></tr></thead>
             <tbody>
@@ -442,6 +596,7 @@ export function HodAuditPage() {
             </tbody>
           </table>
         </TableWrap>
+        </div>
       )}
       <Pagination page={page} totalPages={data?.total_pages ?? 1} onChange={setPage} disabled={isFetching} />
     </SectionCard>

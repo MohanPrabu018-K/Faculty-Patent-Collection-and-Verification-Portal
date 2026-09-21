@@ -67,6 +67,7 @@ def _persist_orchestrator_result(ip_record_id: str, result):
         _create_or_link_master_record(ip_record, result)
         _update_processing_jobs(ip_record_id, result)
         _create_verification_attempts(ip_record, result)
+        _create_final_verification_attempt(ip_record, result)
         _create_duplicate_cases(ip_record, result)
         _create_conflict_cases(ip_record, result)
         ip_record.workflow_state = _derive_workflow_state(ip_record, result)
@@ -79,6 +80,23 @@ def _persist_orchestrator_result(ip_record_id: str, result):
         raise
     finally:
         session.close()
+
+
+def _enum_safe_verification_status(status: str | None) -> str:
+    """Coerce an agent-derived verification status into the DB enum vocabulary.
+
+    ``IpRecord.verification_status`` and ``VerificationAttempt.status`` use the
+    PostgreSQL enum ``verification_status_enum`` which only accepts
+    ``UNVERIFIED``, ``VERIFICATION_REQUIRED``, ``VERIFIED`` and ``MISMATCH``.
+    Agents (VerificationAgent, FinalVerificationAgent) work with a wider
+    vocabulary such as ``NEEDS_REVIEW``, ``NOT_FOUND``, ``ERROR`` and
+    ``REJECTED``; those all mean "needs human review" and are persisted here as
+    ``VERIFICATION_REQUIRED``. The original value is preserved in the
+    ``VerificationAttempt.result`` JSON payload and in ``IpRecord.evidence``.
+    """
+    if status in ("VERIFIED", "MISMATCH", "UNVERIFIED"):
+        return status
+    return "VERIFICATION_REQUIRED"
 
 
 def _collapse_value(value):
@@ -123,22 +141,41 @@ def _update_ip_record_from_agents(ip_record, result):
                     ip_record.ip_type = ocr_ip_type
                 for key in ("patent_number", "design_number", "application_number", "serial_number", "title", "applicant", "patentee", "filing_date", "grant_date", "published_date"):
                     value = _collapse_value(extracted_data.get(key))
+                    if isinstance(value, list) and key in ("applicant", "patentee"):
+                        # Joint proprietors arrive as a name list; a raw list
+                        # must never reach a String column (the driver would
+                        # persist it as a Postgres array literal).
+                        value = ", ".join(str(v) for v in value)
                     if value:
-                        if key == "design_number":
-                            existing = session.execute(
-                                select(IpRecord).where(IpRecord.design_number == value, IpRecord.id != ip_record.id).limit(1)
-                            ).scalar_one_or_none()
-                            if existing:
-                                existing.design_number = None
-                                session.flush()
+                        # Identifiers are preserved on every record that carries
+                        # them. The columns are non-unique by design: cross-record
+                        # deduplication lives in the master-IP layer
+                        # (_create_or_link_master_record) and the duplicate-case
+                        # layer, so clearing another record's identifier here
+                        # would destroy evidence instead of resolving anything.
                         setattr(ip_record, key, value)
                 inventors = _collapse_value(extracted_data.get("inventors"))
                 if inventors:
                     ip_record.contributor_name = ", ".join(inventors) if isinstance(inventors, list) else str(inventors)
                 ip_record.evidence = _json_safe({**(ip_record.evidence or {}), "extraction": {"confidence": confidence, "fields": extracted_data}})
             elif agent_name == "VerificationAgent" and extracted_data.get("verification_status"):
-                ip_record.verification_status = extracted_data["verification_status"]
+                ip_record.verification_status = _enum_safe_verification_status(extracted_data["verification_status"])
                 ip_record.evidence = _json_safe({**(ip_record.evidence or {}), "verification": {"status": extracted_data.get("verification_status"), "confidence": confidence, "source": extracted_data.get("verification_source")}})
+            elif agent_name == "FinalVerificationAgent" and extracted_data.get("final_verification_status"):
+                ip_record.verification_status = _enum_safe_verification_status(extracted_data["final_verification_status"])
+                # Store final decision in evidence for audit trail
+                ip_record.evidence = _json_safe({**(ip_record.evidence or {}), "final_verification": {
+                    "status": extracted_data.get("final_verification_status"),
+                    "rationale": extracted_data.get("final_verification_rationale"),
+                    "confidence": extracted_data.get("final_verification_confidence"),
+                }})
+                # Also update workflow state based on final decision
+                if extracted_data.get("final_verification_status") == "VERIFIED":
+                    ip_record.workflow_state = "VERIFIED"
+                elif extracted_data.get("final_verification_status") == "REJECTED":
+                    ip_record.workflow_state = "REJECTED"
+                else:
+                    ip_record.workflow_state = "NEEDS_REVIEW"
     finally:
         session.close()
 
@@ -149,7 +186,7 @@ def _update_processing_jobs(ip_record_id: str, result):
         for agent_output in result.agent_outputs:
             agent_name = agent_output.get("agent_name", "")
             status = agent_output.get("status", "")
-            job_type_map = {"DocumentClassificationAgent": "classify", "QRAnalysisAgent": "qr", "OCRExtractionAgent": "extract", "DocumentUnderstandingAgent": "understand", "VerificationAgent": "verify", "FacultyIdentityResolutionAgent": "identity", "DuplicateDetectionAgent": "duplicate", "ConflictResolutionAgent": "conflict", "AssociationRecommendationAgent": "association", "DataQualityAgent": "quality", "ReportAnalyticsAgent": "analytics"}
+            job_type_map = {"DocumentClassificationAgent": "classify", "QRAnalysisAgent": "qr", "OCRExtractionAgent": "extract", "DocumentUnderstandingAgent": "understand", "VerificationAgent": "verify", "FacultyIdentityResolutionAgent": "identity", "DuplicateDetectionAgent": "duplicate", "ConflictResolutionAgent": "conflict", "AssociationRecommendationAgent": "association", "DataQualityAgent": "quality", "FinalVerificationAgent": "final_verification", "ReportAnalyticsAgent": "analytics"}
             job_type = job_type_map.get(agent_name, agent_name.lower().replace("agent", ""))
             job = session.execute(select(ProcessingJob).where(ProcessingJob.ip_record_id == ip_record_id, ProcessingJob.job_type == job_type)).scalar_one_or_none()
             if not job:
@@ -217,7 +254,56 @@ def _create_verification_attempts(ip_record, result):
         for agent_output in result.agent_outputs:
             if agent_output.get("agent_name") == "VerificationAgent":
                 extracted = agent_output.get("extracted_data", {}) or {}
-                session.add(VerificationAttempt(ip_record_id=ip_record.id, source=extracted.get("verification_source", "manual"), attempt_number=1, status=extracted.get("verification_status", "UNVERIFIED"), result=json.dumps(_json_safe(extracted)), evidence=_json_safe(agent_output.get("evidence", [])), created_at=datetime.now(timezone.utc)))
+                session.add(VerificationAttempt(ip_record_id=ip_record.id, source=extracted.get("verification_source", "manual"), attempt_number=1, status=_enum_safe_verification_status(extracted.get("verification_status", "UNVERIFIED")), result=json.dumps(_json_safe(extracted)), evidence=_json_safe(agent_output.get("evidence", [])), created_at=datetime.now(timezone.utc)))
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _create_final_verification_attempt(ip_record, result):
+    """Persist the final verification decision as a VerificationAttempt and update MasterIpRecord."""
+    session = get_session()
+    try:
+        for agent_output in result.agent_outputs:
+            if agent_output.get("agent_name") == "FinalVerificationAgent":
+                extracted = agent_output.get("extracted_data", {}) or {}
+                final_status = extracted.get("final_verification_status")
+                final_rationale = extracted.get("final_verification_rationale", "")
+                final_confidence = extracted.get("final_verification_confidence", 0.0)
+                
+                if not final_status:
+                    continue
+                
+                # Create VerificationAttempt for final decision
+                session.add(VerificationAttempt(
+                    ip_record_id=ip_record.id,
+                    source="final_decision",
+                    attempt_number=1,
+                    status=_enum_safe_verification_status(final_status),
+                    result=json.dumps(_json_safe({
+                        "final_verification_status": final_status,
+                        "final_verification_rationale": final_rationale,
+                        "final_verification_confidence": final_confidence,
+                    })),
+                    evidence=_json_safe(agent_output.get("evidence", [])),
+                    created_at=datetime.now(timezone.utc)
+                ))
+                
+                # Update MasterIpRecord verification_decision if linked
+                if ip_record.master_ip_id:
+                    master = session.execute(
+                        select(MasterIpRecord).where(MasterIpRecord.id == ip_record.master_ip_id)
+                    ).scalar_one_or_none()
+                    if master:
+                        master.verification_decision = _json_safe({
+                            "status": final_status,
+                            "rationale": final_rationale,
+                            "confidence": final_confidence,
+                            "decided_at": datetime.now(timezone.utc).isoformat(),
+                        })
         session.commit()
     except Exception:
         session.rollback()
@@ -352,6 +438,59 @@ def _extract_contributor_names(result) -> list[dict[str, Any]]:
     return contributors
 
 
+# Minimum identity best-match confidence for an INTERNAL_FACULTY
+# classification. Calibrated against real certificate data: exact matches of a
+# faculty master name score 0.5, unrelated names score <= ~0.29.
+_IDENTITY_INTERNAL_THRESHOLD = 0.4
+
+
+def _resolve_contributor_match(name, resolved_entities):
+    """Match one contributor name against identity resolution output.
+
+    Returns ``(matched_user_id, match_confidence, is_internal)`` where
+    ``is_internal`` is True only for a credible best match at or above
+    ``_IDENTITY_INTERNAL_THRESHOLD``. Below the floor the caller must treat
+    the contributor as EXTERNAL with no retained user id.
+    """
+    matched_user_id = None
+    match_confidence = None
+
+    for entity in resolved_entities or []:
+        if not isinstance(entity, dict):
+            continue
+        # The FacultyIdentityResolutionAgent emits per-contributor dicts of
+        # the form {contributor_name, best_match{id, faculty_id, confidence},
+        # candidates[]}; older callers may emit a flat {name, id, confidence}
+        # shape, which is still accepted here.
+        ent_name = entity.get("contributor_name") or entity.get("name")
+        if not ent_name or ent_name.lower() != (name or "").lower():
+            continue
+        best = entity.get("best_match") or {}
+        if not isinstance(best, dict):
+            best = {}
+        matched_user_id = (
+            best.get("id")
+            or best.get("faculty_id")
+            or entity.get("id")
+            or entity.get("faculty_id")
+        )
+        try:
+            match_confidence = float(
+                best.get("confidence", entity.get("confidence") or 0.0) or 0.0
+            )
+        except (TypeError, ValueError):
+            match_confidence = 0.0
+        break
+
+    is_internal = bool(
+        matched_user_id
+        and (match_confidence or 0.0) >= _IDENTITY_INTERNAL_THRESHOLD
+    )
+    if not is_internal:
+        return None, None, False
+    return matched_user_id, match_confidence, True
+
+
 def _create_contributors(ip_record, result):
     """Persist extracted contributors with INTERNAL/EXTERNAL/UNKNOWN classification.
 
@@ -389,17 +528,18 @@ def _create_contributors(ip_record, result):
             match_status = "VERIFICATION_REQUIRED"
 
             # Try to find a matching resolved entity for this contributor name.
-            for entity in resolved_entities:
-                if entity.get("name") and entity.get("name").lower() == name.lower():
-                    matched_user_id = entity.get("id") or entity.get("faculty_id")
-                    match_confidence = float(entity.get("confidence") or 0.0)
-                    contributor_type = "INTERNAL_FACULTY"
-                    match_status = (
-                        "CONFIRMED"
-                        if match_confidence >= 0.75
-                        else "VERIFICATION_REQUIRED"
-                    )
-                    break
+            (
+                matched_user_id,
+                match_confidence,
+                is_internal,
+            ) = _resolve_contributor_match(name, resolved_entities)
+            if is_internal:
+                contributor_type = "INTERNAL_FACULTY"
+                match_status = (
+                    "CONFIRMED"
+                    if (match_confidence or 0.0) >= 0.75
+                    else "VERIFICATION_REQUIRED"
+                )
 
             # If no per-name match but a single unambiguous best match exists and
             # there is only one contributor, associate it with that faculty.
@@ -417,6 +557,14 @@ def _create_contributors(ip_record, result):
                 # A name was extracted but did not match any faculty → external.
                 contributor_type = "EXTERNAL"
                 match_status = "NO_MATCH"
+
+            if contributor_type != "INTERNAL_FACULTY":
+                # EXTERNAL/UNKNOWN rows must never retain a candidate user id:
+                # the best match below the internal floor is lookalike noise,
+                # and persisting it points review, master linkage and
+                # association targeting at the wrong faculty member.
+                matched_user_id = None
+                match_confidence = None
 
             session.add(
                 IpContributor(
@@ -444,6 +592,15 @@ def _create_contributors(ip_record, result):
         session.close()
 
 
+def _master_identifier_present(ip_record) -> bool:
+    """Whether the record carries any canonical master-linking identifier."""
+    return bool(
+        ip_record.patent_number
+        or ip_record.design_number
+        or ip_record.application_number
+    )
+
+
 def _create_or_link_master_record(ip_record, result):
     """Create (or link to) a canonical MasterIpRecord for a verified identifier.
 
@@ -455,12 +612,16 @@ def _create_or_link_master_record(ip_record, result):
     session = get_session()
     try:
         # Only create a master record when an identifier was extracted.
+        # A patent application number is a first-class canonical identifier:
+        # application publications carry no grant patent number yet, so
+        # requiring patent/design numbers here would leave every pure
+        # application without a master record.
+        if not _master_identifier_present(ip_record):
+            return
+
         patent_number = ip_record.patent_number
         design_number = ip_record.design_number
         application_number = ip_record.application_number
-
-        if not patent_number and not design_number:
-            return
 
         # Find an existing master record by identifier (dedupe layer).
         query = select(MasterIpRecord)
@@ -634,11 +795,24 @@ def _derive_workflow_state(ip_record, result) -> str:
         a.get("agent_name") == "ConflictResolutionAgent" and a.get("conflicts")
         for a in result.agent_outputs
     )
+    open_identity_review = any(
+        a.get("agent_name") == "FacultyIdentityResolutionAgent" and a.get("conflicts")
+        for a in result.agent_outputs
+    )
+    # Check for faculty approval pending
+    faculty_approval_pending = any(
+        a.get("agent_name") == "AssociationRecommendationAgent" and a.get("extracted_data", {}).get("recommendations")
+        for a in result.agent_outputs
+    )
 
     if open_duplicates:
         target = WorkflowState.DUPLICATE_REVIEW
     elif open_conflicts:
         target = WorkflowState.DATA_CONFLICT
+    elif open_identity_review:
+        target = WorkflowState.IDENTITY_REVIEW
+    elif faculty_approval_pending:
+        target = WorkflowState.FACULTY_APPROVAL_PENDING
     elif target == WorkflowState.VERIFIED and result.overall_requires_human_review:
         target = WorkflowState.NEEDS_REVIEW
 

@@ -1,4 +1,5 @@
-import { Outlet, NavLink, useNavigate } from 'react-router-dom';
+import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
+import { Suspense } from 'react';
 import {
   LogOut, Shield, Upload, FileText, Users, LayoutDashboard, Database, BriefcaseBusiness,
   Bell, UserCircle, History, Link2, CopyCheck, GitCompareArrows, BarChart3, ScrollText, Award, FileSpreadsheet,
@@ -14,6 +15,7 @@ export function AppShell() {
   const { user, logout } = useAuth();
   const { notify } = useToast();
   const navigate = useNavigate();
+  const location = useLocation();
   const isAdmin = user?.role === 'super_admin';
   const isHod = user?.role === 'hod_admin';
   const isFaculty = user?.role === 'faculty';
@@ -90,7 +92,13 @@ export function AppShell() {
             <button className="btn btn-secondary" onClick={async () => { await logout(); notify('info', 'Logged out'); navigate('/login'); }} aria-label="Logout"><LogOut size={16} /> Logout</button>
           </div>
         </header>
-        <main className="main"><Outlet /></main>
+        <main className="main">
+          <Suspense fallback={<div className="loading-inline" role="status" aria-live="polite"><span className="spinner" aria-hidden="true" /><span>Loading…</span></div>}>
+            <div key={location.pathname} className="page-enter">
+              <Outlet />
+            </div>
+          </Suspense>
+        </main>
         <div className="mobile-nav">
           {visible.map((link) => {
             const Icon = link.icon;

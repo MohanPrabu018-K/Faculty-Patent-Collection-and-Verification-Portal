@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import csv
-import io
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -13,6 +12,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.database import get_async_session_context
 from app.models.base import Department, IpContributor, IpRecord, User, VerificationAttempt
+from app.services.export_renderers import render_csv, render_docx, render_json, render_pdf, render_txt, render_xlsx
 
 
 class SearchSortField(Enum):
@@ -135,6 +135,8 @@ class ExportFormat(Enum):
     EXCEL = "excel"
     JSON = "json"
     PDF = "pdf"
+    DOCX = "docx"
+    TXT = "txt"
 
 
 @dataclass
@@ -251,28 +253,80 @@ class SearchService:
 class AnalyticsService:
     async def get_overview(self, date_from: str | None = None, date_to: str | None = None) -> AnalyticsOverview:
         async with get_async_session_context() as session:
-            total_faculty = (await session.execute(select(func.count()).select_from(User).where(User.role == "faculty"))).scalar_one()
-            active_faculty = (await session.execute(select(func.count()).select_from(User).where(User.role == "faculty", User.is_active.is_(True)))).scalar_one()
-            total_ip_records = (await session.execute(select(func.count()).select_from(IpRecord))).scalar_one()
-            verified_records = (await session.execute(select(func.count()).select_from(IpRecord).where(IpRecord.verification_status == "VERIFIED"))).scalar_one()
-            pending_verification = (await session.execute(select(func.count()).select_from(IpRecord).where(IpRecord.verification_status.in_(["UNVERIFIED", "VERIFICATION_REQUIRED"])))).scalar_one()
-            pending_processing = (await session.execute(select(func.count()).select_from(IpRecord).where(IpRecord.processing_status.in_(["PENDING", "QUEUED", "PROCESSING"])))).scalar_one()
-            by_ip_type = {row[0]: row[1] for row in (await session.execute(select(IpRecord.ip_type, func.count()).group_by(IpRecord.ip_type))).all()}
-            by_verification_status = {row[0]: row[1] for row in (await session.execute(select(IpRecord.verification_status, func.count()).group_by(IpRecord.verification_status))).all()}
-            by_processing_status = {row[0]: row[1] for row in (await session.execute(select(IpRecord.processing_status, func.count()).group_by(IpRecord.processing_status))).all()}
-            by_department = {row[0] or "Unknown": row[1] for row in (await session.execute(select(Department.name, func.count()).select_from(IpRecord).join(Department, Department.id == IpRecord.department_id, isouter=True).group_by(Department.name))).all()}
-            by_year = {str(row[0]): row[1] for row in (await session.execute(select(func.extract("year", IpRecord.created_at), func.count()).group_by(func.extract("year", IpRecord.created_at)))).all()}
-            collaborative_records = (await session.execute(select(func.count()).select_from(IpRecord).join(IpContributor, IpContributor.ip_record_id == IpRecord.id).group_by(IpRecord.id).having(func.count(IpContributor.id) > 1))).all()
-            external_contributions = (await session.execute(select(func.count()).select_from(IpContributor).where(IpContributor.is_external.is_(True)))).scalar_one()
-            # Reuse one expression object for SELECT/GROUP BY/ORDER BY: Postgres
-            # rejects a parameterised date_trunc() unless the bind params are
-            # provably identical, which only happens when SQLAlchemy renders the
-            # same placeholder for the same object.
+            # --- Query 1: User counts (2 values from 1 query) ---
+            user_row = (await session.execute(
+                select(
+                    func.count().label("total_faculty"),
+                    func.count().filter(User.is_active.is_(True)).label("active_faculty"),
+                ).where(User.role == "faculty")
+            )).one()
+
+            # --- Query 2: IpRecord counts (4 values from 1 query) ---
+            ip_row = (await session.execute(
+                select(
+                    func.count(func.distinct(IpRecord.master_ip_id)).label("total_ip_records"),
+                    func.count(func.distinct(IpRecord.master_ip_id)).filter(IpRecord.verification_status == "VERIFIED").label("verified_records"),
+                    func.count().filter(IpRecord.verification_status.in_(["UNVERIFIED", "VERIFICATION_REQUIRED"])).label("pending_verification"),
+                    func.count().filter(IpRecord.processing_status.in_(["PENDING", "QUEUED", "PROCESSING"])).label("pending_processing"),
+                )
+            )).one()
+
+            # --- Query 3-7: GROUP BY queries (5 queries, each returns multiple rows) ---
+            by_ip_type = {row[0]: row[1] for row in (await session.execute(
+                select(IpRecord.ip_type, func.count(func.distinct(IpRecord.master_ip_id))).group_by(IpRecord.ip_type)
+            )).all()}
+
+            by_verification_status = {row[0]: row[1] for row in (await session.execute(
+                select(IpRecord.verification_status, func.count()).group_by(IpRecord.verification_status)
+            )).all()}
+
+            by_processing_status = {row[0]: row[1] for row in (await session.execute(
+                select(IpRecord.processing_status, func.count()).group_by(IpRecord.processing_status)
+            )).all()}
+
+            by_department = {row[0] or "Unknown": row[1] for row in (await session.execute(
+                select(Department.name, func.count(func.distinct(IpRecord.master_ip_id)))
+                .select_from(IpRecord).join(Department, Department.id == IpRecord.department_id, isouter=True)
+                .group_by(Department.name)
+            )).all()}
+
+            by_year = {str(row[0]): row[1] for row in (await session.execute(
+                select(func.extract("year", IpRecord.created_at), func.count())
+                .group_by(func.extract("year", IpRecord.created_at))
+            )).all()}
+
+            # --- Query 8-9: Cross-table counts ---
+            collaborative_rows = (await session.execute(
+                select(func.count()).select_from(IpRecord)
+                .join(IpContributor, IpContributor.ip_record_id == IpRecord.id)
+                .group_by(IpRecord.id).having(func.count(IpContributor.id) > 1)
+            )).all()
+
+            external_contributions = (await session.execute(
+                select(func.count()).select_from(IpContributor).where(IpContributor.is_external.is_(True))
+            )).scalar_one()
+
+            # --- Query 10-11: Trend queries (reuse expression object for date_trunc) ---
             upload_bucket = func.date_trunc("month", IpRecord.created_at)
-            upload_trend = [TimeSeriesPoint(date=str(row[0]), value=row[1]) for row in (await session.execute(select(upload_bucket, func.count()).group_by(upload_bucket).order_by(upload_bucket))).all()]
+            upload_trend = [TimeSeriesPoint(date=str(row[0]), value=row[1]) for row in (await session.execute(
+                select(upload_bucket, func.count()).group_by(upload_bucket).order_by(upload_bucket)
+            )).all()]
+
             verif_bucket = func.date_trunc("month", VerificationAttempt.created_at)
-            verification_trend = [TimeSeriesPoint(date=str(row[0]), value=row[1]) for row in (await session.execute(select(verif_bucket, func.count()).group_by(verif_bucket).order_by(verif_bucket))).all()]
-            return AnalyticsOverview(total_faculty=total_faculty, active_faculty=active_faculty, total_ip_records=total_ip_records, verified_records=verified_records, pending_verification=pending_verification, pending_processing=pending_processing, by_ip_type=by_ip_type, by_verification_status=by_verification_status, by_processing_status=by_processing_status, by_department=by_department, by_year=by_year, collaborative_records=len(collaborative_records), external_contributions=external_contributions, upload_trend=upload_trend, verification_trend=verification_trend)
+            verification_trend = [TimeSeriesPoint(date=str(row[0]), value=row[1]) for row in (await session.execute(
+                select(verif_bucket, func.count()).group_by(verif_bucket).order_by(verif_bucket)
+            )).all()]
+
+            return AnalyticsOverview(
+                total_faculty=user_row.total_faculty, active_faculty=user_row.active_faculty,
+                total_ip_records=ip_row.total_ip_records, verified_records=ip_row.verified_records,
+                pending_verification=ip_row.pending_verification, pending_processing=ip_row.pending_processing,
+                by_ip_type=by_ip_type, by_verification_status=by_verification_status,
+                by_processing_status=by_processing_status, by_department=by_department,
+                by_year=by_year, collaborative_records=len(collaborative_rows),
+                external_contributions=external_contributions,
+                upload_trend=upload_trend, verification_trend=verification_trend,
+            )
 
     async def get_by_faculty(self, faculty_id: str | None = None, page: int = 1, per_page: int = 20) -> tuple[list[FacultyAnalytics], int]:
         async with get_async_session_context() as session:
@@ -281,12 +335,30 @@ class AnalyticsService:
                 query = query.where(User.faculty_id == faculty_id)
             users = (await session.execute(query.offset((page - 1) * per_page).limit(per_page))).scalars().all()
             total = (await session.execute(select(func.count()).select_from(User).where(User.role == "faculty"))).scalar_one()
+            # Single grouped query for all counts instead of N+1 per-user queries
+            user_ids = [u.id for u in users]
+            counts_map: dict[str, Any] = {}
+            if user_ids:
+                rows = (await session.execute(
+                    select(
+                        IpRecord.uploader_id,
+                        func.count().label("total"),
+                        func.count().filter(IpRecord.verification_status == "VERIFIED").label("verified"),
+                        func.count().filter(IpRecord.processing_status.in_(["PENDING", "QUEUED", "PROCESSING"])).label("pending"),
+                    )
+                    .where(IpRecord.uploader_id.in_(user_ids))
+                    .group_by(IpRecord.uploader_id)
+                )).all()
+                counts_map = {r.uploader_id: r for r in rows}
             results = []
             for user in users:
-                record_count = (await session.execute(select(func.count()).select_from(IpRecord).where(IpRecord.uploader_id == user.id))).scalar_one()
-                verified = (await session.execute(select(func.count()).select_from(IpRecord).where(IpRecord.uploader_id == user.id, IpRecord.verification_status == "VERIFIED"))).scalar_one()
-                pending = (await session.execute(select(func.count()).select_from(IpRecord).where(IpRecord.uploader_id == user.id, IpRecord.processing_status.in_(["PENDING", "QUEUED", "PROCESSING"])))).scalar_one()
-                results.append(FacultyAnalytics(faculty_id=user.faculty_id or user.id, faculty_name=user.full_name, total_records=record_count, verified_records=verified, pending_records=pending, by_ip_type={}, by_year={}, collaborative_count=0, external_collaborations=0))
+                c = counts_map.get(user.id)
+                results.append(FacultyAnalytics(
+                    faculty_id=user.faculty_id or user.id, faculty_name=user.full_name,
+                    total_records=c.total if c else 0, verified_records=c.verified if c else 0,
+                    pending_records=c.pending if c else 0, by_ip_type={}, by_year={},
+                    collaborative_count=0, external_collaborations=0,
+                ))
             return results, total
 
     async def get_by_department(self, department_id: str | None = None, page: int = 1, per_page: int = 20) -> tuple[list[DepartmentAnalytics], int]:
@@ -296,12 +368,40 @@ class AnalyticsService:
                 query = query.where(Department.id == department_id)
             departments = (await session.execute(query.offset((page - 1) * per_page).limit(per_page))).scalars().all()
             total = (await session.execute(select(func.count()).select_from(Department))).scalar_one()
+            dept_ids = [d.id for d in departments]
+            # Single grouped query for IpRecord counts + single grouped query for faculty counts
+            ip_counts_map: dict[str, Any] = {}
+            fac_counts_map: dict[str, int] = {}
+            if dept_ids:
+                ip_rows = (await session.execute(
+                    select(
+                        IpRecord.department_id,
+                        func.count(func.distinct(IpRecord.master_ip_id)).label("total"),
+                        func.count(func.distinct(IpRecord.master_ip_id)).filter(IpRecord.verification_status == "VERIFIED").label("verified"),
+                    )
+                    .where(IpRecord.department_id.in_(dept_ids))
+                    .group_by(IpRecord.department_id)
+                )).all()
+                ip_counts_map = {r.department_id: r for r in ip_rows}
+                # Authoritative faculty count comes from User.department_id —
+                # the old join through IpRecord counted upload rows (inflated
+                # when one faculty uploaded many records) and reported zero
+                # for departments whose faculty had not uploaded yet.
+                fac_rows = (await session.execute(
+                    select(User.department_id, func.count().label("cnt"))
+                    .where(User.department_id.in_(dept_ids), User.role == "faculty")
+                    .group_by(User.department_id)
+                )).all()
+                fac_counts_map = {r.department_id: r.cnt for r in fac_rows}
             results = []
             for dept in departments:
-                total_records = (await session.execute(select(func.count()).select_from(IpRecord).where(IpRecord.department_id == dept.id))).scalar_one()
-                verified_records = (await session.execute(select(func.count()).select_from(IpRecord).where(IpRecord.department_id == dept.id, IpRecord.verification_status == "VERIFIED"))).scalar_one()
-                faculty_total = (await session.execute(select(func.count()).select_from(User).join(IpRecord, IpRecord.uploader_id == User.id).where(IpRecord.department_id == dept.id))).scalar_one()
-                results.append(DepartmentAnalytics(department_id=dept.id, department_name=dept.name, total_faculty=faculty_total, total_records=total_records, verified_records=verified_records, by_ip_type={}, by_year={}))
+                c = ip_counts_map.get(dept.id)
+                results.append(DepartmentAnalytics(
+                    department_id=dept.id, department_name=dept.name,
+                    total_faculty=fac_counts_map.get(dept.id, 0),
+                    total_records=c.total if c else 0, verified_records=c.verified if c else 0,
+                    by_ip_type={}, by_year={},
+                ))
             return results, total
 
     async def get_trends(self, metric: str, granularity: str = "month", date_from: str | None = None, date_to: str | None = None) -> list[TimeSeriesPoint]:
@@ -315,9 +415,35 @@ class ExportService:
     def __init__(self):
         self._jobs: dict[str, dict] = {}
 
+    @staticmethod
+    def _render(format: ExportFormat, records: list[Any], selected_fields: list[str] | None = None) -> bytes:
+        """Render records in the requested export format.
+
+        Each format produces genuinely distinct output: CSV via the csv module,
+        JSON as a document, .xlsx via a stdlib zipfile package, and PDF via a
+        minimal zero-dependency writer. No format silently emits another's bytes.
+        """
+        if format is ExportFormat.CSV:
+            return render_csv(records, selected_fields)
+        if format is ExportFormat.JSON:
+            return render_json(records, selected_fields)
+        if format is ExportFormat.EXCEL:
+            return render_xlsx(records, selected_fields)
+        if format is ExportFormat.PDF:
+            return render_pdf(records, selected_fields)
+        if format is ExportFormat.DOCX:
+            return render_docx(records, selected_fields)
+        if format is ExportFormat.TXT:
+            return render_txt(records, selected_fields)
+        raise ValueError(f"Unsupported export format: {format}")
+
     async def create_export(self, format: ExportFormat, filters: dict[str, Any], user_id: str) -> ExportJob:
-        job_id = f"export-{format.value}-{int(time.time())}"
+        # uuid suffix: the old int(time.time()) id collided when two exports
+        # started within the same second and jobs were lost on restart note —
+        # uniqueness at least holds within a process lifetime.
+        job_id = f"export-{format.value}-{int(time.time())}-{uuid.uuid4().hex[:8]}"
         async with get_async_session_context() as session:
+            from datetime import datetime as _dt
             query = select(IpRecord)
             if filters.get("faculty_id"):
                 query = query.where(IpRecord.uploader_id == filters["faculty_id"])
@@ -327,14 +453,29 @@ class ExportService:
                 query = query.where(IpRecord.ip_type == filters["ip_type"])
             if filters.get("verification_status"):
                 query = query.where(IpRecord.verification_status == filters["verification_status"])
-            records = (await session.execute(query.order_by(IpRecord.created_at.desc()))).scalars().all()
-            fieldnames = ["id", "ip_type", "patent_number", "design_number", "application_number", "title", "verification_status", "processing_status", "created_at"]
-            output = io.StringIO()
-            writer = csv.DictWriter(output, fieldnames=fieldnames)
-            writer.writeheader()
-            for record in records:
-                writer.writerow({"id": record.id, "ip_type": record.ip_type, "patent_number": record.patent_number or "", "design_number": record.design_number or "", "application_number": record.application_number or "", "title": record.title or "", "verification_status": record.verification_status, "processing_status": record.processing_status, "created_at": record.created_at.isoformat() if record.created_at else ""})
-            self._jobs[job_id] = {"id": job_id, "format": format.value, "filters": filters, "status": "completed", "created_at": datetime.now(UTC), "created_by": user_id, "record_count": len(records), "file_data": output.getvalue().encode("utf-8"), "file_path": None, "error": None}
+            if filters.get("processing_status"):
+                query = query.where(IpRecord.processing_status == filters["processing_status"])
+            if filters.get("is_archived") is not None:
+                val = filters["is_archived"]
+                flag = val is True or str(val).lower() == "true"
+                query = query.where(IpRecord.is_archived.is_(flag))
+            if filters.get("date_from"):
+                try:
+                    query = query.where(IpRecord.created_at >= _dt.fromisoformat(str(filters["date_from"])))
+                except ValueError:
+                    pass
+            if filters.get("date_to"):
+                try:
+                    query = query.where(IpRecord.created_at <= _dt.fromisoformat(str(filters["date_to"])))
+                except ValueError:
+                    pass
+            if filters.get("search") or filters.get("query"):
+                like = f"%{filters.get('search') or filters.get('query')}%"
+                query = query.where(or_(IpRecord.title.ilike(like), IpRecord.patent_number.ilike(like), IpRecord.application_number.ilike(like), IpRecord.design_number.ilike(like), IpRecord.applicant.ilike(like)))
+            records = (await session.execute(query.order_by(IpRecord.created_at.desc()).limit(5000))).scalars().all()
+            selected_fields = filters.get("selected_fields")
+            file_data = self._render(format, list(records), selected_fields)
+            self._jobs[job_id] = {"id": job_id, "format": format.value, "filters": filters, "status": "completed", "created_at": datetime.now(UTC), "created_by": user_id, "record_count": len(records), "file_data": file_data, "file_path": None, "error": None}
             return ExportJob(id=job_id, format=format, filters=filters, status="completed", created_at=self._jobs[job_id]["created_at"], completed_at=datetime.now(UTC), record_count=len(records))
 
     async def get_job_status(self, job_id: str) -> dict | None:

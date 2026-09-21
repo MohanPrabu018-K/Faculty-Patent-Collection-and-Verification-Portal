@@ -22,6 +22,7 @@ class WorkflowState(str, Enum):
     DUPLICATE_REVIEW = "DUPLICATE_REVIEW"
     NEEDS_REVIEW = "NEEDS_REVIEW"
     VERIFIED = "VERIFIED"
+    GRANTED = "GRANTED"
     REJECTED = "REJECTED"
     FAILED = "FAILED"
 
@@ -75,7 +76,8 @@ _TRANSITIONS: dict[WorkflowState, set[WorkflowState]] = {
         WorkflowState.REJECTED,
         WorkflowState.IDENTIFIER_FOUND,
     },
-    WorkflowState.VERIFIED: set(),  # Terminal
+    WorkflowState.VERIFIED: {WorkflowState.GRANTED},  # VERIFIED -> GRANTED is the grant action
+    WorkflowState.GRANTED: set(),  # Terminal
     WorkflowState.REJECTED: set(),  # Terminal
     WorkflowState.FAILED: {WorkflowState.PROCESSING, WorkflowState.REJECTED},  # Retry allowed
 }
@@ -173,7 +175,7 @@ def describe_state(state: str | None) -> dict[str, Any]:
     s = coerce_state(state)
     return {
         "state": s.value,
-        "terminal": s in (WorkflowState.VERIFIED, WorkflowState.REJECTED),
+        "terminal": s in (WorkflowState.VERIFIED, WorkflowState.GRANTED, WorkflowState.REJECTED),
         "requires_human_review": s in {
             WorkflowState.NEEDS_REVIEW,
             WorkflowState.IDENTITY_REVIEW,

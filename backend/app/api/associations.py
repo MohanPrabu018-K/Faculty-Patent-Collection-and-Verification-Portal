@@ -168,6 +168,32 @@ async def send_association_request(request: Request, recipient_faculty_id: str, 
 
     record = await _resolve_associated_record(db, record_id)
 
+    resolved_record_id = record.id if record else record_id
+    duplicate = (
+        await db.execute(
+            select(AssociationRequest).where(
+                AssociationRequest.ip_record_id == resolved_record_id,
+                or_(
+                    AssociationRequest.requesting_faculty_id == requester_id,
+                    AssociationRequest.requester_id == requester_id,
+                ),
+                or_(
+                    AssociationRequest.target_faculty_id == recipient.id,
+                    AssociationRequest.recipient_id == recipient.id,
+                ),
+                AssociationRequest.status.in_(
+                    ["PENDING", "CLARIFICATION_REQUESTED", "ADMIN_REVIEW", "ACCEPTED", "APPROVED"]
+                ),
+            )
+        )
+    ).scalar_one_or_none()
+    if duplicate:
+        raise PortalError(
+            message=f"Association request already {duplicate.status} for this record and faculty",
+            error_code="VALIDATION_ERROR",
+            status_code=409,
+        )
+
     association = AssociationRequest(
         id=str(uuid.uuid4()),
         ip_record_id=record.id if record else record_id,
@@ -199,7 +225,7 @@ async def send_association_request(request: Request, recipient_faculty_id: str, 
         f"{current_user.get('full_name', 'A faculty member')} requested to associate you with a patent/design record.",
         related_entity_id=association.id,
         priority=NotificationPriority.HIGH,
-        action_url=f"/associations?request={association.id}",
+        action_url="/faculty/associations",
         action_label="Review request",
         metadata={"request_id": association.id, "record_id": record_id},
     )
@@ -257,7 +283,7 @@ async def respond_association_request(request: Request, request_id: str, action:
                 f"{current_user.get('full_name', 'A faculty member')} approved your association request.",
                 related_entity_id=request_id,
                 priority=NotificationPriority.MEDIUM,
-                action_url=f"/associations?request={request_id}",
+                action_url="/faculty/associations",
                 action_label="View",
                 metadata={"request_id": request_id},
             )
@@ -278,7 +304,7 @@ async def respond_association_request(request: Request, request_id: str, action:
                 f"{current_user.get('full_name', 'A faculty member')} indicated this record is not theirs.",
                 related_entity_id=request_id,
                 priority=NotificationPriority.HIGH,
-                action_url="/associations",
+                action_url="/faculty/associations",
                 action_label="Review",
                 metadata={"request_id": request_id},
             )

@@ -1,7 +1,9 @@
-import { useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
-import { SectionCard, StatusBadge, LoadingBlock, ErrorBlock, display } from '../../components/ui';
+import { SectionCard, StatusBadge, ErrorBlock, display } from '../../components/ui';
 import { useAuth } from '../../stores/auth';
+import { useToast } from '../../stores/toast';
 
 function KV({ label, value }: { label: string; value: unknown }) {
   return <div className="detail-field"><span>{label}</span><strong>{display(value)}</strong></div>;
@@ -21,9 +23,17 @@ function StatusRow({ label, status, note }: { label: string; status: string; not
 
 export function AdminSettingsPage() {
   const { user } = useAuth();
+  const { notify } = useToast();
+  const client = useQueryClient();
   const { data, isLoading, error } = useQuery({ queryKey: ['admin-settings'], queryFn: api.adminSettings });
+  const [mb, setMb] = useState('');
+  const save = useMutation({
+    mutationFn: (v: number) => api.adminUpdateSettings({ max_upload_mb: v }),
+    onSuccess: async (r) => { notify('success', `Upload limit set to ${r.max_upload_mb} MB`); setMb(''); await client.invalidateQueries({ queryKey: ['admin-settings'] }); },
+    onError: (e) => notify('error', e instanceof Error ? e.message : 'Save failed'),
+  });
 
-  if (isLoading) return <LoadingBlock label="Loading settings…" />;
+  if (isLoading && !data) return <div className="loading-inline" style={{ padding: '24px 0' }}><span className="spinner" /><span>Loading settings…</span></div>;
   if (error) return <ErrorBlock error={error} />;
   if (!data) return <ErrorBlock error="Settings unavailable" />;
 
@@ -78,13 +88,18 @@ export function AdminSettingsPage() {
         </div>
       </SectionCard>
 
-      <SectionCard title="Uploads" subtitle="Read-only upload limits.">
+      <SectionCard title="Uploads" subtitle="Super Admin can change max upload size (enforced by backend on new uploads). Secrets are never editable here.">
         <div className="kv-grid">
           <KV label="Allowed file types" value={up.allowed_extensions} />
           <KV label="Max upload size" value={`${display(up.max_upload_mb)} MB`} />
           <KV label="Max PDF pages" value={up.max_pdf_pages} />
           <KV label="Storage backend" value={up.storage_backend} />
         </div>
+        <div className="toolbar" style={{ marginTop: 12 }}>
+          <input className="toolbar-input" type="number" min={Number(up.max_upload_mb_min ?? 1)} max={Number(up.max_upload_mb_max ?? 100)} step="1" placeholder={`New limit in MB (${display(up.max_upload_mb_min)}–${display(up.max_upload_mb_max)})`} value={mb} onChange={(e) => setMb(e.target.value)} aria-label="Max upload MB" style={{ width: 260 }} />
+          <button className="btn btn-primary btn-sm" disabled={save.isPending || !mb} onClick={() => save.mutate(Number(mb))}>{save.isPending ? 'Saving…' : 'Save upload limit'}</button>
+        </div>
+        <p className="muted">Allowed {display(up.max_upload_mb_min)}–{display(up.max_upload_mb_max)} MB. Every change is audit-logged (SETTINGS_UPDATED).</p>
       </SectionCard>
 
       <SectionCard title="Session & security" subtitle="Read-only session policy.">

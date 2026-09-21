@@ -48,13 +48,35 @@ class ConflictResolutionAgent:
                     all_conflicts.extend(agent_out.get("conflicts", []))
                     all_warnings.extend(agent_out.get("warnings", []))
             
-            # Also check direct conflicts from extracted data
-            extracted_data_input = input_data.context.get("extracted_data", {}) if input_data.context else {}
+            # Also read canonical data for context (e.g., verification status)
+            canonical_data = input_data.context.get("canonical_data", {}) if input_data.context else {}
+            
+            # Add verification mismatch conflict if verification status indicates mismatch
+            verification_status = canonical_data.get("verification_status")
+            if verification_status == "MISMATCH":
+                all_conflicts.append({
+                    "type": "verification_mismatch",
+                    "description": "Official verification returned MISMATCH",
+                    "confidence": canonical_data.get("verification_confidence", 0.8),
+                })
+            
+            # Add field-level verification mismatches from canonical data
+            field_comparisons = canonical_data.get("verification_field_comparisons", [])
+            for fc in field_comparisons:
+                if fc.get("status") == "MISMATCH":
+                    all_conflicts.append({
+                        "type": "verification_field_mismatch",
+                        "field": fc.get("field"),
+                        "description": f"Field '{fc.get('field')}' mismatch: certificate='{fc.get('certificate_value')}' vs official='{fc.get('official_value')}'",
+                        "certificate_value": fc.get("certificate_value"),
+                        "official_value": fc.get("official_value"),
+                        "confidence": fc.get("confidence", 0.8),
+                    })
             
             # Analyze each conflict type
-            duplicate_conflicts = [c for c in all_conflicts if c.get("type") in ("duplicate_patent", "duplicate_design", "duplicate_file")]
+            duplicate_conflicts = [c for c in all_conflicts if c.get("type") in ("duplicate_patent", "duplicate_design", "duplicate_file", "duplicate_record")]
             same_name_conflicts = [c for c in all_conflicts if c.get("type") == "same_name_faculty"]
-            verification_conflicts = [c for c in all_conflicts if c.get("type") == "verification_mismatch"]
+            verification_conflicts = [c for c in all_conflicts if c.get("type") in ("verification_mismatch", "verification_field_mismatch")]
             
             # Determine conflict severity and recommended actions
             critical_conflicts = []
@@ -62,9 +84,9 @@ class ConflictResolutionAgent:
             for conflict in all_conflicts:
                 c_type = conflict.get("type", "")
                 
-                if c_type == "duplicate_patent" or c_type == "duplicate_design":
+                if c_type in ("duplicate_patent", "duplicate_design", "duplicate_record"):
                     critical_conflicts.append({
-                        "id": f"C{len([c for c in all_conflicts if c.get('type', '').startswith('duplicate')]) + 1}",
+                        "id": f"C{len([c for c in all_conflicts if c.get('type', '') in ('duplicate_patent', 'duplicate_design', 'duplicate_record')]) + 1}",
                         "type": c_type,
                         "severity": "high",
                         "description": conflict.get("description", "Duplicate detected"),
@@ -82,14 +104,18 @@ class ConflictResolutionAgent:
                         "confidence": conflict.get("confidence", 0.0),
                     })
                 
-                elif c_type == "verification_mismatch":
+                elif c_type in ("verification_mismatch", "verification_field_mismatch"):
+                    field_info = f" (field: {conflict.get('field')})" if conflict.get('field') else ""
                     critical_conflicts.append({
-                        "id": f"C{len([c for c in all_conflicts if c.get('type') == 'verification_mismatch']) + 3}",
+                        "id": f"C{len([c for c in all_conflicts if c.get('type') in ('verification_mismatch', 'verification_field_mismatch')]) + 3}",
                         "type": c_type,
-                        "severity": "medium",
-                        "description": conflict.get("description", "Verification mismatch"),
+                        "severity": "high",
+                        "description": conflict.get("description", "Verification mismatch") + field_info,
                         "action": "reverify_or_manual_review",
                         "confidence": conflict.get("confidence", 0.0),
+                        "field": conflict.get("field"),
+                        "certificate_value": conflict.get("certificate_value"),
+                        "official_value": conflict.get("official_value"),
                     })
                 
                 elif c_type == "patent_design_misclassification":
@@ -149,11 +175,11 @@ class ConflictResolutionAgent:
             # Determine recommendation
             if not critical_conflicts:
                 recommendation = "proceed_automatically"
-            elif any(c["type"] in ("duplicate_patent", "duplicate_design") for c in critical_conflicts):
+            elif any(c["type"] in ("duplicate_patent", "duplicate_design", "duplicate_record") for c in critical_conflicts):
                 recommendation = "reject_and_request_resubmission"
             elif any(c["type"] == "same_name_faculty" for c in critical_conflicts):
                 recommendation = "human_review_required"
-            elif any(c["type"] == "verification_mismatch" for c in critical_conflicts):
+            elif any(c["type"] in ("verification_mismatch", "verification_field_mismatch") for c in critical_conflicts):
                 recommendation = "reverify_and_review"
             else:
                 recommendation = "human_review_required"
