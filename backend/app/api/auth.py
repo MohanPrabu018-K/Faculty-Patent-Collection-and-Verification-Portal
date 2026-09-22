@@ -102,14 +102,20 @@ def _set_csrf_cookie(response: Response, csrf_token: str) -> None:
     The CSRF token is intentionally NOT httpOnly because
     the frontend/client must be able to read it and send it
     through the X-CSRF-Token header.
+
+    The cookie uses the same SameSite/Secure attributes as the auth cookie:
+    cross-site production deployments (frontend and API on different
+    domains) require SameSite=None + Secure, otherwise browsers never send
+    the cookie on cross-site fetch and every state-changing request fails
+    CSRF validation with 400.
     """
 
     response.set_cookie(
         key="csrf_token",
         value=csrf_token,
         httponly=False,
-        secure=False,
-        samesite="lax",
+        secure=app_settings.cookie_secure,
+        samesite=app_settings.cookie_samesite,
         path="/",
         max_age=app_settings.jwt_access_token_minutes * 60,
     )
@@ -143,16 +149,23 @@ def _set_auth_cookies(
 def _clear_auth_cookies(response: Response) -> None:
     """
     Clear authentication and CSRF cookies.
+
+    Deletion must carry the same SameSite/Secure attributes the cookies
+    were set with, otherwise browsers keep a SameSite=None; Secure cookie.
     """
 
     response.delete_cookie(
         key="access_token",
         path="/",
+        secure=app_settings.cookie_secure,
+        samesite=app_settings.cookie_samesite,
     )
 
     response.delete_cookie(
         key="csrf_token",
         path="/",
+        secure=app_settings.cookie_secure,
+        samesite=app_settings.cookie_samesite,
     )
 
 

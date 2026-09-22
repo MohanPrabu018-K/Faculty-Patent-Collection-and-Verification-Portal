@@ -115,15 +115,38 @@ function readCsrfToken(): string | undefined {
   return match ? decodeURIComponent(match[1]) : undefined;
 }
 
+// In-memory auth material for cross-site deployments.
+//
+// The API sets httpOnly cookies, but cross-site cookies require
+// SameSite=None; Secure and are dropped entirely when the browser blocks
+// third-party cookies. The login/refresh responses also carry the JWT (and
+// CSRF token) in the body, so keep them in memory and send them as an
+// Authorization: Bearer fallback alongside credentials: 'include'.
+// Memory-only (never localStorage) so a token never persists to disk.
+// The backend already accepts Bearer in get_current_user and exempts a
+// valid Bearer from the cookie double-submit CSRF check (a Bearer token
+// is not ambient authority, unlike cookies).
+let memAccessToken: string | null = null;
+let memCsrfToken: string | null = null;
+
+function readStoredCsrfToken(): string | undefined {
+  return memCsrfToken || readCsrfToken();
+}
+
+function withAuthHeader(headers: Record<string, string>): Record<string, string> {
+  if (memAccessToken && !headers['Authorization']) headers['Authorization'] = `Bearer ${memAccessToken}`;
+  return headers;
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const { headers: _headers, ...rest } = init;
   const method = (init.method || 'GET').toUpperCase();
-  const headers: Record<string, string> = {
+  const headers: Record<string, string> = withAuthHeader({
     ...(_headers as Record<string, string> | undefined),
-  };
+  });
   if (method !== 'GET') headers['Content-Type'] = headers['Content-Type'] ?? 'application/json';
   if (method !== 'GET' && !path.startsWith('/auth/')) {
-    const csrf = readCsrfToken();
+    const csrf = readStoredCsrfToken();
     if (csrf && !headers['X-CSRF-Token']) headers['X-CSRF-Token'] = csrf;
   }
   try {
@@ -152,8 +175,8 @@ async function requestWithBody<T>(path: string, body: unknown, init: RequestInit
 }
 
 async function multipartRequest<T>(path: string, formData: FormData, csrfToken?: string): Promise<T> {
-  const headers: Record<string, string> = {};
-  const csrf = csrfToken || readCsrfToken();
+  const headers: Record<string, string> = withAuthHeader({});
+  const csrf = csrfToken || readStoredCsrfToken();
   if (csrf) headers['X-CSRF-Token'] = csrf;
   try {
     const response = await fetch(`${API_BASE}${path}`, {
@@ -176,12 +199,41 @@ async function multipartRequest<T>(path: string, formData: FormData, csrfToken?:
   }
 }
 
+export type LoginResponse = {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+  csrf_token: string;
+  user: AuthUser;
+};
+
 export const api = {
-  login: (email: string, password: string, csrfToken?: string) => requestWithBody('/auth/login', { email, password }, { method: 'POST', headers: csrfToken ? { 'X-CSRF-Token': csrfToken } : undefined }),
-  logout: () => request('/auth/logout', { method: 'POST' }),
-  refresh: () => request('/auth/refresh', { method: 'POST' }),
+  login: async (email: string, password: string, csrfToken?: string) => {
+    const res = await requestWithBody<LoginResponse>('/auth/login', { email, password }, { method: 'POST', headers: csrfToken ? { 'X-CSRF-Token': csrfToken } : undefined });
+    if (res?.access_token) memAccessToken = res.access_token;
+    if (res?.csrf_token) memCsrfToken = res.csrf_token;
+    return res;
+  },
+  logout: async () => {
+    try {
+      return await request('/auth/logout', { method: 'POST' });
+    } finally {
+      memAccessToken = null;
+      memCsrfToken = null;
+    }
+  },
+  refresh: async () => {
+    const res = await request<LoginResponse>('/auth/refresh', { method: 'POST' });
+    if ((res as LoginResponse)?.access_token) memAccessToken = (res as LoginResponse).access_token;
+    if ((res as LoginResponse)?.csrf_token) memCsrfToken = (res as LoginResponse).csrf_token;
+    return res;
+  },
   me: () => request<AuthUser>('/auth/me'),
-  csrf: () => request<{ csrf_token: string }>('/auth/csrf', { method: 'POST' }),
+  csrf: async () => {
+    const res = await request<{ csrf_token: string }>('/auth/csrf', { method: 'POST' });
+    if (res?.csrf_token) memCsrfToken = res.csrf_token;
+    return res;
+  },
   forgotPassword: (email: string) => requestWithBody<{ message: string }>('/auth/forgot-password', { email }, { method: 'POST' }),
   resetPassword: (token: string, newPassword: string) => requestWithBody<{ message: string }>('/auth/reset-password', { token, new_password: newPassword }, { method: 'POST' }),
   facultyDashboard: () => request<FacultyDashboardResponse>('/faculty/dashboard'),
@@ -190,7 +242,8 @@ export const api = {
   facultyRecordReview: (recordId: string, corrections: Record<string, unknown>) => requestWithBody(`/faculty/${recordId}/review`, { corrections }, { method: 'POST' }),
   recordFileUrl: (recordId: string, fileId?: string) => `${API_BASE}/ip-records/${recordId}/file${fileId ? `?file_id=${encodeURIComponent(fileId)}` : ''}`,
   downloadRecordFile: async (recordId: string, fileId: string, filename: string) => {
-    const response = await fetch(`${API_BASE}/ip-records/${recordId}/file?file_id=${encodeURIComponent(fileId)}`, { credentials: 'include' });
+    const dlHeaders: Record<string, string> = withAuthHeader({});
+    const response = await fetch(`${API_BASE}/ip-records/${recordId}/file?file_id=${encodeURIComponent(fileId)}`, { credentials: 'include', headers: dlHeaders });
     if (!response.ok) throw new ApiError(response.status, await response.text());
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);

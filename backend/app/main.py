@@ -51,30 +51,9 @@ def create_app() -> FastAPI:
     )
 
     # ---------------------------------------------------------
-    # CORS
-    # ---------------------------------------------------------
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=(
-            app_settings.cors_origins
-            if hasattr(app_settings, "cors_origins")
-            else ["http://localhost:5173"]
-        ),
-        allow_credentials=True,
-        allow_methods=[
-            "GET",
-            "POST",
-            "PUT",
-            "PATCH",
-            "DELETE",
-            "OPTIONS",
-        ],
-        allow_headers=["*"],
-        expose_headers=["*"],
-    )
-
-    # ---------------------------------------------------------
     # Security / Performance Middleware
+    # (added first = innermost; CORS is added last so it stays outermost
+    # and every error response still carries Access-Control-Allow-Origin)
     # ---------------------------------------------------------
     setup_security_middleware(
         app,
@@ -105,29 +84,57 @@ def create_app() -> FastAPI:
             if not request.url.path.startswith(
                 "/api/v1/auth/"
             ):
-                csrf_token = request.headers.get(
-                    "X-CSRF-Token",
+                # A valid Authorization: Bearer JWT is not ambient authority
+                # (a hostile site cannot attach someone else's in-memory token
+                # cross-origin), so it is exempt from the cookie double-submit
+                # check. Cookie-authenticated requests still require it.
+                # This keeps cross-site uploads working when third-party
+                # cookies are blocked, without weakening cookie security.
+                bearer_ok = False
+                auth_header = request.headers.get(
+                    "Authorization",
                     "",
                 )
+                if auth_header.lower().startswith("bearer "):
+                    try:
+                        from app.core.security import (
+                            decode_jwt_token as _decode,
+                        )
 
-                session_token = request.cookies.get(
-                    "csrf_token",
-                    "",
-                )
-
-                if not validate_csrf_token(
-                    csrf_token,
-                    session_token,
-                ):
-                    return JSONResponse(
-                        status_code=400,
-                        content={
-                            "error": "CSRF_TOKEN_INVALID",
-                            "message": (
-                                "Invalid or missing CSRF token"
-                            ),
-                        },
+                        _payload = _decode(
+                            auth_header[7:].strip(),
+                            app_settings.secret_key,
+                            app_settings.jwt_algorithm,
+                        )
+                        bearer_ok = bool(
+                            _payload and _payload.get("sub")
+                        )
+                    except Exception:
+                        bearer_ok = False
+                if not bearer_ok:
+                    csrf_token = request.headers.get(
+                        "X-CSRF-Token",
+                        "",
                     )
+
+                    session_token = request.cookies.get(
+                        "csrf_token",
+                        "",
+                    )
+
+                    if not validate_csrf_token(
+                        csrf_token,
+                        session_token,
+                    ):
+                        return JSONResponse(
+                            status_code=400,
+                            content={
+                                "error": "CSRF_TOKEN_INVALID",
+                                "message": (
+                                    "Invalid or missing CSRF token"
+                                ),
+                            },
+                        )
 
         # IMPORTANT:
         # Continue the request after middleware validation.
@@ -146,6 +153,33 @@ def create_app() -> FastAPI:
         ] = "DENY"
 
         return response
+
+    # ---------------------------------------------------------
+    # CORS (added LAST so it is outermost: every response, including
+    # CSRF/rate-limit/validation rejections from outer middleware,
+    # carries Access-Control-Allow-Origin instead of surfacing to the
+    # browser as an opaque CORS block that masks the real status).
+    # Origins/credentials policy itself is unchanged.
+    # ---------------------------------------------------------
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=(
+            app_settings.cors_origins
+            if hasattr(app_settings, "cors_origins")
+            else ["http://localhost:5173"]
+        ),
+        allow_credentials=True,
+        allow_methods=[
+            "GET",
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE",
+            "OPTIONS",
+        ],
+        allow_headers=["*"],
+        expose_headers=["*"],
+    )
 
     # ---------------------------------------------------------
     # Portal Error Handler
