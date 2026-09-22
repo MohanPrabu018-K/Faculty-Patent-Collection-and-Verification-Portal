@@ -3,7 +3,7 @@ import { isValidElement, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError, api } from '../../api/client';
 import { useAuth } from '../../stores/auth';
-import { SectionCard, StatusBadge } from '../../components/ui';
+import { SectionCard, StatusBadge, formatDateOnly } from '../../components/ui';
 import { associationSendState } from './associationEligibility';
 
 function display(value: unknown): string {
@@ -142,7 +142,8 @@ export function RecordDetailPage() {
     { key: 'application_number', label: 'Application number', value: record.application_number },
     { key: 'serial_number', label: 'Serial number', value: record.serial_number },
     { key: 'filing_date', label: 'Filing date', value: record.filing_date },
-    { key: 'grant_date', label: 'Grant date', value: record.grant_date },
+    // Grant date is stored as a midnight datetime; show the calendar date only.
+    { key: 'grant_date', label: 'Grant date', value: formatDateOnly(record.grant_date) },
     { key: 'published_date', label: 'Published date', value: record.published_date },
   ];
 
@@ -205,7 +206,7 @@ export function RecordDetailPage() {
               { label: 'Application number', value: record.application_number },
             ]),
           { label: 'Filing date', value: record.filing_date },
-          { label: 'Grant date', value: record.grant_date },
+          { label: 'Grant date', value: formatDateOnly(record.grant_date) },
           { label: 'Published date', value: record.published_date },
           { label: 'QR data', value: qrData.length ? qrData.join(', ') : null },
         ]} />

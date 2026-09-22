@@ -1,5 +1,6 @@
 import clsx from 'clsx';
 import { useEffect } from 'react';
+import { authHeader } from '../api/client';
 
 export function SectionCard({ title, subtitle, actions, children }: { title: string; subtitle?: string; actions?: React.ReactNode; children: React.ReactNode }) {
   return (
@@ -108,6 +109,28 @@ export function formatDate(value: unknown): string {
   return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' });
 }
 
+/**
+ * Date-only display (YYYY-MM-DD) for certificate dates such as Grant date.
+ * The database stores these as datetimes (midnight), so a raw ISO string
+ * renders as "2024-10-22T00:00:00". This helper strips the time component
+ * without touching the underlying value: ISO-like input keeps the calendar
+ * date exactly as written (no timezone shift); anything else falls back to
+ * the local calendar date, then to the raw string.
+ */
+export function formatDateOnly(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '—';
+  const text = String(value).trim();
+  const isoDate = text.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (isoDate) return isoDate[1];
+  const d = new Date(text);
+  if (!Number.isNaN(d.getTime())) {
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${d.getFullYear()}-${month}-${day}`;
+  }
+  return text;
+}
+
 export function display(value: unknown): string {
   if (value === null || value === undefined || value === '') return '—';
   if (Array.isArray(value)) return value.length ? value.map(display).join(', ') : '—';
@@ -144,10 +167,18 @@ export function MiniBars({ data, formatLabel }: { data: Record<string, number>; 
   );
 }
 
-/** Fetch a URL with credentials and hand the browser a downloadable blob. */
+/** Fetch a URL with credentials (+ Bearer fallback for cookie-blocked cross-site) and hand the browser a downloadable blob. */
 export async function downloadFile(url: string, filename: string): Promise<void> {
-  const res = await fetch(url, { credentials: 'include' });
-  if (!res.ok) throw new Error(`Download failed (${res.status})`);
+  const res = await fetch(url, { credentials: 'include', headers: authHeader() });
+  if (!res.ok) {
+    let detail = '';
+    try {
+      detail = (await res.text()).slice(0, 200);
+    } catch {
+      detail = '';
+    }
+    throw new Error(`Download failed (${res.status})${detail ? `: ${detail}` : ''}`);
+  }
   const blob = await res.blob();
   const objectUrl = URL.createObjectURL(blob);
   const a = document.createElement('a');

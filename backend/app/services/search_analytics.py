@@ -455,6 +455,8 @@ class ExportService:
                 query = query.where(IpRecord.verification_status == filters["verification_status"])
             if filters.get("processing_status"):
                 query = query.where(IpRecord.processing_status == filters["processing_status"])
+            if filters.get("workflow_state"):
+                query = query.where(IpRecord.workflow_state == filters["workflow_state"])
             if filters.get("is_archived") is not None:
                 val = filters["is_archived"]
                 flag = val is True or str(val).lower() == "true"

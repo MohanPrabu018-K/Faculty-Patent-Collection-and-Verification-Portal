@@ -172,4 +172,15 @@ describe('RecordDetailPage association send action', () => {
     await user.click(button);
     await screen.findByText(/could not send request/i);
   });
+
+  it('grant date renders as a calendar date with no time component', async () => {
+    apiStubs.facultyRecordStatus.mockResolvedValue({
+      ...recordPayload([contributor('ashwin')]),
+      grant_date: '2024-10-22T00:00:00',
+    });
+    renderPage();
+    await screen.findByText('ashwin');
+    expect(screen.getByText('2024-10-22')).toBeInTheDocument();
+    expect(screen.queryByText(/T00:00:00/)).toBeNull();
+  });
 });

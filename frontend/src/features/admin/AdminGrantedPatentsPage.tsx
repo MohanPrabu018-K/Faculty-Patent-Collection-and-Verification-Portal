@@ -43,7 +43,10 @@ export function AdminGrantedPatentsPage() {
     try {
       const filters: Record<string, unknown> = {};
       if (debouncedSearch.trim()) filters.search = debouncedSearch.trim();
-      if (verification) filters.verification_status = verification;
+      // GRANTED is a workflow_state, not a verification_status (the backend
+      // verification_status column is a PG enum without GRANTED).
+      if (verification === 'GRANTED') filters.workflow_state = 'GRANTED';
+      else if (verification) filters.verification_status = verification;
       const job = await api.createExport(exportFormat as any, filters);
       const extMap: Record<string, string> = { csv: 'csv', excel: 'xlsx', pdf: 'pdf', docx: 'docx', txt: 'txt' };
       await downloadFile(api.exportDownloadUrl(job.job_id), `granted-ip-${job.job_id}.${extMap[exportFormat] ?? exportFormat}`);
@@ -57,7 +60,10 @@ export function AdminGrantedPatentsPage() {
 
   const params = useMemo(() => {
     const q = new URLSearchParams({ page: String(page), per_page: '20' });
-    if (verification) q.set('verification_status', verification);
+    // GRANTED lives on workflow_state (string column); sending it as
+    // verification_status hits the PG enum and returns INTERNAL_ERROR.
+    if (verification === 'GRANTED') q.set('workflow_state', 'GRANTED');
+    else if (verification) q.set('verification_status', verification);
     if (debouncedSearch.trim()) q.set('search', debouncedSearch.trim());
     return `?${q.toString()}`;
   }, [page, verification, debouncedSearch]);

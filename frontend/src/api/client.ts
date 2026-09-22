@@ -130,7 +130,12 @@ let memAccessToken: string | null = null;
 let memCsrfToken: string | null = null;
 
 function readStoredCsrfToken(): string | undefined {
-  return memCsrfToken || readCsrfToken();
+  // The CSRF cookie is the source of truth for the double-submit check
+  // (the backend compares the header against this exact cookie value), so
+  // prefer it over the in-memory copy, which can go stale when another tab
+  // re-logs-in or refreshes the token. Fall back to memory for cross-site
+  // deployments where third-party cookies are blocked.
+  return readCsrfToken() || memCsrfToken || undefined;
 }
 
 function withAuthHeader(headers: Record<string, string>): Record<string, string> {
@@ -138,7 +143,16 @@ function withAuthHeader(headers: Record<string, string>): Record<string, string>
   return headers;
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+/** Bearer header for raw fetch() call sites (e.g. blob downloads) that cannot go through request(). */
+export function authHeader(): Record<string, string> {
+  return withAuthHeader({});
+}
+
+function isCsrfFailure(status: number, body: string): boolean {
+  return status === 400 && body.includes('CSRF_TOKEN_INVALID');
+}
+
+async function request<T>(path: string, init: RequestInit = {}, retryCsrf = true): Promise<T> {
   const { headers: _headers, ...rest } = init;
   const method = (init.method || 'GET').toUpperCase();
   const headers: Record<string, string> = withAuthHeader({
@@ -149,14 +163,43 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const csrf = readStoredCsrfToken();
     if (csrf && !headers['X-CSRF-Token']) headers['X-CSRF-Token'] = csrf;
   }
-  try {
-    const response = await fetch(`${API_BASE}${path}`, {
+  const send = (hdrs: Record<string, string>) =>
+    fetch(`${API_BASE}${path}`, {
       ...rest,
       credentials: 'include',
-      headers,
+      headers: hdrs,
     });
+  try {
+    const response = await send(headers);
     if (!response.ok) {
       const body = await response.text();
+      // Recoverable CSRF desync (stale in-memory token, rotated/expired
+      // cookie after refresh or long-idle page): bootstrap a fresh CSRF pair
+      // and retry exactly once. Never retried for /auth/* itself, so this
+      // cannot loop. If the session itself is expired the retry surfaces the
+      // backend's 401 and the caller shows the sign-in prompt as before.
+      if (
+        retryCsrf &&
+        method !== 'GET' &&
+        !path.startsWith('/auth/') &&
+        isCsrfFailure(response.status, body)
+      ) {
+        try {
+          const fresh = await api.csrf();
+          if (fresh?.csrf_token) {
+            const retryResponse = await send({ ...headers, 'X-CSRF-Token': fresh.csrf_token });
+            if (retryResponse.ok) {
+              if (retryResponse.status === 204) return undefined as T;
+              return retryResponse.json() as Promise<T>;
+            }
+            throw new ApiError(retryResponse.status, (await retryResponse.text()) || `Request failed with status ${retryResponse.status}`);
+          }
+        } catch (retryErr) {
+          if (retryErr instanceof ApiError) throw retryErr;
+          // Bootstrap failed (offline / cookies blocked): fall through and
+          // report the original CSRF failure below.
+        }
+      }
       throw new ApiError(response.status, body || `Request failed with status ${response.status}`);
     }
     if (response.status === 204) return undefined as T;

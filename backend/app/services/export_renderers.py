@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 import zipfile
 from datetime import UTC, datetime
 from typing import Any, Iterable
@@ -32,6 +33,20 @@ FIELDNAMES = [
 ALL_FIELD_KEYS = set(FIELDNAMES)
 
 
+def _date_only(value: Any) -> str:
+    """Format a stored datetime as a calendar date (YYYY-MM-DD) for display.
+
+    Grant dates are stored as midnight datetimes; exports must show the date
+    without a time component. The underlying value is untouched — this is
+    presentation formatting only.
+    """
+    if value is None or value == "":
+        return ""
+    text = value.isoformat() if hasattr(value, "isoformat") else str(value)
+    match = re.match(r"^(\d{4}-\d{2}-\d{2})", text)
+    return match.group(1) if match else text
+
+
 def _row_from_record(record: Any) -> dict[str, str]:
     """Map an IpRecord ORM row to a flat export dict (str values only)."""
     return {
@@ -41,7 +56,7 @@ def _row_from_record(record: Any) -> dict[str, str]:
         "design_number": record.design_number or "",
         "application_number": record.application_number or "",
         "title": record.title or "",
-        "grant_date": record.grant_date.isoformat() if getattr(record, "grant_date", None) else "",
+        "grant_date": _date_only(getattr(record, "grant_date", None)),
         "filing_date": record.filing_date.isoformat() if getattr(record, "filing_date", None) else "",
         "applicant": getattr(record, "applicant", None) or getattr(record, "patentee", None) or "",
         "patentee": getattr(record, "patentee", None) or "",

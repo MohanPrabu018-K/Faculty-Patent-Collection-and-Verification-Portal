@@ -21,7 +21,11 @@ const REQUIRED_DEPTS = [
   "Artificial Intelligence and Machine Learning",
 ];
 
-const EMPTY_FORM = { full_name: '', email: '', official_email: '', faculty_id: '', department_id: '', designation_id: '', joining_date: '', is_active: true, password: '' };
+const EMPTY_FORM = { full_name: '', official_email: '', faculty_id: '', department_id: '', designation_id: '', joining_date: '', is_active: true, password: '' };
+
+function isEmail(value: unknown): value is string {
+  return typeof value === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+}
 
 export function AdminFacultyPage() {
   const client = useQueryClient();
@@ -53,7 +57,7 @@ export function AdminFacultyPage() {
   const refresh = () => client.invalidateQueries({ queryKey: ['admin-faculty'] });
 
   const create = useMutation({
-    mutationFn: (body: Record<string, unknown>) => api.adminCreateFaculty(clean(body)),
+    mutationFn: (body: Record<string, unknown>) => api.adminCreateFaculty(clean(submitBody(body))),
     onSuccess: async (data) => {
       if (data?.temporary_password && data.temporary_password_generated) {
         setCreatedTempPassword(data.temporary_password);
@@ -67,7 +71,7 @@ export function AdminFacultyPage() {
     onError: (e) => notify('error', e instanceof Error ? e.message : 'Create failed'),
   });
   const update = useMutation({
-    mutationFn: ({ id, body }: { id: string; body: Record<string, unknown> }) => api.adminUpdateFaculty(id, clean(body)),
+    mutationFn: ({ id, body }: { id: string; body: Record<string, unknown> }) => api.adminUpdateFaculty(id, clean(submitBody(body))),
     onSuccess: async () => { notify('success', 'Faculty updated'); setEditing(null); await refresh(); },
     onError: (e) => notify('error', e instanceof Error ? e.message : 'Update failed'),
   });
@@ -96,10 +100,18 @@ export function AdminFacultyPage() {
   const openEdit = (r: FacultyRow) => {
     setEditing(r);
     setForm({
-      full_name: r.full_name ?? '', email: r.email ?? '', official_email: r.official_email ?? '',
+      full_name: r.full_name ?? '', official_email: r.official_email ?? r.email ?? '',
       faculty_id: r.faculty_id ?? '', department_id: r.department_id ?? '', designation_id: r.designation_id ?? '',
       joining_date: r.joining_date ? String(r.joining_date).slice(0, 10) : '', is_active: r.is_active ?? true,
     });
+  };
+
+  // Official Email is the single email field. The backend login identity
+  // lives on User.email, so the payload carries the official address under
+  // both keys; existing records keep working and no migration is needed.
+  const submitBody = (body: Record<string, unknown>): Record<string, unknown> => {
+    const official = typeof body.official_email === 'string' ? body.official_email.trim() : '';
+    return { ...body, official_email: official, email: official };
   };
 
   return (
@@ -178,7 +190,7 @@ export function AdminFacultyPage() {
             <div className="kv-grid">
               {[
                 ['Full name', detail.data.full_name], ['Faculty ID', detail.data.faculty_id],
-                ['Email', detail.data.email], ['Official email', detail.data.official_email],
+                ['Official email', detail.data.official_email ?? detail.data.email],
                 ['Department', detail.data.department_name], ['Designation', detail.data.designation_name],
                 ['Joined', detail.data.joining_date ? formatDate(detail.data.joining_date) : '—'],
                 ['Status', detail.data.status],
@@ -197,7 +209,7 @@ export function AdminFacultyPage() {
               <button className="btn btn-secondary" onClick={() => { setCreating(false); setEditing(null); }}>Cancel</button>
               <button
                 className="btn btn-primary"
-                disabled={create.isPending || update.isPending || !form.full_name || !form.email}
+                disabled={create.isPending || update.isPending || !form.full_name || !isEmail(form.official_email)}
                 onClick={() => {
                   if (creating) create.mutate(form);
                   else if (editing) update.mutate({ id: String(editing.id), body: form });
@@ -209,8 +221,7 @@ export function AdminFacultyPage() {
           }
         >
           <FormField label="Full name *"><input className="toolbar-input" value={String(form.full_name ?? '')} onChange={(e) => setForm({ ...form, full_name: e.target.value })} /></FormField>
-          <FormField label="Email *"><input className="toolbar-input" type="email" value={String(form.email ?? '')} onChange={(e) => setForm({ ...form, email: e.target.value })} /></FormField>
-          <FormField label="Official email"><input className="toolbar-input" value={String(form.official_email ?? '')} onChange={(e) => setForm({ ...form, official_email: e.target.value })} /></FormField>
+          <FormField label="Official email *"><input className="toolbar-input" type="email" value={String(form.official_email ?? '')} onChange={(e) => setForm({ ...form, official_email: e.target.value })} /></FormField>
           <FormField label="Faculty ID"><input className="toolbar-input" value={String(form.faculty_id ?? '')} onChange={(e) => setForm({ ...form, faculty_id: e.target.value })} placeholder="auto-generated if blank" /></FormField>
           {creating && <FormField label="Initial Password"><input className="toolbar-input" type="password" value={String(form.password ?? '')} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Optional — a temporary password is generated if left blank" /></FormField>}
           <FormField label="Department">

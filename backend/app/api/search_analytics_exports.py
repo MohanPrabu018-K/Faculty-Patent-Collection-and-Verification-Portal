@@ -94,6 +94,18 @@ def _job_owned(job: dict, current_user: dict) -> bool:
     return current_user.get("role") == "super_admin" or job.get("created_by") == current_user.get("id")
 
 
+# Wire format name -> download file extension. The stored format value stays
+# canonical ("excel"); only the presented filename uses the real extension.
+_EXPORT_FILENAME_EXT = {
+    "csv": "csv",
+    "excel": "xlsx",
+    "json": "json",
+    "pdf": "pdf",
+    "docx": "docx",
+    "txt": "txt",
+}
+
+
 @exports_router.post("/", status_code=status.HTTP_202_ACCEPTED)
 async def create_export(request: Request, current_user: dict = Depends(get_current_user), format: str = Query("csv", pattern="^(csv|excel|json|pdf|docx|txt)$")):
     try:
@@ -133,6 +145,6 @@ async def download_export(job_id: str, current_user: dict = Depends(get_current_
     file_data = await service.get_file(job_id)
     if not file_data:
         return JSONResponse(status_code=404, content={"error": "FILE_NOT_FOUND", "message": "Export file not found"})
-    filename = f"export_{job_id}.{job.get('format', 'csv')}"
+    filename = f"export_{job_id}.{_EXPORT_FILENAME_EXT.get(job.get('format', 'csv'), job.get('format', 'csv'))}"
     media_types = {"csv": "text/csv", "excel": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "json": "application/json", "pdf": "application/pdf", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "txt": "text/plain"}
     return StreamingResponse(io.BytesIO(file_data), media_type=media_types.get(job.get('format', 'csv'), "application/octet-stream"), headers={"Content-Disposition": f'attachment; filename="{filename}"'})

@@ -13,6 +13,10 @@ from app.core.database import get_async_session
 from app.core.exceptions import NotFoundError, PortalError
 from app.core.logging import log_audit
 from app.models.base import (
+    ASSOCIATION_STATUS_CHOICES,
+    IP_TYPE_CHOICES,
+    PROCESSING_STATUS_CHOICES,
+    VERIFICATION_STATUS_CHOICES,
     AssociationRequest,
     ConflictCase,
     Department,
@@ -34,6 +38,22 @@ router = APIRouter(prefix="/api/v1/admin", tags=["admin"], dependencies=[Depends
 def _page_slice(page: int, per_page: int) -> tuple[int, int]:
     offset = (page - 1) * per_page
     return offset, per_page
+
+
+def _validate_enum_filter(field_name: str, value: str | None, choices: tuple[str, ...]) -> None:
+    """Reject unknown PG-enum filter values with 422.
+
+    Comparing a raw string against a Postgres ENUM column raises
+    InvalidTextRepresentationError (surfaced as 500 INTERNAL_ERROR).
+    GRANTED, for example, is a workflow_state — not a verification_status —
+    so ?verification_status=GRANTED must fail cleanly instead of 500ing.
+    """
+    if value is not None and value not in choices:
+        raise PortalError(
+            message=f"Unknown {field_name} filter: {value}",
+            error_code="VALIDATION_ERROR",
+            status_code=422,
+        )
 
 
 _SENSITIVE_COLUMNS = {"password_hash"}
@@ -573,6 +593,9 @@ async def admin_list_ip_records(
     db: AsyncSession = Depends(get_async_session),
 ):
     offset, limit = _page_slice(page, per_page)
+    _validate_enum_filter("ip_type", ip_type, IP_TYPE_CHOICES)
+    _validate_enum_filter("verification_status", verification_status, VERIFICATION_STATUS_CHOICES)
+    _validate_enum_filter("processing_status", processing_status, PROCESSING_STATUS_CHOICES)
     query = select(IpRecord)
     count_query = select(func.count()).select_from(IpRecord)
     if ip_type:
