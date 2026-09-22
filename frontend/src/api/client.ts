@@ -217,7 +217,7 @@ async function requestWithBody<T>(path: string, body: unknown, init: RequestInit
   return request<T>(path, { ...init, body: JSON.stringify(body) });
 }
 
-async function multipartRequest<T>(path: string, formData: FormData, csrfToken?: string): Promise<T> {
+async function multipartRequest<T>(path: string, formData: FormData, csrfToken?: string, signal?: AbortSignal): Promise<T> {
   const headers: Record<string, string> = withAuthHeader({});
   const csrf = csrfToken || readStoredCsrfToken();
   if (csrf) headers['X-CSRF-Token'] = csrf;
@@ -227,6 +227,7 @@ async function multipartRequest<T>(path: string, formData: FormData, csrfToken?:
       credentials: 'include',
       headers,
       body: formData,
+      signal,
     });
     if (!response.ok) {
       const body = await response.text();
@@ -235,6 +236,7 @@ async function multipartRequest<T>(path: string, formData: FormData, csrfToken?:
     return response.json() as Promise<T>;
   } catch (err) {
     if (err instanceof ApiError) throw err;
+    if ((err as Error)?.name === 'AbortError') throw err;
     if (err instanceof TypeError && err.message === 'Failed to fetch') {
       throw new ApiError(0, 'Unable to connect to the server. Please check your network connection and try again.');
     }
@@ -298,10 +300,10 @@ export const api = {
     anchor.remove();
     URL.revokeObjectURL(url);
   },
-  upload: async (file: File, csrfToken?: string) => {
+  upload: async (file: File, csrfToken?: string, signal?: AbortSignal) => {
     const form = new FormData();
     form.append('file', file);
-    return multipartRequest<Record<string, unknown>>('/uploads/', form, csrfToken);
+    return multipartRequest<Record<string, unknown>>('/uploads/', form, csrfToken, signal);
   },
   facultyProfile: () => request<FacultyProfileResponse>('/faculty/profile'),
   facultyHistory: (params = '', signal?: AbortSignal) => request<FacultyHistoryResponse>(`/faculty/history${params}`, { signal }),

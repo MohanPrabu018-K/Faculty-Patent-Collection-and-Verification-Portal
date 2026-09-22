@@ -45,6 +45,8 @@ export function App() {
         <Suspense fallback={<PageFallback />}>
           <Routes>
             <Route path="/login" element={<LoginPage />} />
+            {/* Password-reset deep link from the emailed reset URL (/reset?token=…). Public, like /login. */}
+            <Route path="/reset" element={<LoginPage />} />
             <Route element={<ProtectedRoute />}>
               <Route element={<AppShell />}>
                 <Route path="/" element={<Navigate to="/faculty/dashboard" replace />} />

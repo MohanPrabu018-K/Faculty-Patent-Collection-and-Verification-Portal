@@ -64,7 +64,7 @@ def log_audit(
                     target_type=target_type,
                     target_id=target_id,
                     previous_value=before,
-                    new_value=after,
+                    after_state=after,
                     details=extra,
                     extra=extra,
                     ip_address=extra.get("ip_address") if extra else None,

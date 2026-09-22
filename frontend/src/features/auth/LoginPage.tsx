@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -36,14 +36,18 @@ export function LoginPage() {
   const { login } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
+  const [searchParams] = useSearchParams();
+  // Deep link from the emailed reset URL (/reset?token=…): open the reset
+  // view directly with the token prefilled. Manual paste flow unchanged.
+  const initialToken = (searchParams.get('token') ?? '').trim();
   const [error, setError] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [view, setView] = useState<View>('login');
+  const [view, setView] = useState<View>(initialToken ? 'reset' : 'login');
   const [forgotSuccess, setForgotSuccess] = useState('');
   const [resetSuccess, setResetSuccess] = useState('');
   const { register, handleSubmit, formState: { errors, isSubmitting } } = useForm<FormData>({ resolver: zodResolver(schema) });
   const { register: registerForgot, handleSubmit: handleForgotSubmit, formState: { errors: forgotErrors, isSubmitting: forgotSubmitting } } = useForm<ForgotFormData>({ resolver: zodResolver(forgotSchema) });
-  const { register: registerReset, handleSubmit: handleResetSubmit, formState: { errors: resetErrors, isSubmitting: resetSubmitting } } = useForm<ResetFormData>({ resolver: zodResolver(resetSchema) });
+  const { register: registerReset, handleSubmit: handleResetSubmit, formState: { errors: resetErrors, isSubmitting: resetSubmitting } } = useForm<ResetFormData>({ resolver: zodResolver(resetSchema), defaultValues: { token: initialToken } });
 
   const onSubmit = async (data: FormData) => {
     setError('');
@@ -114,7 +118,7 @@ export function LoginPage() {
                 </div>
                 {errors.password && <small className="field-error">{errors.password.message}</small>}
               </div>
-              {error && <div className="alert alert-error">{error}</div>}
+              {error && <div className="alert alert-error" role="alert" aria-live="polite">{error}</div>}
               <button className="btn btn-primary" disabled={isSubmitting}>{isSubmitting ? 'Signing in...' : 'Login'}</button>
               <button type="button" className="btn btn-ghost" onClick={() => { setView('forgot'); setError(''); }}>
                 Forgot password?
@@ -132,8 +136,8 @@ export function LoginPage() {
                 <input {...registerForgot('email')} id="forgot-email" type="email" placeholder="faculty@example.edu" aria-label="Email" />
                 {forgotErrors.email && <small className="field-error">{forgotErrors.email.message}</small>}
               </div>
-              {error && <div className="alert alert-error">{error}</div>}
-              {forgotSuccess && <div className="alert alert-success">{forgotSuccess}</div>}
+              {error && <div className="alert alert-error" role="alert" aria-live="polite">{error}</div>}
+              {forgotSuccess && <div className="alert alert-success" role="status">{forgotSuccess}</div>}
               <button className="btn btn-primary" disabled={forgotSubmitting}>{forgotSubmitting ? 'Sending...' : 'Send reset token'}</button>
               <button type="button" className="btn btn-ghost" onClick={() => { setView('login'); setError(''); setForgotSuccess(''); }}>
                 Back to login
@@ -162,8 +166,8 @@ export function LoginPage() {
                 <input {...registerReset('newPassword')} id="new-password" type={showPassword ? 'text' : 'password'} placeholder="Enter new password" aria-label="New password" />
                 {resetErrors.newPassword && <small className="field-error">{resetErrors.newPassword.message}</small>}
               </div>
-              {error && <div className="alert alert-error">{error}</div>}
-              {resetSuccess && <div className="alert alert-success">{resetSuccess}</div>}
+              {error && <div className="alert alert-error" role="alert" aria-live="polite">{error}</div>}
+              {resetSuccess && <div className="alert alert-success" role="status">{resetSuccess}</div>}
               <button className="btn btn-primary" disabled={resetSubmitting}>{resetSubmitting ? 'Resetting...' : 'Reset password'}</button>
               <button type="button" className="btn btn-ghost" onClick={() => { setView('login'); setError(''); setResetSuccess(''); }}>
                 Back to login

@@ -1,6 +1,20 @@
 import { test, expect } from '@playwright/test';
 import { USERS } from './helpers';
 
+// The production CSS breakpoints are 1024 (stats dense), 900 (tablet: sidebar
+// collapses to bottom nav), 640 (mobile single column), 380 (very small).
+// Run the dashboard — including the Recent submissions table — across all
+// required widths to catch any gap in those breakpoints.
+const VIEWPORTS = [
+  { width: 320, height: 568 },
+  { width: 375, height: 667 },
+  { width: 390, height: 844 },
+  { width: 430, height: 932 },
+  { width: 768, height: 1024 },
+  { width: 1024, height: 768 },
+  { width: 1440, height: 900 },
+];
+
 test.describe('Responsive layout', () => {
   test('login page has no horizontal overflow across viewports', async ({ page }) => {
     await page.goto('/login');
@@ -23,6 +37,40 @@ test.describe('Responsive layout', () => {
       await page.goto('/faculty/dashboard');
       await expect(page).toHaveURL(/\/faculty\/dashboard/);
       await expect(page.locator('.mobile-nav')).toBeVisible();
+    });
+
+    test('dashboard has no horizontal overflow across all required viewports', async ({ page }) => {
+      for (const vp of VIEWPORTS) {
+        await page.setViewportSize(vp);
+        await page.goto('/faculty/dashboard');
+        await expect(page).toHaveURL(/\/faculty\/dashboard/);
+        const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+        expect(overflow, `horizontal overflow at ${vp.width}x${vp.height}`).toBe(false);
+      }
+    });
+
+    test('recent submissions table scrolls inside its wrapper, not the page', async ({ page }) => {
+      await page.setViewportSize({ width: 375, height: 667 });
+      await page.goto('/faculty/dashboard');
+      await expect(page).toHaveURL(/\/faculty\/dashboard/);
+      const wrap = page.locator('.table-wrap');
+      if (await wrap.count() === 0) return; // no recent records yet — nothing to check
+      await expect(wrap).toBeVisible();
+      const pageStill = await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth);
+      expect(pageStill).toBe(true);
+      // The wrapper must be internally scrollable on narrow phones rather than clipping.
+      const horizScrollable = await wrap.evaluate((el) => el.scrollWidth > el.clientWidth && getComputedStyle(el).overflowX === 'auto');
+      expect(horizScrollable).toBe(true);
+    });
+
+    test('sidebar collapses to bottom navigation across tablet and mobile widths', async ({ page }) => {
+      for (const vp of VIEWPORTS.filter((v) => v.width <= 768)) {
+        await page.setViewportSize(vp);
+        await page.goto('/faculty/dashboard');
+        await expect(page).toHaveURL(/\/faculty\/dashboard/);
+        await expect(page.locator('.sidebar'), `sidebar should be hidden at ${vp.width}px`).toBeHidden();
+        await expect(page.locator('.mobile-nav'), `mobile nav should show at ${vp.width}px`).toBeVisible();
+      }
     });
   });
 });

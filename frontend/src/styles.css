@@ -39,9 +39,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .btn { border: 1px solid transparent; border-radius: 12px; padding: 11px 16px; display: inline-flex; gap: 8px; align-items: center; justify-content: center; cursor: pointer; }
 .btn-primary { background: var(--primary); color: #fff; }
 .btn-secondary { background: #fff; border-color: var(--border); }
-.alert { padding: 14px 16px; border-radius: 14px; }
+.alert { padding: 14px 16px; border-radius: 14px; animation: alertIn 0.28s cubic-bezier(0.34, 1.56, 0.64, 1); }
 .alert-error { background: #fff0f2; color: var(--error); border: 1px solid #ffd2d8; }
 .alert-success { background: #eef8f2; color: var(--success); border: 1px solid #cfe8db; }
+@keyframes alertIn { 0% { opacity: 0; transform: translateY(-6px); } 60% { transform: translateY(1.5px); } 100% { opacity: 1; transform: translateY(0); } }
+@media (prefers-reduced-motion: reduce) { .alert { animation: none; } }
 .badge { display: inline-flex; padding: 6px 10px; border-radius: 999px; font-size: 12px; border: 1px solid var(--border); }
 .badge-verified { background: #eef8f2; color: var(--success); }
 .badge-unverified, .badge-queued, .badge-pending { background: #f2f4f7; color: var(--muted); }

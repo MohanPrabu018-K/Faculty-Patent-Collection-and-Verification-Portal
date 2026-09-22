@@ -406,6 +406,7 @@ async def get_csrf_token(response: Response):
 
 @router.post("/forgot-password", status_code=status.HTTP_200_OK)
 async def forgot_password(
+    request: Request,
     body: ForgotPasswordRequest,
     db: AsyncSession = Depends(get_async_session),
 ):
@@ -415,6 +416,29 @@ async def forgot_password(
     Always returns a success message regardless of whether the email exists,
     to avoid leaking information about registered accounts.
     """
+    client_ip = request.client.host if request.client else "unknown"
+
+    # Same abuse/enumeration throttle as login (multiplied in E2E so test
+    # suites exercising this endpoint are not throttled).
+    import os
+    is_e2e = os.environ.get("E2E_TEST", "").strip() in ("1", "true", "yes") or os.environ.get("APP_ENV", "").strip().lower() == "e2e"
+    forgot_limit = rate_limit_settings.login_per_ip * (10000 if is_e2e else 1)
+
+    try:
+        await check_rate_limit(
+            key=f"forgot:{client_ip}",
+            limit=forgot_limit,
+            window_seconds=60,
+        )
+    except RateLimitError:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": "RATE_LIMIT_EXCEEDED",
+                "message": "Too many attempts. Please try again later.",
+            },
+        )
+
     result = await db.execute(
         select(User).where(User.email == body.email)
     )
@@ -446,16 +470,20 @@ async def forgot_password(
 
         if email_sent:
             log_audit(
+                actor="system",
                 action="PASSWORD_RESET_EMAIL_SENT",
-                entity_type="user",
-                entity_id=user.id,
+                target_type="user",
+                target_id=user.id,
+                status="success",
                 extra={"email": user.email},
             )
         else:
             log_audit(
+                actor="system",
                 action="PASSWORD_RESET_EMAIL_FAILED",
-                entity_type="user",
-                entity_id=user.id,
+                target_type="user",
+                target_id=user.id,
+                status="error",
                 extra={"email": user.email, "smtp_configured": smtp_settings.smtp_enabled},
             )
 

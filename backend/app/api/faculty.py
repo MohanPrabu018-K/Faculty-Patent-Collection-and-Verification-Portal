@@ -1408,7 +1408,7 @@ async def request_association(
 
     return {
         "association_id": association.id,
-        "status": "pending",
+        "status": association.status,
         "record_id": record_id,
         "recipient_faculty_id": other_faculty_id,
         "reason": reason,
