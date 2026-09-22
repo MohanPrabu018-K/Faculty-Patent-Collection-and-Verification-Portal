@@ -1,9 +1,10 @@
 import { useParams } from 'react-router-dom';
 import { isValidElement, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api } from '../../api/client';
+import { ApiError, api } from '../../api/client';
 import { useAuth } from '../../stores/auth';
 import { SectionCard, StatusBadge } from '../../components/ui';
+import { associationSendState } from './associationEligibility';
 
 function display(value: unknown): string {
   if (value === null || value === undefined || value === '') return 'Not available';
@@ -82,12 +83,46 @@ export function RecordDetailPage() {
     }
   };
 
+  // Uploader-only association requests. Hooks must stay above the early
+  // returns. Creation always goes through the existing POST /associations/
+  // endpoint (backend enforces uploader authorization + duplicate
+  // prevention); the query only loads the uploader's own sent requests.
+  const assocRecord = (data ?? {}) as Record<string, unknown>;
+  const assocUploaderId = typeof assocRecord.uploader_id === 'string' ? assocRecord.uploader_id : null;
+  const assocViewerIsUploader = Boolean(user?.id && assocUploaderId && user.id === assocUploaderId);
+  const { data: assocData } = useQuery({ queryKey: ['associations'], queryFn: api.associations, enabled: Boolean(recordId) && assocViewerIsUploader });
+  const [assocFeedback, setAssocFeedback] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
+  const sendAssoc = useMutation({
+    mutationFn: ({ facultyId }: { facultyId: string; name: string; ckey: string }) =>
+      api.sendAssociation(facultyId, { record_id: String(recordId || ''), reason: 'Please confirm your contribution to this record.' }),
+    onSuccess: async (_res, vars) => {
+      setAssocFeedback({ kind: 'success', text: `Association request sent to ${vars.name}.` });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['associations'] }),
+        queryClient.invalidateQueries({ queryKey: ['faculty-record', recordId] }),
+      ]);
+    },
+    onError: async (err, vars) => {
+      if (err instanceof ApiError && err.status === 409) {
+        // A live request already exists: adopt the pending state, no duplicate.
+        setAssocFeedback({ kind: 'success', text: `A request already exists for ${vars.name} — showing as sent.` });
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ['associations'] }),
+          queryClient.invalidateQueries({ queryKey: ['faculty-record', recordId] }),
+        ]);
+        return;
+      }
+      setAssocFeedback({ kind: 'error', text: err instanceof Error ? `Could not send request to ${vars.name}: ${err.message}` : `Could not send request to ${vars.name}.` });
+    },
+  });
+
   if (isLoading && !data) return <div className="loading-inline" style={{ padding: '24px 0' }}><span className="spinner" /><span>Loading record details…</span></div>;
   if (error) return <div className="alert alert-error">{String(error)}</div>;
 
   const record = (data ?? {}) as Record<string, unknown>;
   const jobs = Array.isArray(record.jobs) ? record.jobs as Array<Record<string, unknown>> : [];
   const contributors = Array.isArray(record.contributors) ? record.contributors as Array<Record<string, unknown>> : [];
+  const assocRows = assocData?.associations ?? [];
   const files = Array.isArray(record.files) ? record.files as Array<Record<string, unknown>> : [];
   const provenance = Array.isArray(record.field_provenance) ? record.field_provenance as Array<Record<string, unknown>> : [];
   const evidence = record.evidence && typeof record.evidence === 'object' ? record.evidence as Record<string, unknown> : {};
@@ -186,7 +221,35 @@ export function RecordDetailPage() {
       </SectionCard>
 
       <SectionCard title="Contributors & Associations" subtitle="Everyone named in the document, and their college association state.">
-        {contributors.length === 0 ? <div className="empty-cell">No contributors are available yet.</div> : <div className="stack">{contributors.map((contributor) => <div key={String(contributor.id || contributor.name)} className="mini-card"><strong>{display(contributor.name)}</strong><div className="muted">{contributor.is_external ? 'External contributor — not college faculty' : `Internal faculty${contributor.faculty_id ? ` · ${display(contributor.faculty_id)}` : ''}`}</div><div className="muted">Association: {display(contributor.match_status)}</div></div>)}</div>}
+        {assocFeedback ? <div className={assocFeedback.kind === 'success' ? 'alert alert-success' : 'alert alert-error'}>{assocFeedback.text}</div> : null}
+        {contributors.length === 0 ? <div className="empty-cell">No contributors are available yet.</div> : <div className="stack">{contributors.map((contributor) => {
+          const ckey = String(contributor.id || contributor.name);
+          const assocState = associationSendState(contributor, { currentUserId, isUploader, recordId: String(recordId || ''), requests: assocRows });
+          const isSending = sendAssoc.isPending && sendAssoc.variables?.ckey === ckey;
+          const contributorName = String(contributor.name || 'contributor');
+          return (
+            <div key={ckey} className="mini-card">
+              <strong>{display(contributor.name)}</strong>
+              <div className="muted">{contributor.is_external ? 'External contributor — not college faculty' : `Internal faculty${contributor.faculty_id ? ` · ${display(contributor.faculty_id)}` : ''}`}</div>
+              <div className="muted">Association: {display(contributor.match_status)}</div>
+              {assocState === 'sendable' ? (
+                <div style={{ marginTop: 8 }}>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-primary"
+                    disabled={isSending}
+                    aria-label={`Send association request to ${contributorName}`}
+                    onClick={() => sendAssoc.mutate({ facultyId: String(contributor.faculty_id), name: contributorName, ckey })}
+                  >
+                    {isSending ? 'Sending…' : 'Send Association Request'}
+                  </button>
+                </div>
+              ) : null}
+              {assocState === 'pending' ? <div className="muted" style={{ marginTop: 8 }}>Request Sent · Pending recipient decision</div> : null}
+              {assocState === 'accepted' ? <div className="muted" style={{ marginTop: 8 }}>Association Accepted</div> : null}
+            </div>
+          );
+        })}</div>}
       </SectionCard>
 
       <SectionCard title="Official Verification" subtitle="Automated check against the official IP source. Automated IP India verification is unavailable, so this stays VERIFICATION_REQUIRED until an official source verifies — HOD manual review is recorded separately below, never as an automated pass.">

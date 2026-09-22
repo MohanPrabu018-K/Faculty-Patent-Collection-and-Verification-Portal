@@ -682,6 +682,24 @@ async def get_record_status(
 
     contributors = contributors_result.scalars().all()
 
+    # Resolved college identities for contributors, so the record detail
+    # page can offer the uploader a "send association request" action that
+    # targets the existing POST /associations/ endpoint (faculty lookup by
+    # faculty_id). Read-only map; no authorization changes.
+    _contributor_faculty: dict[str, str | None] = {}
+    _contributor_user_ids = {
+        c.user_id for c in contributors if c.user_id
+    }
+    if _contributor_user_ids:
+        for _u in (
+            await db.execute(
+                select(User).where(
+                    User.id.in_(_contributor_user_ids)
+                )
+            )
+        ).scalars().all():
+            _contributor_faculty[_u.id] = _u.faculty_id
+
     # Field provenance
     provenance_result = await db.execute(
         select(FieldProvenance).where(
@@ -897,6 +915,17 @@ async def get_record_status(
                 "contributor_order": (
                     c.contributor_order
                 ),
+                # Resolved college identity (None when unresolved/external).
+                # The record detail page needs these so the uploader can send
+                # association requests to internal co-contributors via the
+                # existing POST /associations/ endpoint (which looks faculty
+                # up by faculty_id). No authorization logic changes.
+                "user_id": c.user_id,
+                "faculty_id": _contributor_faculty.get(
+                    c.user_id
+                )
+                if c.user_id
+                else None,
             }
             for c in contributors
         ],
