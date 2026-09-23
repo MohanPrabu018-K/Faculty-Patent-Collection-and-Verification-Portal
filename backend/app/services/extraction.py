@@ -673,11 +673,25 @@ class StructuredExtractionService:
                     qr_data,
                 )
 
+        # Bug 9: grant-date phrasings vary across certificate/journal forms.
+        # The separator after the label is optional (e.g. "Granted on
+        # 15 March 2024", "Date of Grant 22/10/2024"), and Indian forms add a
+        # qualifier ("Date of Grant of Patent: ..."). Separator-less variants
+        # capture a strict date-shaped token (never rest-of-line) so stray
+        # text cannot produce a false date; a bare 4-digit year is still
+        # accepted at low confidence via the dedicated year pattern.
+        _DATE_TOKEN = (
+            r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}"
+            r"|\d{4}[/-]\d{1,2}[/-]\d{1,2}"
+            r"|\d{1,2}\s+[A-Za-z]+\s*,?\s*\d{4}"
+            r"|[A-Za-z]+\s+\d{1,2}\s*,?\s*\d{4})"
+        )
         grant_patterns = [
-            r"grant\s+date\s*[:\-]\s*([^\n]+)",
-            r"date\s+of\s+grant\s*[:\-]\s*([^\n]+)",
-            r"granted\s+on\s*[:\-]\s*([^\n]+)",
-            r"date\s+granted\s*[:\-]\s*([^\n]+)",
+            rf"grant\s+date\s*[:\-]?\s*{_DATE_TOKEN}",
+            rf"date\s+of\s+grant(?:\s+of\s+[A-Za-z]+)?\s*[:\-]?\s*{_DATE_TOKEN}",
+            rf"granted\s+on\s*[:\-]?\s*{_DATE_TOKEN}",
+            rf"date\s+granted\s*[:\-]?\s*{_DATE_TOKEN}",
+            rf"granted\s*[:\-]\s*{_DATE_TOKEN}",
         ]
 
         for pattern in grant_patterns:
@@ -715,6 +729,22 @@ class StructuredExtractionService:
                         qr_data,
                     )
                     break
+
+        grant_year_match = re.search(
+            r"(?:grant\s+date|date\s+of\s+grant|granted\s+on|date\s+granted|granted)\s*[:\-]\s*(\d{4})\b",
+            text,
+            re.IGNORECASE,
+        )
+        if grant_year_match and not self.evidence_tracker.get("grant_date"):
+            year = normalize_year(grant_year_match.group(1))
+            if year:
+                self.evidence_tracker.add(
+                    "grant_date",
+                    year,
+                    "ocr_text",
+                    0.3,
+                    qr_data,
+                )
 
         # ----------------------------------------------------
         # Inventors.

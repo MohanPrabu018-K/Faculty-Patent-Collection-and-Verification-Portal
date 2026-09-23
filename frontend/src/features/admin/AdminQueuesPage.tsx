@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import {
   SectionCard, StatusBadge, ErrorBlock, EmptyState,
-  TableWrap, Modal, TechnicalDetails, formatDateTime, display,
+  TableWrap, Modal, TechnicalDetails, formatDateTime, display, docName, personName,
 } from '../../components/ui';
 import { useToast } from '../../stores/toast';
 
@@ -108,8 +108,9 @@ export function AdminQueuesPage() {
               <thead><tr><th>Record</th><th>Duplicate of</th><th>Confidence</th><th>Method</th><th>Detected by</th><th>Status</th><th></th></tr></thead>
               <tbody>{dRows.map((r) => (
                 <tr key={String(r.id)}>
-                  <td><Link className="link" to={`/faculty/records/${r.ip_record_id_1}`}>{String(r.ip_record_id_1).slice(0, 8)}…</Link></td>
-                  <td><Link className="link" to={`/faculty/records/${r.ip_record_id_2}`}>{String(r.ip_record_id_2).slice(0, 8)}…</Link></td>
+                  {/* Bugs 4+5: backend-enriched document names; never raw UUIDs. */}
+                  <td><Link className="link" to={`/faculty/records/${r.ip_record_id_1}`}>{docName(r.record_1)}</Link></td>
+                  <td><Link className="link" to={`/faculty/records/${r.ip_record_id_2}`}>{docName(r.record_2)}</Link></td>
                   <td>{r.confidence != null ? `${Math.round(Number(r.confidence) * 100)}%` : '—'}</td>
                   <td>{display(r.detection_method)}</td>
                   <td>{display(r.detected_by)}</td>
@@ -129,7 +130,7 @@ export function AdminQueuesPage() {
               <thead><tr><th>Record</th><th>Type</th><th>Field</th><th>Severity</th><th>Description</th><th>Status</th><th></th></tr></thead>
               <tbody>{cRows.map((r) => (
                 <tr key={String(r.id)}>
-                  <td><Link className="link" to={`/faculty/records/${r.ip_record_id}`}>{String(r.ip_record_id).slice(0, 8)}…</Link></td>
+                  <td><Link className="link" to={`/faculty/records/${r.ip_record_id}`}>{docName(r.record)}</Link></td>
                   <td>{display(r.conflict_type)}</td>
                   <td>{display(r.field_name)}</td>
                   <td><StatusBadge value={String(r.severity || 'MEDIUM')} /></td>
@@ -150,9 +151,10 @@ export function AdminQueuesPage() {
               <thead><tr><th>Requester</th><th>Recipient</th><th>Record</th><th>Reason</th><th>Status</th><th>Created</th></tr></thead>
               <tbody>{aRows.map((r) => (
                 <tr key={String(r.id)}>
-                  <td>{display(r.requesting_faculty_id || r.requester_id)}</td>
-                  <td>{display(r.target_faculty_id || r.recipient_id)}</td>
-                  <td>{r.ip_record_id ? <Link className="link" to={`/faculty/records/${r.ip_record_id}`}>{String(r.ip_record_id).slice(0, 8)}…</Link> : '—'}</td>
+                  {/* Bug 5: enriched faculty + document names instead of raw IDs. */}
+                  <td>{personName(r.requester, r.requesting_faculty_id || r.requester_id)}</td>
+                  <td>{personName(r.target, r.target_faculty_id || r.recipient_id)}</td>
+                  <td>{r.ip_record_id ? <Link className="link" to={`/faculty/records/${r.ip_record_id}`}>{docName(r.record)}</Link> : '—'}</td>
                   <td>{display(r.reason || r.message)}</td>
                   <td><StatusBadge value={String(r.status || 'PENDING')} /></td>
                   <td>{formatDateTime(r.created_at)}</td>

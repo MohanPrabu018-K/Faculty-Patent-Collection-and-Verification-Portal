@@ -1,7 +1,35 @@
 import { useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import { useToast } from '../../stores/toast';
+
+/** Format a byte limit as whole MB for the user-facing message. */
+export function formatLimitMb(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  return `${Number.isInteger(mb) ? mb : mb.toFixed(1)} MB`;
+}
+
+/**
+ * Bug 12: map a failed upload to a clean user-facing message.
+ *
+ * Oversized files surface as "Maximum upload limit is X MB", where X comes
+ * from the backend-advertised configuration — never hardcoded. If the
+ * config is unavailable, the backend error's own "(max: N)" bytes are used
+ * as a fallback. The raw backend JSON is never shown.
+ */
+export function friendlyUploadError(message: string, configuredBytes?: number): string {
+  const tooLarge = /too large|UPLOAD_ERROR/i.test(message) && /max/i.test(message);
+  if (!tooLarge) return message;
+  if (configuredBytes && configuredBytes > 0) {
+    return `Maximum upload limit is ${formatLimitMb(configuredBytes)}.`;
+  }
+  const m = message.match(/\(max:\s*(\d+)\)/);
+  if (m) {
+    return `Maximum upload limit is ${formatLimitMb(Number(m[1]))}.`;
+  }
+  return message;
+}
 
 export function UploadPage() {
   const [file, setFile] = useState<File | null>(null);
@@ -12,6 +40,15 @@ export function UploadPage() {
   const abortRef = useRef<AbortController | null>(null);
   const navigate = useNavigate();
   const { notify } = useToast();
+  // Effective limit from the backend (Super Admin setting). Cached by
+  // react-query; a failure here only disables the friendly message —
+  // the backend still enforces the real limit on upload.
+  const { data: uploadConfig } = useQuery({
+    queryKey: ['upload-config'],
+    queryFn: api.uploadConfig,
+    staleTime: 5 * 60 * 1000,
+  });
+  const configuredBytes = uploadConfig?.max_upload_bytes;
 
   const preview = useMemo(() => file ? { name: file.name, sizeKb: (file.size / 1024).toFixed(1), type: file.type || 'application/octet-stream' } : null, [file]);
 
@@ -43,7 +80,9 @@ export function UploadPage() {
       notify('success', 'Upload queued successfully');
     } catch (e) {
       if ((e as Error)?.name === 'AbortError' && controller.signal.aborted) return;
-      const message = e instanceof Error ? e.message : 'Upload failed';
+      const raw = e instanceof Error ? e.message : 'Upload failed';
+      // Bug 12: never expose the raw backend error object for oversized files.
+      const message = friendlyUploadError(raw, configuredBytes);
       setError(message);
       notify('error', message);
     } finally {
@@ -70,7 +109,7 @@ export function UploadPage() {
       </div>
       <div className={`dropzone ${file ? 'dropzone-filled' : ''}`} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); chooseFile(e.dataTransfer.files?.[0] || null); }}>
         <input ref={inputRef} aria-label="Choose file" type="file" accept=".pdf,.png,.jpg,.jpeg" onChange={(e) => chooseFile(e.target.files?.[0] || null)} />
-        <div className="dropzone-copy"><strong>Drag and drop a PDF or image here</strong><span>Or use the file picker to select a certificate document.</span></div>
+        <div className="dropzone-copy"><strong>Drag and drop a PDF or image here</strong><span>Or use the file picker to select a certificate document.</span>{configuredBytes ? <span className="muted">Maximum upload limit is {formatLimitMb(configuredBytes)}.</span> : null}</div>
       </div>
       {preview && (
         <div className="section-card compact-card">
@@ -85,7 +124,7 @@ export function UploadPage() {
         {result && <button className="btn btn-secondary" onClick={() => navigate(`/faculty/records/${result.ip_record_id as string}`)}>Open record</button>}
       </div>
       {error && <div className="alert alert-error">{error}</div>}
-      {result && <div className="alert alert-success"><strong>Upload queued.</strong><div>Record ID: {String(result.ip_record_id ?? 'pending')}</div><div>Status: {String(result.status ?? 'pending')}</div></div>}
+      {result && <div className="alert alert-success"><strong>Upload queued.</strong><div>Document: {String(result.filename ?? preview?.name ?? 'uploaded file')}</div><div>Status: {String(result.status ?? 'pending')}</div></div>}
     </div>
   );
 }

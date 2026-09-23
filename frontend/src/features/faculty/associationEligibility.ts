@@ -94,6 +94,11 @@ export function associationSendState(
   if (!opts.isUploader) return 'ineligible';
   if (contributor['contributor_type'] !== 'INTERNAL_FACULTY') return 'ineligible';
   if (contributor['is_external']) return 'ineligible';
+  // Bug 8: deactivated faculty can never receive association requests
+  // (backend rejects creation with 422; the button is hidden as well).
+  // is_active is None for unresolved/external rows — those are already
+  // ineligible via the checks above; only an explicit false hides here.
+  if (contributor['is_active'] === false) return 'ineligible';
   const facultyId = nonEmptyString(contributor['faculty_id']);
   const userId = nonEmptyString(contributor['user_id']);
   if (!facultyId || !userId) return 'ineligible';

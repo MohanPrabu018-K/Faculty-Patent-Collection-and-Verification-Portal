@@ -45,6 +45,41 @@ def _qr_data_list(value: str | None) -> list[str]:
     return []
 
 
+def _faculty_record_scope(user_id: str):
+    """WHERE clause matching every record visible to a faculty member.
+
+    Bug 1: an accepted association links the recipient to the record
+    (IpContributor row created on accept). Faculty B must see accepted
+    patents in dashboard/profile/records/detail — not just uploads.
+    Scope = uploader OR accepted internal contributor OR accepted/approved
+    association party (covers associations accepted before the contributor
+    link existed). Backend rows remain the source of truth; this only
+    widens read visibility, never writes workflow state.
+    """
+    contributor_ids = (
+        select(IpContributor.ip_record_id)
+        .where(IpContributor.user_id == user_id)
+    )
+    accepted_assoc_ids = (
+        select(AssociationRequest.ip_record_id)
+        .where(
+            or_(
+                AssociationRequest.requesting_faculty_id == user_id,
+                AssociationRequest.requester_id == user_id,
+                AssociationRequest.target_faculty_id == user_id,
+                AssociationRequest.recipient_id == user_id,
+            ),
+            AssociationRequest.status.in_(("ACCEPTED", "APPROVED")),
+            AssociationRequest.ip_record_id.is_not(None),
+        )
+    )
+    return or_(
+        IpRecord.uploader_id == user_id,
+        IpRecord.id.in_(contributor_ids),
+        IpRecord.id.in_(accepted_assoc_ids),
+    )
+
+
 @router.get("/profile", status_code=status.HTTP_200_OK)
 async def get_profile(
     current_user: dict = Depends(get_current_user),
@@ -94,7 +129,7 @@ async def get_profile(
     base = (
         select(func.count())
         .select_from(IpRecord)
-        .where(IpRecord.uploader_id == user_id)
+        .where(_faculty_record_scope(user_id))
     )
 
     total_documents = (await db.execute(base)).scalar_one()
@@ -274,13 +309,13 @@ async def get_dashboard(
     faculty_id = current_user.get("faculty_id")
     user_id = current_user.get("id")
 
-    # Processing status counts
+    # Processing status counts (own uploads + accepted associations)
     query = (
         select(
             IpRecord.processing_status,
             func.count(IpRecord.id).label("count"),
         )
-        .where(IpRecord.uploader_id == user_id)
+        .where(_faculty_record_scope(user_id))
         .group_by(IpRecord.processing_status)
     )
 
@@ -290,13 +325,13 @@ async def get_dashboard(
         for row in result
     }
 
-    # Verification status counts
+    # Verification status counts (own uploads + accepted associations)
     query = (
         select(
             IpRecord.verification_status,
             func.count(IpRecord.id).label("count"),
         )
-        .where(IpRecord.uploader_id == user_id)
+        .where(_faculty_record_scope(user_id))
         .group_by(IpRecord.verification_status)
     )
 
@@ -306,13 +341,13 @@ async def get_dashboard(
         for row in result
     }
 
-    # IP type counts
+    # IP type counts (own uploads + accepted associations)
     query = (
         select(
             IpRecord.ip_type,
             func.count(IpRecord.id).label("count"),
         )
-        .where(IpRecord.uploader_id == user_id)
+        .where(_faculty_record_scope(user_id))
         .group_by(IpRecord.ip_type)
     )
 
@@ -322,10 +357,10 @@ async def get_dashboard(
         for row in result
     }
 
-    # Recent records
+    # Recent records (own uploads + accepted associations)
     query = (
         select(IpRecord)
-        .where(IpRecord.uploader_id == user_id)
+        .where(_faculty_record_scope(user_id))
         .order_by(IpRecord.created_at.desc())
         .limit(5)
     )
@@ -474,7 +509,7 @@ async def my_ip_records(
 
     query = (
         select(IpRecord)
-        .where(IpRecord.uploader_id == user_id)
+        .where(_faculty_record_scope(user_id))
     )
 
     if verification_status:
@@ -602,8 +637,11 @@ async def get_record_status(
     )
 
     if user_role == "faculty":
+        # Bug 1: uploader plus accepted contributors/associates may view the
+        # record detail. Mutations (review, request-verification) stay
+        # uploader-scoped in their own endpoints.
         query = query.where(
-            IpRecord.uploader_id == user_id
+            _faculty_record_scope(user_id)
         )
 
     elif user_role == "hod_admin":
@@ -687,6 +725,7 @@ async def get_record_status(
     # targets the existing POST /associations/ endpoint (faculty lookup by
     # faculty_id). Read-only map; no authorization changes.
     _contributor_faculty: dict[str, str | None] = {}
+    _contributor_active: dict[str, bool] = {}
     _contributor_user_ids = {
         c.user_id for c in contributors if c.user_id
     }
@@ -699,6 +738,9 @@ async def get_record_status(
             )
         ).scalars().all():
             _contributor_faculty[_u.id] = _u.faculty_id
+            # Bug 8: the UI must hide "Send Association Request" for
+            # deactivated faculty (backend still enforces on create).
+            _contributor_active[_u.id] = bool(_u.is_active)
 
     # Field provenance
     provenance_result = await db.execute(
@@ -926,6 +968,11 @@ async def get_record_status(
                 )
                 if c.user_id
                 else None,
+                "is_active": (
+                    _contributor_active.get(c.user_id, True)
+                    if c.user_id
+                    else None
+                ),
             }
             for c in contributors
         ],
@@ -1332,6 +1379,17 @@ async def request_association(
             message="Target faculty not found",
             error_code="NOT_FOUND",
             status_code=404,
+        )
+
+    # Bug 8: deactivated faculty must never receive association requests.
+    if not other_user.is_active:
+        raise PortalError(
+            message=(
+                "Association requests cannot be sent "
+                "to deactivated faculty"
+            ),
+            error_code="VALIDATION_ERROR",
+            status_code=422,
         )
 
     # Create association request

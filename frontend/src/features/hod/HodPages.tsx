@@ -4,7 +4,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import { api } from '../../api/client';
 import {
   SectionCard, StatCard, StatusBadge, ErrorBlock, EmptyState,
-  Toolbar, TableWrap, Pagination, Modal, formatDateTime, formatDate, display,
+  Toolbar, TableWrap, Pagination, Modal, formatDateTime, formatDate, display, docName,
 } from '../../components/ui';
 import { useToast } from '../../stores/toast';
 import { useDebounce } from '../../hooks/useDebounce';
@@ -141,6 +141,21 @@ export function HodDocumentsPage() {
     onError: (e) => notify('error', e instanceof Error ? e.message : 'Verification failed'),
   });
 
+  // Bug 3: when the HOD opens the verify dialog, load the record's
+  // outstanding internal approvals. "Confirm Verified" stays disabled while
+  // acceptance is pending (the backend rejects verify with 409 regardless).
+  const verifyRecordId = verifyTarget ? String(verifyTarget.id) : '';
+  const verifyEligibility = useQuery({
+    queryKey: ['hod-verify-eligibility', verifyRecordId],
+    queryFn: () => api.institutionalStatus(verifyRecordId),
+    enabled: Boolean(verifyRecordId),
+    staleTime: 30 * 1000,
+  });
+  const pendingApprovals = Array.isArray(verifyEligibility.data?.pending_approvals)
+    ? (verifyEligibility.data?.pending_approvals as string[])
+    : [];
+  const verifyBlocked = pendingApprovals.length > 0;
+
   const docs = data?.documents ?? [];
 
   if (isLoading && !data) return <div className="loading-inline" style={{ padding: '24px 0' }}><span className="spinner" /><span>Loading department documents…</span></div>;
@@ -179,8 +194,10 @@ export function HodDocumentsPage() {
               {docs.map((d) => (
                 <tr key={String(d.id)}>
                   <td>
-                    <strong><Link className="link" to={`/faculty/records/${d.id}`}>{display(d.title || d.patent_number || d.design_number || d.id)}</Link></strong>
-                    <div className="muted">{display(d.id)}</div>
+                    {/* Bugs 4+5: persisted document name first; the raw UUID
+                        is never the primary user-facing identifier. */}
+                    <strong><Link className="link" to={`/faculty/records/${d.id}`}>{display(d.document_name || d.title || d.patent_number || d.design_number || 'Untitled document')}</Link></strong>
+                    <div className="muted">{display(d.ip_type)}{d.document_filename && d.document_filename !== d.title ? ` · ${display(d.document_filename)}` : ''}</div>
                   </td>
                   <td>{display(d.faculty_name)}<div className="muted">{display(d.faculty_id)}</div></td>
                   <td>{display(d.ip_type)}</td>
@@ -224,13 +241,19 @@ export function HodDocumentsPage() {
               <button className="btn btn-secondary" disabled={verifyMutation.isPending} onClick={() => verifyMutation.mutate({ recordId: String(verifyTarget.id), decision: 'reject', remarks: verifyRemarks || undefined, evidenceRef: verifyEvidenceRef || undefined })}>
                 {verifyMutation.isPending ? 'Saving…' : 'Reject'}
               </button>
-              <button className="btn btn-primary" disabled={verifyMutation.isPending} onClick={() => verifyMutation.mutate({ recordId: String(verifyTarget.id), decision: 'verify', remarks: verifyRemarks || undefined, evidenceRef: verifyEvidenceRef || undefined })}>
+              <button className="btn btn-primary" disabled={verifyMutation.isPending || verifyBlocked} onClick={() => verifyMutation.mutate({ recordId: String(verifyTarget.id), decision: 'verify', remarks: verifyRemarks || undefined, evidenceRef: verifyEvidenceRef || undefined })}>
                 {verifyMutation.isPending ? 'Saving…' : 'Confirm Verified'}
               </button>
             </>
           }
         >
           <div className="stack">
+            {verifyBlocked ? (
+              <div className="alert alert-error" role="alert">
+                Verification is blocked until required internal faculty acceptance is recorded
+                ({pendingApprovals.length} pending). The “Confirm Verified” action is disabled.
+              </div>
+            ) : null}
             <div className="alert alert-info" style={{ background: '#eef3fb', color: 'var(--primary)', border: '1px solid #cdd8ea' }}>
               <strong>Manual Official Verification</strong>
               <p style={{ margin: '6px 0 0', fontSize: 13 }}>
@@ -320,8 +343,10 @@ export function HodDuplicatesPage() {
             <tbody>
               {rows.map((d) => (
                 <tr key={String(d.id)}>
-                  <td><Link className="link" to={`/faculty/records/${d.ip_record_id_1}`}>{String(d.ip_record_id_1).slice(0, 8)}…</Link></td>
-                  <td><Link className="link" to={`/faculty/records/${d.ip_record_id_2}`}>{String(d.ip_record_id_2).slice(0, 8)}…</Link></td>
+                  {/* Bugs 4+5: persisted document names via record_1/record_2
+                      (backend-enriched); the raw UUID is never displayed. */}
+                  <td><Link className="link" to={`/faculty/records/${d.ip_record_id_1}`}>{docName(d.record_1)}</Link></td>
+                  <td><Link className="link" to={`/faculty/records/${d.ip_record_id_2}`}>{docName(d.record_2)}</Link></td>
                   <td>{d.confidence != null ? `${Math.round(Number(d.confidence) * 100)}%` : '—'}</td>
                   <td>{display(d.detection_method)}</td>
                   <td>{display(d.detected_by)}</td>
@@ -426,7 +451,7 @@ export function HodConflictsPage() {
             <tbody>
               {rows.map((c) => (
                 <tr key={String(c.id)}>
-                  <td><Link className="link" to={`/faculty/records/${c.ip_record_id}`}>{String(c.ip_record_id).slice(0, 8)}…</Link></td>
+                  <td><Link className="link" to={`/faculty/records/${c.ip_record_id}`}>{docName(c.record)}</Link></td>
                   <td>{display(c.conflict_type)}</td>
                   <td>{display(c.field_name)}</td>
                   <td><StatusBadge value={String(c.severity || 'MEDIUM')} /></td>

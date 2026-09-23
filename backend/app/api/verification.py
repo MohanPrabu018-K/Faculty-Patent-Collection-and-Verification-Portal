@@ -145,6 +145,102 @@ INSTITUTIONAL_SOURCE = "institutional_hod"
 _DECISION_TO_STATUS = {"verify": "VERIFIED", "reject": "MISMATCH", "clarification": "VERIFICATION_REQUIRED"}
 
 
+async def _pending_internal_approvals(db: AsyncSession, record: IpRecord) -> list[str]:
+    """Internal faculty whose acceptance is still outstanding for a record.
+
+    Bug 3: HOD manual verification must not complete before required internal
+    faculty acceptance. An approver is outstanding when they are an internal
+    (non-external, user-linked, active) participant other than the uploader
+    without an ACCEPTED/APPROVED association on this record (or its master),
+    or when a PENDING/CLARIFICATION_REQUESTED request involving an active
+    internal user is still open. Returns user ids ( [] means HOD may verify).
+    """
+    from sqlalchemy import or_
+
+    outstanding: list[str] = []
+    seen: set[str] = set()
+
+    def _note(uid: str | None) -> None:
+        if uid and uid not in seen:
+            seen.add(uid)
+            outstanding.append(uid)
+
+    internal_rows = (
+        await db.execute(
+            select(IpContributor.user_id).where(
+                IpContributor.ip_record_id == record.id,
+                IpContributor.is_external.is_(False),
+                IpContributor.user_id.is_not(None),
+                IpContributor.user_id != record.uploader_id,
+            )
+        )
+    ).scalars().all()
+    internal_ids = [uid for uid in set(internal_rows) if uid]
+
+    scope = AssociationRequest.ip_record_id == record.id
+    if record.master_ip_id:
+        scope = or_(scope, AssociationRequest.master_ip_id == record.master_ip_id)
+
+    async def _has_accepted(uid: str) -> bool:
+        pair = or_(
+            or_(AssociationRequest.requesting_faculty_id == record.uploader_id, AssociationRequest.requester_id == record.uploader_id)
+            & or_(AssociationRequest.target_faculty_id == uid, AssociationRequest.recipient_id == uid),
+            or_(AssociationRequest.requesting_faculty_id == uid, AssociationRequest.requester_id == uid)
+            & or_(AssociationRequest.target_faculty_id == record.uploader_id, AssociationRequest.recipient_id == record.uploader_id),
+        )
+        hit = (
+            await db.execute(
+                select(AssociationRequest).where(
+                    pair, scope, AssociationRequest.status.in_(("ACCEPTED", "APPROVED"))
+                ).limit(1)
+            )
+        ).scalar_one_or_none()
+        return hit is not None
+
+    users_by_id: dict[str, User] = {}
+    if internal_ids:
+        for u in (
+            await db.execute(select(User).where(User.id.in_(internal_ids)))
+        ).scalars().all():
+            users_by_id[u.id] = u
+    for uid in internal_ids:
+        u = users_by_id.get(uid)
+        if u is not None and not u.is_active:
+            # Deactivated faculty can no longer accept (Bug 8 blocks new
+            # requests); they must not hold HOD verification hostage.
+            continue
+        if not await _has_accepted(uid):
+            _note(uid)
+
+    # Requests that name an internal participant but have no contributor row
+    # yet (e.g. identified purely via the request flow) still gate.
+    open_rows = (
+        await db.execute(
+            select(AssociationRequest).where(
+                scope,
+                AssociationRequest.status.in_(("PENDING", "CLARIFICATION_REQUESTED")),
+            )
+        )
+    ).scalars().all()
+    party_ids: set[str] = set()
+    for req in open_rows:
+        for pid in (
+            req.requesting_faculty_id, req.requester_id,
+            req.target_faculty_id, req.recipient_id,
+        ):
+            if pid:
+                party_ids.add(pid)
+    party_ids.discard(record.uploader_id)
+    if party_ids:
+        for u in (
+            await db.execute(select(User).where(User.id.in_(sorted(party_ids))))
+        ).scalars().all():
+            if u.is_active and u.id not in seen and not await _has_accepted(u.id):
+                _note(u.id)
+
+    return outstanding
+
+
 def _institutional_to_dict(a: VerificationAttempt) -> dict:
     ev = a.evidence or {}
     return {
@@ -182,6 +278,9 @@ async def list_institutional_verifications(record_id: str, current_user: dict = 
     official = record.official_verification_status or record.verification_status
     evidence = record.evidence or {}
     final = evidence.get("final_verification") if isinstance(evidence, dict) else None
+    # Bug 3: expose outstanding internal approvals so the HOD UI can disable
+    # "Confirm Verified" before required acceptance (backend still enforces).
+    pending_approvals = await _pending_internal_approvals(db, record)
     return {
         "record_id": record_id,
         "official_verification_status": official,
@@ -190,6 +289,7 @@ async def list_institutional_verifications(record_id: str, current_user: dict = 
         "final_verification": final,
         "institutional": latest,
         "history": [_institutional_to_dict(r) for r in rows],
+        "pending_approvals": pending_approvals,
     }
 
 
@@ -220,6 +320,21 @@ async def submit_institutional_verification(record_id: str, request: Request, cu
     record = (await db.execute(select(IpRecord).where(IpRecord.id == record_id))).scalar_one_or_none()
     if not record:
         raise NotFoundError("IP record", record_id)
+    # Bug 3: a "verify" decision is REJECTED (never recorded) while required
+    # internal faculty acceptance is outstanding. Reject/clarification
+    # outcomes do not claim verification, so they remain recordable.
+    if decision == "verify":
+        pending = await _pending_internal_approvals(db, record)
+        if pending:
+            raise PortalError(
+                message=(
+                    "HOD verification is blocked until required internal "
+                    "faculty acceptance is recorded"
+                ),
+                error_code="ASSOCIATION_PENDING",
+                status_code=409,
+                details={"pending_approvals": pending},
+            )
     if role == "hod_admin":
         hod_dept = current_user.get("department_id")
         if not hod_dept:

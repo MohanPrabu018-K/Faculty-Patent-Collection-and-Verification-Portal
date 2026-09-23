@@ -1,4 +1,4 @@
-import { useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { isValidElement, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError, api } from '../../api/client';
@@ -17,11 +17,6 @@ function displayApplicant(value: unknown): string {
   if (value === null || value === undefined || value === '') return 'Not clearly identified in document';
   if (typeof value === 'string' && value.trim().startsWith('{"')) return 'Not clearly identified in document';
   return display(value);
-}
-
-function shortRef(value: unknown): string {
-  const text = String(value ?? '');
-  return text.length > 8 ? `${text.slice(0, 8)}…` : display(value);
 }
 
 function workflowGuidance(state: unknown): string | null {
@@ -158,7 +153,7 @@ export function RecordDetailPage() {
   const isUploader = Boolean(currentUserId && uploaderId && currentUserId === uploaderId);
   const uploaderDisplayName = display(record.faculty_name) !== 'Not available'
     ? display(record.faculty_name)
-    : (uploaderId ? `Uploader ${shortRef(uploaderId)}` : 'The uploader');
+    : 'The uploader';
 
   return (
     <div className="stack-lg">
@@ -253,7 +248,7 @@ export function RecordDetailPage() {
         })}</div>}
       </SectionCard>
 
-      <SectionCard title="Official Verification" subtitle="Automated check against the official IP source. Automated IP India verification is unavailable, so this stays VERIFICATION_REQUIRED until an official source verifies — HOD manual review is recorded separately below, never as an automated pass.">
+      <SectionCard title="Official Verification" subtitle="Automated check against the official IP source. This is informational only — it is never required for workflow progress. Automated IP India verification is unavailable; HOD manual review below is the path to verification, never an automated pass.">
         <SectionList items={[
           { label: 'Automated official status', value: <StatusBadge value={String(record.verification_status || 'UNVERIFIED')} /> },
           ...((!record.verification_status || record.verification_status === 'VERIFICATION_REQUIRED')
@@ -275,7 +270,8 @@ export function RecordDetailPage() {
       <SectionCard title="Workflow & Master Record" subtitle="Where this submission stands, and the master record it belongs to.">
         <SectionList items={[
           { label: 'Workflow state', value: record.workflow_state ? <StatusBadge value={String(record.workflow_state)} /> : null },
-          { label: 'Master record', value: record.master_ip_id ? `${shortRef(record.master_ip_id)} · shared by all versions of this IP` : 'Not linked yet' },
+          // Bug 5: master linkage shown as a state, never a raw UUID.
+          { label: 'Master record', value: record.master_ip_id ? 'Linked · shared by all versions of this IP' : 'Not linked yet' },
         ]} />
         {guidance ? <p className="muted">{guidance}</p> : null}
       </SectionCard>
@@ -285,7 +281,8 @@ export function RecordDetailPage() {
           <SectionList items={[
             { label: 'Result', value: 'Possible duplicate found' },
             { label: 'Shared identifier', value: sharedIdentifier },
-            { label: 'Existing record', value: record.duplicate_of_record_id ? shortRef(record.duplicate_of_record_id) : null },
+            // Bug 5: link text instead of a raw record UUID.
+            { label: 'Existing record', value: record.duplicate_of_record_id ? <Link className="link" to={`/faculty/records/${String(record.duplicate_of_record_id)}`}>View existing record</Link> : null },
             { label: 'Match', value: record.duplicate_confidence != null ? `${Math.round(Number(record.duplicate_confidence) * 100)}%` : null },
             { label: 'Status', value: record.duplicate_status ? <StatusBadge value={String(record.duplicate_status)} /> : 'Review Required' },
           ]} />

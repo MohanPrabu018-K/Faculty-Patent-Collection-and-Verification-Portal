@@ -204,8 +204,16 @@ html, body { max-width: 100%; overflow-x: hidden; }
   .admin-detail-panel { position: static; }
   .toolbar { grid-template-columns: 1fr; }
   .page-title { font-size: 22px; }
-  /* Tablet (e.g. 768x1024): sidebar is hidden, so the bottom nav must take over. */
-  .mobile-nav { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(60px, 1fr); overflow-x: auto; gap: 4px; position: sticky; bottom: 0; background: rgba(247,248,251,0.97); backdrop-filter: blur(8px); padding: 8px 8px calc(8px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--border); z-index: 40; -webkit-overflow-scrolling: touch; }
+  /* Tablet (e.g. 768x1024): sidebar is hidden, so the bottom nav must take over.
+     Bug 2: position:fixed pins the bar to the viewport bottom on every
+     scroll position. (sticky bottom:0 only pins while scrolling down past
+     the bar and lets it scroll away when scrolling back up.) Fixed is safe
+     here: no ancestor uses transform/filter/perspective, so the viewport
+     remains the containing block. Content reserves space via .main
+     padding-bottom below so the bar never covers page content. */
+  .mobile-nav { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(60px, 1fr); overflow-x: auto; gap: 4px; position: fixed; left: 0; right: 0; bottom: 0; background: rgba(247,248,251,0.97); backdrop-filter: blur(8px); padding: 8px 8px calc(8px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--border); z-index: 40; -webkit-overflow-scrolling: touch; }
+  .main { padding-bottom: 92px; }
+  .toast-stack { bottom: 92px; }
   /* Tablet: the topbar stacks vertically so the bell sits left-of-center; a
      right-anchored panel would overflow the LEFT viewport edge (clipped by
      html/body overflow-x). Pin the panel to the viewport instead. */
@@ -217,7 +225,8 @@ html, body { max-width: 100%; overflow-x: hidden; }
   .main, .topbar, .sidebar { padding-left: 14px; padding-right: 14px; }
   .stats-grid, .detail-grid, .toolbar, .admin-record-layout, .kv-grid { grid-template-columns: 1fr; }
   .nav { display: none; }
-  .mobile-nav { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(56px, 1fr); overflow-x: auto; gap: 4px; position: sticky; bottom: 0; background: rgba(247,248,251,0.97); backdrop-filter: blur(8px); padding: 8px 8px calc(8px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--border); z-index: 40; -webkit-overflow-scrolling: touch; }
+  /* Inherits position:fixed from the ≤900px block (Bug 2); only sizing here. */
+  .mobile-nav { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(56px, 1fr); overflow-x: auto; gap: 4px; background: rgba(247,248,251,0.97); backdrop-filter: blur(8px); padding: 8px 8px calc(8px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--border); z-index: 40; -webkit-overflow-scrolling: touch; }
   .mobile-nav .nav-link { justify-content: center; align-items: center; flex-direction: column; gap: 2px; font-size: 9px; padding: 6px 4px; white-space: nowrap; text-align: center; border-radius: 8px; min-width: 0; }
   .mobile-nav .nav-link.active { background: var(--primary-weak); }
   .page-title { font-size: 18px; }

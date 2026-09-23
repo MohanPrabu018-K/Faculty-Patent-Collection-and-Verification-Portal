@@ -219,7 +219,6 @@ export function AdminRecordsPage() {
                         <div>
                           <strong className="link">{readable(primary)}</strong>
                           {showIdentifier ? <div className="muted">{readable(identifier)}</div> : null}
-                          <div className="muted">{readable(record.id)}</div>
                         </div>
                       </td>
                       <td>{readable(record.faculty_name || record.uploader_name || record.uploader_id)}</td>
@@ -237,7 +236,8 @@ export function AdminRecordsPage() {
             <div className="section-head"><h2>Record details</h2><p>Selected record information from the backend.</p></div>
             {detail.isLoading ? <div className="loading-inline"><span className="spinner" /><span>Loading details…</span></div> : detail.error ? <div className="alert alert-error">{String(detail.error)}</div> : selected ? <div className="stack">
               <div className="detail-field"><span>Title</span><strong>{readable((detail.data as Record<string, unknown>)?.title || selected.title)}</strong></div>
-              <div className="detail-field"><span>Record ID</span><strong>{readable((detail.data as Record<string, unknown>)?.id || selected.id)}</strong></div>
+              {/* Bug 5: document identifiers, not the raw database UUID. */}
+              <div className="detail-field"><span>Document number</span><strong>{readable((detail.data as Record<string, unknown>)?.design_number || (detail.data as Record<string, unknown>)?.patent_number || (detail.data as Record<string, unknown>)?.application_number || (detail.data as Record<string, unknown>)?.serial_number || selected.design_number || selected.patent_number || selected.application_number || 'Not available')}</strong></div>
               <div className="detail-field"><span>Faculty</span><strong>{readable(selected.faculty_name || selected.uploader_name || selected.uploader_id)}</strong></div>
               <div className="detail-field"><span>Document type</span><strong>{readable(selected.ip_type)}</strong></div>
               <div className="detail-field"><span>Processing status</span><strong><StatusBadge value={String((detail.data as Record<string, unknown>)?.processing_status || selected.processing_status || 'UNKNOWN')} /></strong></div>

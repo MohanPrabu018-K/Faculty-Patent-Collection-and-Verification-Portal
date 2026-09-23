@@ -202,6 +202,26 @@ async def upload_certificate(
         },
         background=background_tasks,
     )
+@router.get("/config", status_code=status.HTTP_200_OK)
+async def upload_config(current_user: dict = Depends(get_current_user)):
+    """Effective upload configuration for all authenticated roles.
+
+    Bug 12: the frontend must render the *configured* limit
+    ("Maximum upload limit is X MB") instead of the raw backend error.
+    The value is computed from the same effective limit enforced on upload
+    (Super Admin runtime override over the deployed default), so admin
+    changes are reflected automatically with no frontend hardcoding.
+    """
+    from app.core.runtime_settings import get_max_upload_bytes as _max_bytes
+
+    limit_bytes = _max_bytes(upload_settings.max_upload_bytes)
+    return {
+        "max_upload_bytes": limit_bytes,
+        "max_upload_mb": round(limit_bytes / (1024 * 1024), 1),
+        "allowed_extensions": list(upload_settings.allowed_extensions),
+    }
+
+
 @router.get("/{ip_record_id}/status", status_code=status.HTTP_200_OK)
 async def get_upload_status(
     ip_record_id: str,

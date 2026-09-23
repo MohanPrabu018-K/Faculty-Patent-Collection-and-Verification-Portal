@@ -23,6 +23,7 @@ from app.models.base import (
     Designation,
     DuplicateCase,
     IpContributor,
+    IpFile,
     IpRecord,
     MasterIpContributor,
     MasterIpRecord,
@@ -33,6 +34,39 @@ from app.models.base import (
 )
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"], dependencies=[Depends(require_super_admin)])
+
+
+async def _record_display_map(db: AsyncSession, record_ids: list[str]) -> dict[str, dict]:
+    """User-facing display info for records (Bugs 4+5).
+
+    {record_id: {title, number, filename, display_name}} from persisted data
+    only — never fabricated. display_name prefers the uploaded filename,
+    then title, then identifier number.
+    """
+    ids = sorted({i for i in record_ids if i})
+    if not ids:
+        return {}
+    recs = (await db.execute(select(IpRecord).where(IpRecord.id.in_(ids)))).scalars().all()
+    files = (
+        await db.execute(
+            select(IpFile)
+            .where(IpFile.ip_record_id.in_(ids))
+            .order_by(IpFile.created_at.desc())
+        )
+    ).scalars().all()
+    first_file: dict[str, str] = {}
+    for f in files:
+        first_file.setdefault(f.ip_record_id, f.original_filename)
+    out: dict[str, dict] = {}
+    for r in recs:
+        number = r.patent_number or r.design_number or r.application_number or r.serial_number
+        out[r.id] = {
+            "title": r.title,
+            "number": number,
+            "filename": first_file.get(r.id),
+            "display_name": first_file.get(r.id) or r.title or number,
+        }
+    return out
 
 
 def _page_slice(page: int, per_page: int) -> tuple[int, int]:
@@ -813,7 +847,18 @@ async def admin_list_duplicates(current_user: dict = Depends(get_current_user), 
         count_query = count_query.where(DuplicateCase.status == status)
     total = await _serialize_count(db, count_query)
     rows = await db.execute(query.order_by(DuplicateCase.detected_at.desc()).offset(offset).limit(limit))
-    return {"duplicates": [_model_to_dict(r) for r in rows.scalars().all()], "total": total, "page": page, "per_page": per_page}
+    cases = rows.scalars().all()
+    # Bugs 4+5: persisted document names for both sides of each case.
+    display_map = await _record_display_map(
+        db, [c.ip_record_id_1 for c in cases] + [c.ip_record_id_2 for c in cases]
+    )
+    items = []
+    for c in cases:
+        row = _model_to_dict(c)
+        row["record_1"] = display_map.get(c.ip_record_id_1)
+        row["record_2"] = display_map.get(c.ip_record_id_2)
+        items.append(row)
+    return {"duplicates": items, "total": total, "page": page, "per_page": per_page}
 
 
 @router.post("/duplicates/{case_id}/resolve", status_code=status.HTTP_200_OK)
@@ -845,7 +890,15 @@ async def admin_list_conflicts(current_user: dict = Depends(get_current_user), c
         count_query = count_query.where(ConflictCase.status == status)
     total = await _serialize_count(db, count_query)
     rows = await db.execute(query.order_by(ConflictCase.created_at.desc()).offset(offset).limit(limit))
-    return {"conflicts": [_model_to_dict(r) for r in rows.scalars().all()], "total": total, "page": page, "per_page": per_page}
+    cases = rows.scalars().all()
+    # Bug 5: persisted document name for the review table.
+    display_map = await _record_display_map(db, [c.ip_record_id for c in cases])
+    items = []
+    for c in cases:
+        row = _model_to_dict(c)
+        row["record"] = display_map.get(c.ip_record_id)
+        items.append(row)
+    return {"conflicts": items, "total": total, "page": page, "per_page": per_page}
 
 
 @router.post("/conflicts/{conflict_id}/resolve", status_code=status.HTTP_200_OK)
@@ -887,7 +940,45 @@ async def admin_list_associations(current_user: dict = Depends(get_current_user)
         count_query = count_query.where(AssociationRequest.status == status)
     total = await _serialize_count(db, count_query)
     rows = await db.execute(query.order_by(AssociationRequest.created_at.desc()).offset(offset).limit(limit))
-    return {"associations": [_model_to_dict(r) for r in rows.scalars().all()], "total": total, "page": page, "per_page": per_page}
+    assocs = rows.scalars().all()
+    # Bug 5: resolve human-readable faculty + document names for the table.
+    user_ids = {
+        uid
+        for a in assocs
+        for uid in (
+            a.requesting_faculty_id, a.requester_id,
+            a.target_faculty_id, a.recipient_id,
+        )
+        if uid
+    }
+    umap = (
+        {
+            u.id: u
+            for u in (
+                await db.execute(select(User).where(User.id.in_(sorted(user_ids))))
+            ).scalars().all()
+        }
+        if user_ids
+        else {}
+    )
+    display_map = await _record_display_map(db, [a.ip_record_id for a in assocs if a.ip_record_id])
+    items = []
+    for a in assocs:
+        row = _model_to_dict(a)
+
+        def _uname(uid):
+            u = umap.get(uid) if uid else None
+            return {
+                "id": uid,
+                "full_name": u.full_name if u else None,
+                "faculty_id": u.faculty_id if u else None,
+            }
+
+        row["requester"] = _uname(a.requesting_faculty_id or a.requester_id)
+        row["target"] = _uname(a.target_faculty_id or a.recipient_id)
+        row["record"] = display_map.get(a.ip_record_id)
+        items.append(row)
+    return {"associations": items, "total": total, "page": page, "per_page": per_page}
 
 
 @router.get("/reports/pending-associations", status_code=status.HTTP_200_OK)
@@ -965,7 +1056,15 @@ async def admin_list_verifications(current_user: dict = Depends(get_current_user
         count_query = count_query.where(VerificationAttempt.status == status)
     total = await _serialize_count(db, count_query)
     rows = await db.execute(query.order_by(VerificationAttempt.created_at.desc()).offset(offset).limit(limit))
-    return {"verifications": [_model_to_dict(r) for r in rows.scalars().all()], "total": total, "page": page, "per_page": per_page}
+    attempts = rows.scalars().all()
+    # Bug 5: persisted document name for the review table.
+    display_map = await _record_display_map(db, [a.ip_record_id for a in attempts])
+    items = []
+    for a in attempts:
+        row = _model_to_dict(a)
+        row["record"] = display_map.get(a.ip_record_id)
+        items.append(row)
+    return {"verifications": items, "total": total, "page": page, "per_page": per_page}
 
 
 @router.get("/master-ip-records", status_code=status.HTTP_200_OK)

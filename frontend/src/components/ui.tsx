@@ -139,6 +139,43 @@ export function display(value: unknown): string {
   return String(value);
 }
 
+/**
+ * Bugs 4+5: user-facing document name from backend-enriched record info
+ * ({display_name, filename, title, number}). The raw UUID is never shown;
+ * when backend data is unavailable the label degrades to a neutral
+ * "Untitled document" (navigation still routes by id internally).
+ */
+export function docName(info: unknown): string {
+  if (info && typeof info === 'object') {
+    const r = info as Record<string, unknown>;
+    const name = r.display_name || r.filename || r.title || r.number;
+    if (typeof name === 'string' && name.trim()) return name;
+  }
+  return 'Untitled document';
+}
+
+/**
+ * Bug 5: user-facing faculty name from backend-enriched user info
+ * ({full_name, faculty_id}). Falls back to the faculty ID (a stable
+ * human-readable college identifier — not a UUID) and never shows a raw
+ * user UUID.
+ */
+export function personName(info: unknown, fallbackId?: unknown): string {
+  if (info && typeof info === 'object') {
+    const r = info as Record<string, unknown>;
+    const name = r.full_name || r.faculty_id;
+    if (typeof name === 'string' && name.trim()) return name;
+  }
+  if (typeof fallbackId === 'string' && fallbackId.trim()) {
+    // Faculty IDs (e.g. FAC-ASHWIN) are human-readable; raw user UUIDs are not.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(fallbackId)) {
+      return fallbackId;
+    }
+    return 'Unknown faculty';
+  }
+  return 'Unknown faculty';
+}
+
 /** A deliberately-collapsed technical view for structured evidence/detail blobs. */
 export function TechnicalDetails({ label = 'Technical details', data }: { label?: string; data: unknown }) {
   if (data === null || data === undefined) return null;

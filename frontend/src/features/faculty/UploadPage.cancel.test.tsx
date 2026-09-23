@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import '@testing-library/jest-dom/vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { UploadPage } from './UploadPage';
 
 const { apiStubs, notifyMock } = vi.hoisted(() => ({
-  apiStubs: { csrf: vi.fn(), upload: vi.fn() },
+  apiStubs: { csrf: vi.fn(), upload: vi.fn(), uploadConfig: vi.fn() },
   notifyMock: vi.fn(),
 }));
 
@@ -20,9 +21,12 @@ vi.mock('../../stores/toast', () => ({
 }));
 
 function renderPage() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <MemoryRouter>
-      <UploadPage />
+      <QueryClientProvider client={client}>
+        <UploadPage />
+      </QueryClientProvider>
     </MemoryRouter>,
   );
 }
@@ -44,7 +48,11 @@ beforeEach(() => {
   cleanup();
   apiStubs.csrf.mockReset();
   apiStubs.upload.mockReset();
+  apiStubs.uploadConfig.mockReset();
   notifyMock.mockReset();
+  apiStubs.uploadConfig.mockResolvedValue({
+    max_upload_bytes: 20971520, max_upload_mb: 20, allowed_extensions: ['.pdf'],
+  });
 });
 
 describe('UploadPage cancel behaviour (Bug 5: cancel must abort in-flight upload)', () => {

@@ -305,6 +305,10 @@ export const api = {
     form.append('file', file);
     return multipartRequest<Record<string, unknown>>('/uploads/', form, csrfToken, signal);
   },
+  // Bug 12: effective upload limit for the signed-in user (any role). The
+  // backend computes it from the Super Admin runtime override over the
+  // deployed default — the frontend never hardcodes the limit.
+  uploadConfig: () => request<{ max_upload_bytes: number; max_upload_mb: number; allowed_extensions: string[] }>('/uploads/config'),
   facultyProfile: () => request<FacultyProfileResponse>('/faculty/profile'),
   facultyHistory: (params = '', signal?: AbortSignal) => request<FacultyHistoryResponse>(`/faculty/history${params}`, { signal }),
   associations: () => request<AssociationListResponse>('/associations/'),
@@ -366,7 +370,7 @@ export const api = {
     requestWithBody<{ job_id: string; format: string; status: string; created_at: string }>(`/exports/?format=${format}`, { filters: filters ?? {}, selected_fields: selectedFields ?? null }, { method: 'POST' }),
   exportStatus: (jobId: string) => request<Record<string, unknown>>(`/exports/${jobId}`),
   exportDownloadUrl: (jobId: string) => `${API_BASE}/exports/${jobId}/download`,
-  institutionalStatus: (recordId: string) => request<{ record_id: string; official_verification_status: string; verification_status: string; workflow_state: string; final_verification: Record<string, unknown> | null; institutional: Record<string, unknown> | null; history: Array<Record<string, unknown>> }>(`/verification/institutional/${recordId}`),
+  institutionalStatus: (recordId: string) => request<{ record_id: string; official_verification_status: string; verification_status: string; workflow_state: string; final_verification: Record<string, unknown> | null; institutional: Record<string, unknown> | null; history: Array<Record<string, unknown>>; pending_approvals?: string[] }>(`/verification/institutional/${recordId}`),
   institutionalVerify: (recordId: string, body: { decision: 'verify' | 'reject' | 'clarification'; remarks?: string; evidence_ref?: string }) => requestWithBody<{ record_id: string; decision: string; institutional_status: string; official_verification_status: string; final_verification_status: string; workflow_state: string; missing_conditions: string[]; attempt_id: string }>(`/verification/institutional/${recordId}`, body, { method: 'POST' }),
   pendingAssociationsReport: (params = '', signal?: AbortSignal) => request<{ associations: Array<Record<string, unknown>>; total: number; pending_count: number; by_status: Record<string, number>; page: number; per_page: number }>(`/admin/reports/pending-associations${params}`, { signal }),
   adminUpdateSettings: (body: Record<string, unknown>) => requestWithBody<{ max_upload_mb: number; message: string }>('/admin/settings', body, { method: 'PATCH' }),

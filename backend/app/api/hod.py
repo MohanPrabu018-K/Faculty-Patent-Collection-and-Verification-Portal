@@ -17,6 +17,7 @@ from app.models.base import (
     Department,
     Designation,
     DuplicateCase,
+    IpFile,
     IpRecord,
     Notification,
     User,
@@ -30,6 +31,40 @@ def _ensure_department(user: dict) -> str:
     if not dept:
         raise PortalError(message="HOD admin account is missing department scope", error_code="AUTHORIZATION_ERROR", status_code=403)
     return dept
+
+
+async def _record_display_map(db: AsyncSession, record_ids: list[str]) -> dict[str, dict]:
+    """User-facing display info for records (Bugs 4+5).
+
+    Returns {record_id: {title, number, filename, display_name}} using only
+    persisted data — never fabricated. display_name prefers the actual
+    uploaded filename, then title, then identifier number (never the raw
+    UUID as the primary user-facing identifier).
+    """
+    ids = sorted({i for i in record_ids if i})
+    if not ids:
+        return {}
+    recs = (await db.execute(select(IpRecord).where(IpRecord.id.in_(ids)))).scalars().all()
+    files = (
+        await db.execute(
+            select(IpFile)
+            .where(IpFile.ip_record_id.in_(ids))
+            .order_by(IpFile.created_at.desc())
+        )
+    ).scalars().all()
+    first_file: dict[str, str] = {}
+    for f in files:
+        first_file.setdefault(f.ip_record_id, f.original_filename)
+    out: dict[str, dict] = {}
+    for r in recs:
+        number = r.patent_number or r.design_number or r.application_number or r.serial_number
+        out[r.id] = {
+            "title": r.title,
+            "number": number,
+            "filename": first_file.get(r.id),
+            "display_name": first_file.get(r.id) or r.title or number,
+        }
+    return out
 
 
 @router.get("/dashboard", status_code=status.HTTP_200_OK)
@@ -186,6 +221,8 @@ async def documents(
     total = (await db.execute(count_query)).scalar_one()
     rows = (await db.execute(query.order_by(IpRecord.created_at.desc()).offset((page - 1) * per_page).limit(per_page))).all()
     rec_ids = [r[0].id for r in rows]
+    # Bug 5: user-facing document name (persisted filename/title/number).
+    display_map = await _record_display_map(db, rec_ids)
     dup_ids = set()
     conf_ids = set()
     if rec_ids:
@@ -202,6 +239,8 @@ async def documents(
             {
                 "id": r.id,
                 "title": r.title,
+                "document_name": (display_map.get(r.id) or {}).get("display_name"),
+                "document_filename": (display_map.get(r.id) or {}).get("filename"),
                 "ip_type": r.ip_type,
                 "patent_number": r.patent_number,
                 "design_number": r.design_number,
@@ -236,6 +275,10 @@ async def duplicates(current_user: dict = Depends(get_current_user), db: AsyncSe
         .order_by(DuplicateCase.detected_at.desc())
     )
     rows = (await db.execute(query)).scalars().unique().all()
+    # Bugs 4+5: resolve persisted document names for both sides of each case
+    # so the UI never shows a raw UUID as the primary identifier.
+    pair_ids = [d.ip_record_id_1 for d in rows] + [d.ip_record_id_2 for d in rows]
+    display_map = await _record_display_map(db, pair_ids)
     return {
         "duplicates": [
             {
@@ -246,6 +289,8 @@ async def duplicates(current_user: dict = Depends(get_current_user), db: AsyncSe
                 "detected_by": d.detected_by,
                 "ip_record_id_1": d.ip_record_id_1,
                 "ip_record_id_2": d.ip_record_id_2,
+                "record_1": display_map.get(d.ip_record_id_1),
+                "record_2": display_map.get(d.ip_record_id_2),
                 "kept_record_id": d.kept_record_id,
                 "resolution_notes": d.resolution_notes,
                 "detected_at": d.detected_at.isoformat() if d.detected_at else None,
@@ -262,11 +307,14 @@ async def duplicates(current_user: dict = Depends(get_current_user), db: AsyncSe
 async def conflicts(current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
     department_id = _ensure_department(current_user)
     rows = (await db.execute(select(ConflictCase).where(ConflictCase.ip_record_id.in_(select(IpRecord.id).where(IpRecord.department_id == department_id))).order_by(ConflictCase.created_at.desc()))).scalars().all()
+    # Bug 5: persisted document name for the review table.
+    display_map = await _record_display_map(db, [c.ip_record_id for c in rows])
     return {
         "conflicts": [
             {
                 "id": c.id,
                 "ip_record_id": c.ip_record_id,
+                "record": display_map.get(c.ip_record_id),
                 "conflict_type": c.conflict_type,
                 "field_name": c.field_name,
                 "severity": c.severity,

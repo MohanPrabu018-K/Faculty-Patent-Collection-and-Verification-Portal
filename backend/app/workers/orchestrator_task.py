@@ -112,6 +112,27 @@ def _collapse_value(value):
     return value
 
 
+def _coerce_record_datetime(value):
+    """Coerce an extracted date-ish value for a DateTime column.
+
+    Bug 9: extraction may yield date objects, ISO strings, or (year
+    fallback) ints. Only real dates reach the column — anything else is
+    skipped so a malformed date can never abort the whole pipeline commit.
+    """
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    if isinstance(value, str):
+        text = value.strip()
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+    return None
+
+
 def _json_safe(value):
     if isinstance(value, dict):
         return {k: _json_safe(v) for k, v in value.items()}
@@ -139,7 +160,7 @@ def _update_ip_record_from_agents(ip_record, result):
                 ocr_ip_type = _collapse_value(extracted_data.get("ip_type"))
                 if ocr_ip_type and (ip_record.ip_type == "UNKNOWN_OTHER" or not ip_record.ip_type):
                     ip_record.ip_type = ocr_ip_type
-                for key in ("patent_number", "design_number", "application_number", "serial_number", "title", "applicant", "patentee", "filing_date", "grant_date", "published_date"):
+                for key in ("patent_number", "design_number", "application_number", "serial_number", "title", "applicant", "patentee"):
                     value = _collapse_value(extracted_data.get(key))
                     if isinstance(value, list) and key in ("applicant", "patentee"):
                         # Joint proprietors arrive as a name list; a raw list
@@ -153,6 +174,12 @@ def _update_ip_record_from_agents(ip_record, result):
                         # (_create_or_link_master_record) and the duplicate-case
                         # layer, so clearing another record's identifier here
                         # would destroy evidence instead of resolving anything.
+                        setattr(ip_record, key, value)
+                for key in ("filing_date", "grant_date", "published_date"):
+                    # DateTime columns: coerce safely (Bug 9). A bare year or
+                    # unparseable value is skipped, never persisted.
+                    value = _coerce_record_datetime(_collapse_value(extracted_data.get(key)))
+                    if value is not None:
                         setattr(ip_record, key, value)
                 inventors = _collapse_value(extracted_data.get("inventors"))
                 if inventors:

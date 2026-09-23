@@ -115,13 +115,21 @@ def _prepare_qr_variants(image) -> list[tuple[str, Any]]:
     """Create deterministic variants for robust QR decoding (no paid deps)."""
     variants: list[tuple[str, Any]] = [("original", image)]
     try:
+        # Bug 10: pyzbar decodes grayscale far more reliably than color.
+        # Every source (including full-page PDF renders, which previously had
+        # no grayscale variant at all) gets one.
+        gray = image.convert("L") if hasattr(image, "convert") else image
+        variants.append(("grayscale", gray))
         # Grayscale already handled via cv2 path; add rotated variants for practical deskew
         variants.append(("rotated_90", image.rotate(90, expand=True)))
         variants.append(("rotated_180", image.rotate(180, expand=True)))
         variants.append(("rotated_270", image.rotate(270, expand=True)))
-        # Low-quality / small QR: 2x upscale via nearest/bilinear
+        # Low-quality / small QR: 2x upscale via nearest/bilinear.
+        # Bug 10: a full A4 page rendered at 2x matrix is ~1190x1684, so the
+        # old <1200 gate skipped upscaling exactly where small on-page QRs
+        # need it most. Gate at <2000 keeps cost to one extra decode.
         w, h = image.size
-        if max(w, h) < 1200:
+        if max(w, h) < 2000:
             variants.append(("upscaled_2x", image.resize((w * 2, h * 2))))
     except Exception:
         pass

@@ -72,6 +72,38 @@ test.describe('Responsive layout', () => {
         await expect(page.locator('.mobile-nav'), `mobile nav should show at ${vp.width}px`).toBeVisible();
       }
     });
+
+    test('mobile bottom nav stays fixed to the viewport while scrolling (Bug 2)', async ({ page }) => {
+      for (const vp of VIEWPORTS.filter((v) => v.width <= 768)) {
+        await page.setViewportSize(vp);
+        await page.goto('/faculty/dashboard');
+        await expect(page).toHaveURL(/\/faculty\/dashboard/);
+        const nav = page.locator('.mobile-nav');
+        await expect(nav).toBeVisible();
+        const position = await nav.evaluate((el) => getComputedStyle(el).position);
+        expect(position, `mobile nav must be fixed at ${vp.width}px`).toBe('fixed');
+        // Scroll the page; the bar must remain pinned to the viewport bottom.
+        const before = await nav.evaluate((el) => el.getBoundingClientRect().bottom);
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await page.waitForTimeout(250);
+        const after = await nav.evaluate((el) => el.getBoundingClientRect().bottom);
+        expect(Math.abs(after - vp.height) < 2, `nav pinned to viewport bottom at ${vp.width}px`).toBe(true);
+        expect(Math.abs(after - before) < 2, `nav must not move with scroll at ${vp.width}px`).toBe(true);
+        // Content reserves space so the bar never covers page content.
+        const mainPad = await page.locator('.main').evaluate((el) => parseFloat(getComputedStyle(el).paddingBottom));
+        expect(mainPad, `content bottom padding at ${vp.width}px`).toBeGreaterThan(40);
+      }
+    });
+
+    test('desktop keeps sidebar and no bottom nav (Bug 2 unchanged)', async ({ page }) => {
+      for (const vp of VIEWPORTS.filter((v) => v.width >= 1024)) {
+        await page.setViewportSize(vp);
+        await page.goto('/faculty/dashboard');
+        await expect(page).toHaveURL(/\/faculty\/dashboard/);
+        await expect(page.locator('.sidebar'), `sidebar visible at ${vp.width}px`).toBeVisible();
+        await expect(page.locator('.mobile-nav'), `mobile nav hidden at ${vp.width}px`).toBeHidden();
+      }
+    });
   });
 });
 

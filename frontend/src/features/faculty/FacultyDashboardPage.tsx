@@ -34,7 +34,9 @@ export function FacultyDashboardPage() {
         <div className="grid stats-grid">
           <StatCard label="Total submissions" value={summary.total} />
           <StatCard label="Pending" value={summary.pending} />
-          <StatCard label="Processing" value={summary.processing} />
+          {/* Bug 11: the Processing section is retired. The backend document-
+              processing pipeline (upload/OCR/extraction/verification) is
+              untouched — only this dashboard UI is removed. */}
           <StatCard label="Awaiting review" value={summary.awaiting_review} />
           <StatCard label="Verified" value={summary.completed} />
           <StatCard label="Failed" value={summary.failed} />

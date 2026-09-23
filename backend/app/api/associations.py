@@ -13,7 +13,7 @@ from app.api.deps import get_current_user
 from app.core.database import get_async_session
 from app.core.exceptions import NotFoundError, PortalError
 from app.core.logging import log_audit
-from app.models.base import AssociationRequest, IpRecord, User
+from app.models.base import AssociationRequest, IpContributor, IpRecord, User
 from app.services.notifications import (
     NotificationPriority,
     NotificationType,
@@ -165,6 +165,11 @@ async def send_association_request(request: Request, recipient_faculty_id: str, 
         raise NotFoundError("Faculty", recipient_faculty_id)
     if recipient.id == requester_id:
         raise PortalError(message="Self-association is not allowed", error_code="VALIDATION_ERROR", status_code=400)
+    # Bug 8: deactivated faculty must never receive association requests.
+    # Backend enforcement (frontend also hides the action, but the API is the
+    # gate). No request row and no notification are created for inactive users.
+    if not recipient.is_active:
+        raise PortalError(message="Association requests cannot be sent to deactivated faculty", error_code="VALIDATION_ERROR", status_code=422)
 
     record = await _resolve_associated_record(db, record_id)
 
@@ -260,6 +265,38 @@ async def respond_association_request(request: Request, request_id: str, action:
         request_obj.response_reason = body.get("reason")
     else:
         request_obj.response_reason = body.get("reason")
+
+    # Bug 1: an accepted/approved association must link the recipient to the
+    # record as an internal contributor in the SAME transaction as the status
+    # change. Dashboard/profile/records queries are uploader-OR-contributor
+    # scoped, so the accepted patent appears for Faculty B immediately and
+    # survives refresh and new sessions (backend is source of truth).
+    if action in ("accepted", "approved") and request_obj.ip_record_id:
+        existing_link = (
+            await db.execute(
+                select(IpContributor).where(
+                    IpContributor.ip_record_id == request_obj.ip_record_id,
+                    IpContributor.user_id == responder_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing_link is None:
+            responder = (
+                await db.execute(select(User).where(User.id == responder_id))
+            ).scalar_one_or_none()
+            if responder is not None and responder.is_active:
+                db.add(
+                    IpContributor(
+                        id=str(uuid.uuid4()),
+                        ip_record_id=request_obj.ip_record_id,
+                        user_id=responder_id,
+                        name=responder.full_name or responder.email,
+                        contributor_type="INTERNAL_FACULTY",
+                        match_status="ACCEPTED",
+                        source="ASSOCIATION_ACCEPT",
+                        is_external=False,
+                    )
+                )
 
     await db.commit()
 

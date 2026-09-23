@@ -90,4 +90,13 @@ describe('associationSendState', () => {
     const requests = [{ record_id: RECORD, recipient_faculty_id: 'FAC-ashwin', status: 'PENDING' }];
     expect(liveRequestFor(internal('ashwin'), RECORD, requests)).toBeDefined();
   });
+
+  it('Bug 8: deactivated faculty never sees the send button', () => {
+    const inactive = internal('sumathi', { is_active: false });
+    expect(associationSendState(inactive, OPTS)).toBe('ineligible');
+    expect(canSendAssociationRequest(inactive, OPTS)).toBe(false);
+    // Active (or unknown) faculty are unaffected.
+    expect(associationSendState(internal('ashwin', { is_active: true }), OPTS)).toBe('sendable');
+    expect(associationSendState(internal('ashwin'), OPTS)).toBe('sendable');
+  });
 });
