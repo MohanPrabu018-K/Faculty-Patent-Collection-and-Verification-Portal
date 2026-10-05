@@ -136,10 +136,10 @@ export function RecordDetailPage() {
     { key: 'design_number', label: 'Design number', value: record.design_number },
     { key: 'application_number', label: 'Application number', value: record.application_number },
     { key: 'serial_number', label: 'Serial number', value: record.serial_number },
-    { key: 'filing_date', label: 'Filing date', value: record.filing_date },
+    { key: 'filing_date', label: 'Filing date', value: formatDateOnly(record.filing_date) },
     // Grant date is stored as a midnight datetime; show the calendar date only.
     { key: 'grant_date', label: 'Grant date', value: formatDateOnly(record.grant_date) },
-    { key: 'published_date', label: 'Published date', value: record.published_date },
+    { key: 'published_date', label: 'Published date', value: formatDateOnly(record.published_date) },
   ];
 
   // Uploader-only review: the backend enforces `record.uploader_id == current_user.id`
@@ -200,9 +200,9 @@ export function RecordDetailPage() {
               { label: 'Patent number', value: record.patent_number },
               { label: 'Application number', value: record.application_number },
             ]),
-          { label: 'Filing date', value: record.filing_date },
+          { label: 'Filing date', value: formatDateOnly(record.filing_date) },
           { label: 'Grant date', value: formatDateOnly(record.grant_date) },
-          { label: 'Published date', value: record.published_date },
+          { label: 'Published date', value: formatDateOnly(record.published_date) },
           { label: 'QR data', value: qrData.length ? qrData.join(', ') : null },
         ]} />
       </SectionCard>

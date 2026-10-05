@@ -167,3 +167,126 @@ def test_reset_with_short_password_is_422(client, temp_user):
     _plant_event(temp_user["id"], token)
     r = client.post("/api/v1/auth/reset-password", json={"token": token, "new_password": "abc"})
     assert r.status_code == 422, r.text
+
+
+def test_old_password_fails_after_reset(client, temp_user):
+    token = f"tok-{uuid.uuid4().hex}"
+    _plant_event(temp_user["id"], token)
+    r = client.post("/api/v1/auth/reset-password", json={"token": token, "new_password": "brand-new-9"})
+    assert r.status_code == 200, r.text
+    # The previous password must no longer work.
+    old = client.post("/api/v1/auth/login", json={"email": temp_user["email"], "password": "secret123"})
+    assert old.status_code == 401, old.text
+    # The new password does.
+    new = client.post("/api/v1/auth/login", json={"email": temp_user["email"], "password": "brand-new-9"})
+    assert new.status_code == 200, new.text
+
+
+def test_smtp_disabled_reports_failure_but_keeps_generic_response(client, temp_user, monkeypatch):
+    """Honest behavior when email is unconfigured (current production state).
+
+    No send is attempted, the FAILED audit row is written, and the caller
+    still receives the identical privacy-preserving message.
+    """
+    import smtplib
+
+    from app.core.config import smtp_settings
+
+    monkeypatch.setattr(smtp_settings, "smtp_enabled", False)
+    monkeypatch.setattr(smtp_settings, "smtp_host", "")
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("SMTP must not be contacted when disabled")
+
+    monkeypatch.setattr(smtplib, "SMTP", _boom)
+    monkeypatch.setattr(smtplib, "SMTP_SSL", _boom)
+
+    r = client.post("/api/v1/auth/forgot-password", json={"email": temp_user["email"]})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"message": GENERIC_MESSAGE}
+
+    async def _check():
+        async with get_async_session_context() as db:
+            rows = (await db.execute(
+                select(AuditLog).where(
+                    AuditLog.action == "PASSWORD_RESET_EMAIL_FAILED",
+                    AuditLog.target_id == temp_user["id"],
+                )
+            )).scalars().all()
+            assert len(rows) >= 1
+            sent = (await db.execute(
+                select(AuditLog).where(
+                    AuditLog.action == "PASSWORD_RESET_EMAIL_SENT",
+                    AuditLog.target_id == temp_user["id"],
+                )
+            )).scalars().all()
+            assert sent == []
+
+    asyncio.run(_check())
+
+
+def test_reset_link_format_uses_configured_frontend_url(client, temp_user, monkeypatch):
+    """The emailed link is built from configuration and carries the token as
+    a query parameter. Uses a fake SMTP transport — nothing is really sent.
+    """
+    import smtplib
+
+    from app.core.config import smtp_settings
+    from app.core.security import verify_password
+
+    captured = {}
+
+    class _FakeSMTP:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def starttls(self):
+            pass
+
+        def login(self, *args):
+            pass
+
+        def sendmail(self, from_email, to_email, msg):
+            captured["from"] = from_email
+            captured["to"] = to_email
+            captured["msg"] = msg
+
+        def quit(self):
+            pass
+
+    monkeypatch.setattr(smtp_settings, "smtp_enabled", True)
+    monkeypatch.setattr(smtp_settings, "smtp_host", "smtp.example.test")
+    monkeypatch.setattr(smtp_settings, "smtp_from_email", "noreply@example.test")
+    monkeypatch.setattr(smtp_settings, "frontend_reset_url", "https://example.test")
+    monkeypatch.setattr(smtplib, "SMTP", _FakeSMTP)
+
+    r = client.post("/api/v1/auth/forgot-password", json={"email": temp_user["email"]})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"message": GENERIC_MESSAGE}
+    assert captured.get("to") == temp_user["email"]
+    assert "https://example.test/reset?token=" in captured.get("msg", "")
+    # The emailed token verifies against the stored hash (proves linkage).
+    import re
+
+    m = re.search(r"/reset\?token=([A-Za-z0-9_\-]+)", captured["msg"])
+    assert m, "reset link must carry the token"
+    emailed_token = m.group(1)
+    assert len(emailed_token) >= 32
+
+    async def _check():
+        async with get_async_session_context() as db:
+            events = (await db.execute(
+                select(SecurityEvent).where(SecurityEvent.user_id == temp_user["id"])
+            )).scalars().all()
+            assert len(events) == 1
+            details = events[0].details or {}
+            assert verify_password(emailed_token, details["token_hash"])
+            assert details.get("used") is False
+
+    asyncio.run(_check())

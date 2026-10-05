@@ -387,14 +387,82 @@ async def audit(current_user: dict = Depends(get_current_user), db: AsyncSession
     )
     total = (await db.execute(select(func.count()).select_from(AuditLog).where(scope))).scalar_one()
     rows = (await db.execute(select(AuditLog).where(scope).order_by(AuditLog.created_at.desc()).offset((page - 1) * per_page).limit(per_page))).scalars().all()
+    # Bug 4 (HOD audit readability): resolve human-readable names for actors
+    # and patent/IP entities. Raw UUIDs stay in the payload (secondary traceability
+    # preserved) but are never the primary display.
+    actor_ids = sorted({r.actor_id for r in rows if r.actor_id})
+    actors = (
+        {
+            u.id: u
+            for u in (
+                await db.execute(select(User).where(User.id.in_(actor_ids)))
+            ).scalars().all()
+        }
+        if actor_ids
+        else {}
+    )
+    record_entity_ids = [
+        r.entity_id for r in rows
+        if r.entity_type == "ip_record" and r.entity_id
+    ] + [
+        r.target_id for r in rows
+        if r.target_type == "ip_record" and r.target_id
+    ]
+    user_entity_ids = [
+        r.entity_id for r in rows
+        if r.entity_type in ("user", "faculty") and r.entity_id
+    ]
+    display_map = await _record_display_map(db, record_entity_ids)
+    entity_users = (
+        {
+            u.id: u
+            for u in (
+                await db.execute(select(User).where(User.id.in_(sorted(set(user_entity_ids)))))
+            ).scalars().all()
+        }
+        if user_entity_ids
+        else {}
+    )
+
+    def _actor(aid: str | None):
+        u = actors.get(aid) if aid else None
+        return {
+            "id": aid,
+            "full_name": u.full_name if u else None,
+            "faculty_id": u.faculty_id if u else None,
+        }
+
+    def _entity(etype: str | None, eid: str | None):
+        if not eid:
+            return {"type": etype, "id": eid, "display_name": None}
+        if etype == "ip_record":
+            info = display_map.get(eid) or {}
+            return {
+                "type": etype,
+                "id": eid,
+                "display_name": info.get("display_name"),
+                "title": info.get("title"),
+            }
+        if etype in ("user", "faculty"):
+            u = entity_users.get(eid)
+            return {
+                "type": etype,
+                "id": eid,
+                "display_name": u.full_name if u else None,
+                "faculty_id": u.faculty_id if u else None,
+            }
+        return {"type": etype, "id": eid, "display_name": None}
+
     return {
         "audit_entries": [
             {
                 "id": r.id,
                 "action": r.action,
                 "actor_id": r.actor_id,
+                "actor": _actor(r.actor_id),
                 "entity_type": r.entity_type,
                 "entity_id": r.entity_id,
+                "entity": _entity(r.entity_type, r.entity_id),
                 "target_id": r.target_id,
                 "previous_value": r.previous_value,
                 "new_value": r.new_value,

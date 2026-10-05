@@ -12,7 +12,13 @@ type FormData = z.infer<typeof schema>;
 const forgotSchema = z.object({ email: z.string().email() });
 type ForgotFormData = z.infer<typeof forgotSchema>;
 
-const resetSchema = z.object({ token: z.string().min(1, 'Reset token is required'), newPassword: z.string().min(6, 'Password must be at least 6 characters') });
+const resetSchema = z.object({
+  newPassword: z.string().min(6, 'Password must be at least 6 characters'),
+  confirmPassword: z.string().min(6, 'Password must be at least 6 characters'),
+}).refine((d) => d.newPassword === d.confirmPassword, {
+  message: 'Passwords do not match',
+  path: ['confirmPassword'],
+});
 type ResetFormData = z.infer<typeof resetSchema>;
 
 /** Role home pages. Invalid credentials / expired sessions always land here first. */
@@ -32,22 +38,66 @@ function allowedFrom(from: unknown, role: string): string | null {
 
 type View = 'login' | 'forgot' | 'reset';
 
+/** Shown when /reset is opened without a token: no manual token entry exists. */
+export const MISSING_RESET_LINK_MESSAGE =
+  'Your password reset link is missing or invalid. Please request a new password reset email.';
+
+/**
+ * Map reset/forgot failures to clean user-facing text.
+ *
+ * The backend keeps structured JSON internally ({error, message}); the UI
+ * must never render that wrapper. Known error codes map to friendly copy;
+ * any other backend-provided human message passes through (backend messages
+ * never contain tokens); otherwise a generic message is shown.
+ */
+export function friendlyAuthError(err: unknown, fallback: string): string {
+  if (err instanceof Error) {
+    const text = err.message.trim();
+    if (text.startsWith('{')) {
+      try {
+        const parsed: unknown = JSON.parse(text);
+        const message =
+          parsed && typeof parsed === 'object' && typeof (parsed as Record<string, unknown>).message === 'string'
+            ? String((parsed as Record<string, unknown>).message)
+            : null;
+        if (message) {
+          if (/invalid or expired reset token/i.test(message)) {
+            return 'Your reset link is invalid or has expired. Please request a new password reset email.';
+          }
+          if (/too many attempts/i.test(message)) {
+            return 'Too many attempts. Please try again later.';
+          }
+          return message;
+        }
+      } catch {
+        /* fall through to generic */
+      }
+      return fallback;
+    }
+    return err.message;
+  }
+  return fallback;
+}
+
 export function LoginPage() {
   const { login } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
-  // Deep link from the emailed reset URL (/reset?token=…): open the reset
-  // view directly with the token prefilled. Manual paste flow unchanged.
+  // Deep link from the emailed reset URL (/reset?token=…): the token is
+  // consumed automatically from the URL. There is intentionally NO manual
+  // token entry anywhere in the normal flow.
   const initialToken = (searchParams.get('token') ?? '').trim();
   const [error, setError] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [view, setView] = useState<View>(initialToken ? 'reset' : 'login');
+  // /reset always opens the reset view (with or without a token) so a bare
+  // /reset visit shows the missing-link message instead of the login form.
+  const [view, setView] = useState<View>(initialToken || location.pathname === '/reset' ? 'reset' : 'login');
   const [forgotSuccess, setForgotSuccess] = useState('');
   const [resetSuccess, setResetSuccess] = useState('');
   const { register, handleSubmit, formState: { errors, isSubmitting } } = useForm<FormData>({ resolver: zodResolver(schema) });
   const { register: registerForgot, handleSubmit: handleForgotSubmit, formState: { errors: forgotErrors, isSubmitting: forgotSubmitting } } = useForm<ForgotFormData>({ resolver: zodResolver(forgotSchema) });
-  const { register: registerReset, handleSubmit: handleResetSubmit, formState: { errors: resetErrors, isSubmitting: resetSubmitting } } = useForm<ResetFormData>({ resolver: zodResolver(resetSchema), defaultValues: { token: initialToken } });
+  const { register: registerReset, handleSubmit: handleResetSubmit, formState: { errors: resetErrors, isSubmitting: resetSubmitting } } = useForm<ResetFormData>({ resolver: zodResolver(resetSchema) });
 
   const onSubmit = async (data: FormData) => {
     setError('');
@@ -78,19 +128,23 @@ export function LoginPage() {
       const result = await api.forgotPassword(data.email);
       setForgotSuccess(result.message || 'If the email is registered, a password reset link has been sent.');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to send reset link');
+      setError(friendlyAuthError(err, 'Failed to send reset link. Please try again later.'));
     }
   };
 
   const onResetSubmit = async (data: ResetFormData) => {
     setError('');
     setResetSuccess('');
+    if (!initialToken) {
+      setError(MISSING_RESET_LINK_MESSAGE);
+      return;
+    }
     try {
-      const result = await api.resetPassword(data.token, data.newPassword);
+      const result = await api.resetPassword(initialToken, data.newPassword);
       setResetSuccess(result.message || 'Password reset successfully. You can now log in.');
       setTimeout(() => setView('login'), 3000);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Password reset failed');
+      setError(friendlyAuthError(err, 'Password reset failed. Please request a new password reset email.'));
     }
   };
 
@@ -129,7 +183,7 @@ export function LoginPage() {
         {view === 'forgot' && (
           <>
             <h1>Forgot Password</h1>
-            <p>Enter your registered email address and we'll send you a reset token.</p>
+            <p>Enter your registered email address and we&apos;ll send you a password reset link.</p>
             <form onSubmit={handleForgotSubmit(onForgotSubmit)} className="stack">
               <div className="field">
                 <label htmlFor="forgot-email">Email</label>
@@ -138,41 +192,51 @@ export function LoginPage() {
               </div>
               {error && <div className="alert alert-error" role="alert" aria-live="polite">{error}</div>}
               {forgotSuccess && <div className="alert alert-success" role="status">{forgotSuccess}</div>}
-              <button className="btn btn-primary" disabled={forgotSubmitting}>{forgotSubmitting ? 'Sending...' : 'Send reset token'}</button>
+              <button className="btn btn-primary" disabled={forgotSubmitting}>{forgotSubmitting ? 'Sending...' : 'Send reset link'}</button>
               <button type="button" className="btn btn-ghost" onClick={() => { setView('login'); setError(''); setForgotSuccess(''); }}>
                 Back to login
               </button>
             </form>
-            <div style={{ marginTop: 16, borderTop: '1px solid var(--border, #e2e8f0)', paddingTop: 16 }}>
-              <p style={{ fontSize: 13, color: 'var(--muted, #64748b)' }}>Already have a reset token?</p>
-              <button type="button" className="btn btn-secondary" style={{ marginTop: 8 }} onClick={() => { setView('reset'); setError(''); setForgotSuccess(''); }}>
-                Enter reset token
-              </button>
-            </div>
           </>
         )}
         {view === 'reset' && (
           <>
             <h1>Reset Password</h1>
-            <p>Enter the reset token from your email and your new password.</p>
-            <form onSubmit={handleResetSubmit(onResetSubmit)} className="stack">
-              <div className="field">
-                <label htmlFor="reset-token">Reset Token</label>
-                <input {...registerReset('token')} id="reset-token" type="text" placeholder="Paste your reset token" aria-label="Reset token" />
-                {resetErrors.token && <small className="field-error">{resetErrors.token.message}</small>}
-              </div>
-              <div className="field">
-                <label htmlFor="new-password">New Password</label>
-                <input {...registerReset('newPassword')} id="new-password" type={showPassword ? 'text' : 'password'} placeholder="Enter new password" aria-label="New password" />
-                {resetErrors.newPassword && <small className="field-error">{resetErrors.newPassword.message}</small>}
-              </div>
-              {error && <div className="alert alert-error" role="alert" aria-live="polite">{error}</div>}
-              {resetSuccess && <div className="alert alert-success" role="status">{resetSuccess}</div>}
-              <button className="btn btn-primary" disabled={resetSubmitting}>{resetSubmitting ? 'Resetting...' : 'Reset password'}</button>
-              <button type="button" className="btn btn-ghost" onClick={() => { setView('login'); setError(''); setResetSuccess(''); }}>
-                Back to login
-              </button>
-            </form>
+            {initialToken ? (
+              <>
+                <p>Enter a new password for your account.</p>
+                <form onSubmit={handleResetSubmit(onResetSubmit)} className="stack">
+                  <div className="field">
+                    <label htmlFor="new-password">New Password</label>
+                    <input {...registerReset('newPassword')} id="new-password" type={showPassword ? 'text' : 'password'} placeholder="Enter new password" aria-label="New password" />
+                    {resetErrors.newPassword && <small className="field-error">{resetErrors.newPassword.message}</small>}
+                  </div>
+                  <div className="field">
+                    <label htmlFor="confirm-password">Confirm Password</label>
+                    <input {...registerReset('confirmPassword')} id="confirm-password" type={showPassword ? 'text' : 'password'} placeholder="Confirm new password" aria-label="Confirm password" />
+                    {resetErrors.confirmPassword && <small className="field-error">{resetErrors.confirmPassword.message}</small>}
+                  </div>
+                  {error && <div className="alert alert-error" role="alert" aria-live="polite">{error}</div>}
+                  {resetSuccess && <div className="alert alert-success" role="status">{resetSuccess}</div>}
+                  <button className="btn btn-primary" disabled={resetSubmitting}>{resetSubmitting ? 'Resetting...' : 'Reset password'}</button>
+                  <button type="button" className="btn btn-ghost" onClick={() => { setView('login'); setError(''); setResetSuccess(''); }}>
+                    Back to login
+                  </button>
+                </form>
+              </>
+            ) : (
+              <>
+                <div className="alert alert-error" role="alert">{MISSING_RESET_LINK_MESSAGE}</div>
+                <div className="stack" style={{ marginTop: 12 }}>
+                  <button type="button" className="btn btn-primary" onClick={() => { setView('forgot'); setError(''); }}>
+                    Request a new password reset email
+                  </button>
+                  <button type="button" className="btn btn-ghost" onClick={() => { setView('login'); setError(''); }}>
+                    Back to login
+                  </button>
+                </div>
+              </>
+            )}
           </>
         )}
       </div>

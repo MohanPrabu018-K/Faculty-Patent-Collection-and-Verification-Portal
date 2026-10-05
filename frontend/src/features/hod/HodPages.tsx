@@ -4,7 +4,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import { api } from '../../api/client';
 import {
   SectionCard, StatCard, StatusBadge, ErrorBlock, EmptyState,
-  Toolbar, TableWrap, Pagination, Modal, formatDateTime, formatDate, display, docName,
+  Toolbar, TableWrap, Pagination, Modal, formatDateTime, formatDate, display, docName, personName,
 } from '../../components/ui';
 import { useToast } from '../../stores/toast';
 import { useDebounce } from '../../hooks/useDebounce';
@@ -579,6 +579,36 @@ function Bars({ data }: { data: Record<string, number> }) {
 
 /* ---------------------------------- Audit -------------------------------- */
 
+/**
+ * Bug 4: HOD audit readability helpers. Prefer backend-resolved human names;
+ * raw UUIDs appear only as secondary muted text (traceability preserved).
+ */
+export function auditPerson(info: unknown, fallbackId?: unknown): React.ReactNode {
+  if (info && typeof info === 'object') {
+    const r = info as Record<string, unknown>;
+    const name = r.full_name || r.faculty_id;
+    if (typeof name === 'string' && name.trim()) {
+      return <span>{name}{typeof r.faculty_id === 'string' && r.faculty_id !== name ? <span className="muted"> · {r.faculty_id}</span> : null}</span>;
+    }
+  }
+  return <span>{personName(info, fallbackId)}</span>;
+}
+
+export function auditEntity(info: unknown, entityType?: unknown, entityId?: unknown): React.ReactNode {
+  const label = typeof entityType === 'string' && entityType ? entityType.replace(/_/g, ' ') : 'Event';
+  if (info && typeof info === 'object') {
+    const r = info as Record<string, unknown>;
+    const name = r.display_name || r.full_name || r.title || r.faculty_id;
+    if (typeof name === 'string' && name.trim()) {
+      return <span>{label}<div><strong>{name}</strong></div></span>;
+    }
+  }
+  if (typeof entityId === 'string' && entityId.trim()) {
+    return <span>{label}<div className="muted">{entityId.slice(0, 8)}…</div></span>;
+  }
+  return <span>{label}</span>;
+}
+
 export function HodAuditPage() {
   const [page, setPage] = useState(1);
   const { data, isLoading, error, isFetching, refetch } = useQuery({
@@ -612,8 +642,10 @@ export function HodAuditPage() {
               {rows.map((r) => (
                 <tr key={String(r.id)}>
                   <td><strong>{String(r.action).replace(/_/g, ' ')}</strong></td>
-                  <td>{display(r.actor_id)}</td>
-                  <td>{display(r.entity_type)}<div className="muted">{String(r.entity_id || '').slice(0, 8)}</div></td>
+                  {/* Bug 4: human-readable actor + entity names first; raw IDs
+                      stay only as secondary muted text for traceability. */}
+                  <td>{auditPerson(r.actor, r.actor_id)}</td>
+                  <td>{auditEntity(r.entity, r.entity_type, r.entity_id)}</td>
                   <td className="muted">{display(r.new_value)}</td>
                   <td>{formatDateTime(r.created_at)}</td>
                 </tr>
