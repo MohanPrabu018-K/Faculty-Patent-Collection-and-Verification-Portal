@@ -1392,6 +1392,22 @@ async def request_association(
             status_code=422,
         )
 
+    # Staged workflow: faculty-stage requests stay blocked while the HOD
+    # association for the record is still pending. Requests addressed to
+    # an HOD are HOD-stage and are never blocked by this rule.
+    if other_user.role != "hod_admin":
+        from app.api.associations import _live_hod_request
+
+        pending_hod = await _live_hod_request(
+            db, record_id, ip_record.master_ip_id
+        )
+        if pending_hod is not None:
+            raise PortalError(
+                message="HOD association acceptance is required before faculty association requests",
+                error_code="HOD_ASSOCIATION_PENDING",
+                status_code=409,
+            )
+
     # Create association request
     from app.models.base import AssociationRequest
 

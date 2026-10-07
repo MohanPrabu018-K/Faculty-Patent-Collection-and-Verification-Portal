@@ -7,23 +7,40 @@ H2  Duplicate association guard: POST /api/v1/associations/ with the same
     (record, requester, recipient) returns 409 when a PENDING/ACCEPTED row
     already exists, while legitimate different associations still succeed.
 
-DB hygiene: the H2 test creates PENDING rows for Record B only and deletes
-them in teardown. Record A (GRANTED), Record B states, and the legitimate
-ACCEPTED association are never modified.
+DB hygiene: the original production baseline (records 7be9f118/76e50dba,
+FAC-NAGASAI, and the token user test-faculty-001) was removed by the
+authorized production cleanup. The module fixture below recreates that
+baseline hermetically with the same ids (sweeping any leftovers from a
+crashed prior run first) and deletes every row it created in teardown.
+The H2 test additionally deletes ONLY the PENDING rows it created, after
+asserting their status.
 """
+import asyncio
+
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import delete, or_, select
 
 from app.core.config import app_settings
 from app.core.database import get_async_session_context
-from app.core.security import generate_jwt_token
+from app.core.security import generate_jwt_token, hash_password
 from app.main import app
-from app.models.base import AssociationRequest, User
+from app.models.base import AssociationRequest, AuditLog, IpContributor, IpRecord, Notification, User
 
 RECORD_A = "7be9f118-ba87-462a-8d72-c98b688c6aa4"
 RECORD_B = "76e50dba-6195-47b1-83a5-dde08b527854"
 NAGASAI_FACULTY_ID = "FAC-NAGASAI"
+OTHER_FACULTY_ID = "FAC-HGA-OTHER"
+REQUESTER_ID = "test-faculty-001"
+NAGASAI_ID = "hga-nagasai-001"
+OTHER_ID = "hga-other-001"
+_FX_USER_IDS = (REQUESTER_ID, NAGASAI_ID, OTHER_ID)
+_FX_USER_EMAILS = (
+    f"{REQUESTER_ID}@faculty.edu",
+    f"{NAGASAI_ID}@faculty.edu",
+    f"{OTHER_ID}@faculty.edu",
+)
+_ACCEPTED_ASSOC_ID = "hga-accepted-001"
 
 
 @pytest.fixture(scope="session")
@@ -41,7 +58,7 @@ def _tok(sub, role, dept="", fac=""):
 
 
 ADMIN = {"Authorization": f"Bearer {_tok('test-admin-002', 'super_admin')}"}
-FAC1 = {"Authorization": f"Bearer {_tok('test-faculty-001', 'faculty', 'mv-dept', 'FAC001')}"}
+FAC1 = {"Authorization": f"Bearer {_tok(REQUESTER_ID, 'faculty', 'mv-dept', 'FAC001')}"}
 
 
 def _h(client, auth):
@@ -54,9 +71,107 @@ def _h(client, auth):
     return headers
 
 
+async def _seed_baseline() -> None:
+    async with get_async_session_context() as db:
+        # Self-healing sweep: only rows owned by this fixture's identities.
+        await db.execute(
+            delete(AssociationRequest).where(
+                or_(
+                    AssociationRequest.ip_record_id.in_([RECORD_A, RECORD_B]),
+                    AssociationRequest.requesting_faculty_id.in_(_FX_USER_IDS),
+                    AssociationRequest.target_faculty_id.in_(_FX_USER_IDS),
+                )
+            )
+        )
+        await db.execute(delete(IpContributor).where(IpContributor.ip_record_id.in_([RECORD_A, RECORD_B])))
+        await db.execute(delete(Notification).where(Notification.user_id.in_(_FX_USER_IDS)))
+        await db.execute(
+            delete(AuditLog).where(
+                or_(
+                    AuditLog.actor_id.in_(_FX_USER_IDS),
+                    AuditLog.target_id.in_([RECORD_A, RECORD_B]),
+                )
+            )
+        )
+        await db.execute(delete(IpRecord).where(IpRecord.id.in_([RECORD_A, RECORD_B])))
+        await db.execute(
+            delete(User).where(or_(User.id.in_(_FX_USER_IDS), User.email.in_(_FX_USER_EMAILS)))
+        )
+        await db.commit()
+
+        users = (
+            (REQUESTER_ID, "FAC001", "Test Faculty One"),
+            (NAGASAI_ID, NAGASAI_FACULTY_ID, "Nagasai"),
+            (OTHER_ID, OTHER_FACULTY_ID, "HGA Other Faculty"),
+        )
+        for uid, fid, name in users:
+            db.add(User(
+                id=uid, email=f"{uid}@faculty.edu", official_email=f"{uid}@faculty.edu",
+                password_hash=hash_password("secret123"), full_name=name,
+                role="faculty", faculty_id=fid, status="active", is_active=True,
+            ))
+        db.add(IpRecord(
+            id=RECORD_A, ip_type="PATENT", patent_number="HGA-GRANTED-001",
+            title="SECURITY CAMERA MONITORING SYSTEM", verification_status="VERIFIED",
+            processing_status="COMPLETED", workflow_state="GRANTED",
+            uploader_id=REQUESTER_ID, is_archived=False,
+        ))
+        db.add(IpRecord(
+            id=RECORD_B, ip_type="PATENT", patent_number="HGA-PENDING-001",
+            title="HGA pending review fixture record", verification_status="VERIFICATION_REQUIRED",
+            processing_status="COMPLETED", workflow_state="NEEDS_REVIEW",
+            uploader_id=REQUESTER_ID, is_archived=False,
+        ))
+        db.add(AssociationRequest(
+            id=_ACCEPTED_ASSOC_ID, ip_record_id=RECORD_A,
+            requesting_faculty_id=REQUESTER_ID, target_faculty_id=NAGASAI_ID,
+            requester_id=REQUESTER_ID, recipient_id=NAGASAI_ID,
+            reason="Pre-existing accepted baseline (hermetic)",
+            status="ACCEPTED",
+        ))
+        await db.commit()
+
+
+async def _remove_baseline() -> None:
+    async with get_async_session_context() as db:
+        await db.execute(
+            delete(AssociationRequest).where(
+                or_(
+                    AssociationRequest.ip_record_id.in_([RECORD_A, RECORD_B]),
+                    AssociationRequest.requesting_faculty_id.in_(_FX_USER_IDS),
+                    AssociationRequest.target_faculty_id.in_(_FX_USER_IDS),
+                )
+            )
+        )
+        await db.execute(delete(IpContributor).where(IpContributor.ip_record_id.in_([RECORD_A, RECORD_B])))
+        await db.execute(delete(Notification).where(Notification.user_id.in_(_FX_USER_IDS)))
+        await db.execute(
+            delete(AuditLog).where(
+                or_(
+                    AuditLog.actor_id.in_(_FX_USER_IDS),
+                    AuditLog.target_id.in_([RECORD_A, RECORD_B]),
+                )
+            )
+        )
+        await db.execute(delete(IpRecord).where(IpRecord.id.in_([RECORD_A, RECORD_B])))
+        await db.execute(
+            delete(User).where(or_(User.id.in_(_FX_USER_IDS), User.email.in_(_FX_USER_EMAILS)))
+        )
+        await db.commit()
+
+
+@pytest.fixture(scope="module")
+def baseline():
+    asyncio.run(_seed_baseline())
+    try:
+        yield
+    finally:
+        asyncio.run(_remove_baseline())
+
+
 # --- H1: admin detail carries workflow_state --------------------------------
 
-def test_admin_detail_includes_workflow_state(client):
+def test_admin_detail_includes_workflow_state(client, baseline):
     r = client.get(f"/api/v1/admin/ip-records/{RECORD_A}", headers=_h(client, ADMIN))
     assert r.status_code == 200, r.text
     body = r.json()
@@ -68,7 +183,7 @@ def test_admin_detail_includes_workflow_state(client):
         assert key in body, f"legacy field {key} missing"
 
 
-def test_admin_detail_pending_record_state(client):
+def test_admin_detail_pending_record_state(client, baseline):
     r = client.get(f"/api/v1/admin/ip-records/{RECORD_B}", headers=_h(client, ADMIN))
     assert r.status_code == 200, r.text
     body = r.json()
@@ -81,34 +196,14 @@ def test_admin_detail_unknown_id_404(client):
     assert r.status_code == 404
 
 
-def test_admin_detail_faculty_denied(client):
+def test_admin_detail_faculty_denied(client, baseline):
     r = client.get(f"/api/v1/admin/ip-records/{RECORD_A}", headers=_h(client, FAC1))
     assert r.status_code in (401, 403), r.text
 
 
 # --- H2: duplicate association guard ----------------------------------------
 
-@pytest.fixture()
-def other_recipient():
-    """A real faculty_id distinct from FAC001 and FAC-NAGASAI."""
-    import asyncio
-
-    async def _pick():
-        async with get_async_session_context() as db:
-            rows = (await db.execute(
-                select(User).where(User.faculty_id.isnot(None))
-            )).scalars().all()
-            for u in rows:
-                if u.faculty_id not in ("FAC001", NAGASAI_FACULTY_ID):
-                    return u.faculty_id
-            return None
-
-    fid = asyncio.run(_pick())
-    assert fid, "no third faculty available for legitimate-difference check"
-    return fid
-
-
-def test_duplicate_association_blocked_but_different_allowed(client, other_recipient):
+def test_duplicate_association_blocked_but_different_allowed(client, baseline):
     created = []
     try:
         # First request for (Record B, faculty-001 -> Nagasai) succeeds.
@@ -131,7 +226,7 @@ def test_duplicate_association_blocked_but_different_allowed(client, other_recip
 
         # A logically different association (other recipient) still succeeds.
         r3 = client.post(
-            f"/api/v1/associations/?recipient_faculty_id={other_recipient}",
+            f"/api/v1/associations/?recipient_faculty_id={OTHER_FACULTY_ID}",
             headers=_h(client, FAC1),
             json={"record_id": RECORD_B, "reason": "H2 legitimate probe"},
         )
@@ -139,8 +234,6 @@ def test_duplicate_association_blocked_but_different_allowed(client, other_recip
         created.append(r3.json()["id"])
     finally:
         # Teardown: remove ONLY the rows this test created.
-        import asyncio
-
         async def _clean():
             async with get_async_session_context() as db:
                 for rid in created:
@@ -155,7 +248,7 @@ def test_duplicate_association_blocked_but_different_allowed(client, other_recip
         asyncio.run(_clean())
 
 
-def test_accepted_association_blocks_recreate(client):
+def test_accepted_association_blocks_recreate(client, baseline):
     # Record A already has an ACCEPTED faculty-001 -> Nagasai row: re-request must 409.
     r = client.post(
         f"/api/v1/associations/?recipient_faculty_id={NAGASAI_FACULTY_ID}",

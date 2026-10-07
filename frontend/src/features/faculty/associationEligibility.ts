@@ -102,11 +102,13 @@ export function associationSendState(
   const facultyId = nonEmptyString(contributor['faculty_id']);
   const userId = nonEmptyString(contributor['user_id']);
   if (!facultyId || !userId) return 'ineligible';
-  if (opts.currentUserId && userId === opts.currentUserId) return 'ineligible';
   const live = liveRequestFor(contributor, opts.recordId, opts.requests);
   if (live) {
     return AWAITING_STATUSES.has(requestStatus(live)) ? 'pending' : 'accepted';
   }
+  // Item 4: never offer sending to yourself (system auto-dispatch covers the
+  // named-uploader case); with no live request there is simply no action.
+  if (opts.currentUserId && userId === opts.currentUserId) return 'ineligible';
   return 'sendable';
 }
 

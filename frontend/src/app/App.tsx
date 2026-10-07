@@ -68,6 +68,7 @@ export function App() {
                   <Route path="/hod/conflicts" element={<HodConflictsPage />} />
                   <Route path="/hod/reports" element={<HodReportsPage />} />
                   <Route path="/hod/audit" element={<HodAuditPage />} />
+                  <Route path="/hod/associations" element={<AssociationsPage />} />
                   <Route path="/hod/profile" element={<FacultyProfilePage />} />
                 </Route>
                 <Route element={<RequireRole roles={['super_admin']} />}>

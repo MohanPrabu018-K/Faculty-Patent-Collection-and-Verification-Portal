@@ -45,6 +45,7 @@ export function AdminSettingsPage() {
   const ipIndia = (ver.ip_india ?? {}) as Record<string, unknown>;
   const up = data.uploads as Record<string, unknown>;
   const sess = data.session as Record<string, unknown>;
+  const mail = (data.email ?? {}) as Record<string, unknown>;
 
   return (
     <div className="stack-lg">
@@ -85,6 +86,18 @@ export function AdminSettingsPage() {
           <StatusRow label="IP India (InPASS) automated lookup" status={String(ipIndia.status)} note={String(ipIndia.note || '')} />
           <StatusRow label="Manual verification fallback" status={String(ver.manual_fallback || 'ENABLED')} note="Records that cannot be auto-verified are flagged for manual review." />
           <KV label="Default country" value={ver.default_country} />
+        </div>
+      </SectionCard>
+
+      <SectionCard title="Email delivery" subtitle="Password-reset delivery operability (no secrets shown).">
+        <div className="stack">
+          <StatusRow
+            label="SMTP delivery"
+            status={String(mail.status || 'DISABLED')}
+            note={String(mail.status) === 'CONFIGURED'
+              ? `Reset emails can be sent. Links expire after ${display(mail.reset_token_expiry_hours)} hour(s).`
+              : 'Not configured: password-reset emails cannot be delivered until SMTP settings are provided on the server.'}
+          />
         </div>
       </SectionCard>
 

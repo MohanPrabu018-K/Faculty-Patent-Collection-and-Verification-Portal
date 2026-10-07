@@ -155,6 +155,12 @@ export function HodDocumentsPage() {
     ? (verifyEligibility.data?.pending_approvals as string[])
     : [];
   const verifyBlocked = pendingApprovals.length > 0;
+  // Staged workflow: the record may additionally wait on HOD association
+  // acceptance itself. Confirm is enabled only when neither gate blocks.
+  const hodAssoc = (verifyEligibility.data?.hod_association ?? null) as Record<string, unknown> | null;
+  const hodAssocStatus = typeof hodAssoc?.status === 'string' ? hodAssoc.status : null;
+  const hodStageBlocked = hodAssocStatus !== null && !['ACCEPTED', 'APPROVED'].includes(hodAssocStatus);
+  const hodAssocName = typeof hodAssoc?.hod_name === 'string' && hodAssoc.hod_name ? hodAssoc.hod_name : null;
 
   const docs = data?.documents ?? [];
 
@@ -241,13 +247,19 @@ export function HodDocumentsPage() {
               <button className="btn btn-secondary" disabled={verifyMutation.isPending} onClick={() => verifyMutation.mutate({ recordId: String(verifyTarget.id), decision: 'reject', remarks: verifyRemarks || undefined, evidenceRef: verifyEvidenceRef || undefined })}>
                 {verifyMutation.isPending ? 'Saving…' : 'Reject'}
               </button>
-              <button className="btn btn-primary" disabled={verifyMutation.isPending || verifyBlocked} onClick={() => verifyMutation.mutate({ recordId: String(verifyTarget.id), decision: 'verify', remarks: verifyRemarks || undefined, evidenceRef: verifyEvidenceRef || undefined })}>
+              <button className="btn btn-primary" disabled={verifyMutation.isPending || verifyBlocked || hodStageBlocked} onClick={() => verifyMutation.mutate({ recordId: String(verifyTarget.id), decision: 'verify', remarks: verifyRemarks || undefined, evidenceRef: verifyEvidenceRef || undefined })}>
                 {verifyMutation.isPending ? 'Saving…' : 'Confirm Verified'}
               </button>
             </>
           }
         >
           <div className="stack">
+            {hodStageBlocked ? (
+              <div className="alert alert-error" role="alert">
+                HOD association acceptance is still pending
+                {hodAssocName ? ` (awaiting ${hodAssocName})` : ''}. Manual verification unlocks after the HOD accepts.
+              </div>
+            ) : null}
             {verifyBlocked ? (
               <div className="alert alert-error" role="alert">
                 Verification is blocked until required internal faculty acceptance is recorded

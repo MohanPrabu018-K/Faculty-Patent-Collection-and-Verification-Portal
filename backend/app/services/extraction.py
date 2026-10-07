@@ -77,7 +77,9 @@ def normalize_date(raw: str) -> date | None:
         "%Y-%m-%d",
         "%d/%m/%Y",
         "%d-%m-%Y",
+        "%d.%m.%Y",
         "%Y/%m/%d",
+        "%Y.%m.%d",
         "%B %d, %Y",
         "%b %d, %Y",
         "%d %B %Y",
@@ -441,6 +443,12 @@ class StructuredExtractionService:
                 text,
             )
 
+        # HOD name for the staged association workflow (items 2-3): extracted
+        # for every document type from the same OCR text via the shared
+        # helper below. Identity matching happens downstream; here we only
+        # capture the labeled name as evidence.
+        self._extract_hod_name(text, qr_data)
+
         result["normalized_fields"] = (
             self.evidence_tracker.to_dict()
         )
@@ -681,8 +689,8 @@ class StructuredExtractionService:
         # text cannot produce a false date; a bare 4-digit year is still
         # accepted at low confidence via the dedicated year pattern.
         _DATE_TOKEN = (
-            r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}"
-            r"|\d{4}[/-]\d{1,2}[/-]\d{1,2}"
+            r"(\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}"
+            r"|\d{4}[/.\-]\d{1,2}[/.\-]\d{1,2}"
             r"|\d{1,2}\s+[A-Za-z]+\s*,?\s*\d{4}"
             r"|[A-Za-z]+\s+\d{1,2}\s*,?\s*\d{4})"
         )
@@ -2441,6 +2449,69 @@ class StructuredExtractionService:
             "ocr_text",
             0.3,
         )
+
+    # ========================================================
+    # HOD NAME (staged association workflow)
+    # ========================================================
+
+    def _extract_hod_name(
+        self,
+        text: str,
+        qr_data: str | None = None,
+    ) -> str | None:
+        """Extract a labeled HOD (Head of Department) name.
+
+        Conservative patterns only: an explicit HOD/Head-of-Department label
+        followed by a separator. Department names captured by accident (e.g.
+        "Head of Department : Computer Science") are skipped via keyword
+        guard; anything else is left to the identity-matching threshold
+        downstream, so no request can be misdirected by this step alone.
+        """
+        patterns = [
+            r"\bhod\s+(?:name\s*)?[:\-]\s*([^\n]+)",
+            r"\bhead\s+of\s+(?:the\s+)?department\s*[:\-]\s*([^\n]+)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if not match:
+                continue
+            raw = _clean_inline_text(match.group(1))
+            if not raw:
+                continue
+            lowered = raw.lower()
+            # Never treat a department/organization name as a person: skip
+            # known organization keywords outright…
+            if any(
+                kw in lowered
+                for kw in (
+                    "department",
+                    "college",
+                    "university",
+                    "institute",
+                    "school",
+                )
+            ):
+                continue
+            # …and require a person indicator (title or initial). A bare
+            # "Head of Department : Computer Science" must not become HOD
+            # evidence; the identity threshold downstream is the second gate,
+            # but evidence should already be person-shaped. Missing titles
+            # simply yield no evidence (manual fallback preserved).
+            if not re.search(r"\b(dr|mr|mrs|ms|miss|prof)\.?\b", lowered) and not re.search(
+                r"\b[A-Z]\.", raw
+            ):
+                continue
+            name = normalize_contributor_name(raw)
+            if name and name != "UNKNOWN":
+                self.evidence_tracker.add(
+                    "hod_name",
+                    name,
+                    "ocr_text",
+                    0.5,
+                    qr_data,
+                )
+                return name
+        return None
 
     # ========================================================
     # CONFIDENCE

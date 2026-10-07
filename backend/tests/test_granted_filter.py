@@ -7,22 +7,63 @@ workflow_state (a free String column).
 
 Covers: GRANTED via workflow_state, VERIFIED, existing filters, invalid enum
 values (422, never 500), pagination with GRANTED, empty GRANTED result, and
-granted-row field completeness. All read-only GETs.
+granted-row field completeness. All read-only GETs except a hermetic GRANTED
+fixture record (created + deleted by the fixture; no production data used).
 """
+import asyncio
+import uuid
+
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import delete, select
 
 from app.core.config import app_settings
-from app.core.security import generate_jwt_token
+from app.core.database import get_async_session_context
+from app.core.security import generate_jwt_token, hash_password
 from app.main import app
+from app.models.base import IpRecord, User
 
-RECORD_A = "7be9f118-ba87-462a-8d72-c98b688c6aa4"
 
-
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def client():
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture(scope="module")
+def granted_record():
+    """Hermetic GRANTED record (the old hardcoded production fixture id is
+    gone after the authorized production cleanup)."""
+    uid = f"gf-u-{uuid.uuid4().hex[:6]}"
+    rid = f"gf-rec-{uuid.uuid4().hex[:6]}"
+
+    async def _create():
+        async with get_async_session_context() as db:
+            db.add(User(id=uid, email=f"{uid}@example.test", official_email=f"{uid}@example.test",
+                        password_hash=hash_password("secret123"), full_name=uid,
+                        role="faculty", faculty_id=f"FAC-GF-{uid[:6]}".upper(),
+                        status="active", is_active=True))
+            db.add(IpRecord(id=rid, ip_type="PATENT", patent_number=f"GF-{uid[:6]}",
+                            title="Granted filter fixture", verification_status="VERIFIED",
+                            processing_status="COMPLETED", workflow_state="GRANTED",
+                            uploader_id=uid, is_archived=False))
+            await db.commit()
+
+    async def _delete():
+        async with get_async_session_context() as db:
+            row = (await db.execute(select(IpRecord).where(IpRecord.id == rid))).scalar_one_or_none()
+            if row is not None:
+                await db.delete(row)
+            u = (await db.execute(select(User).where(User.id == uid))).scalar_one_or_none()
+            if u is not None:
+                await db.delete(u)
+            await db.commit()
+
+    asyncio.run(_create())
+    try:
+        yield rid
+    finally:
+        asyncio.run(_delete())
 
 
 def _tok(sub, role, dept="", fac=""):
@@ -56,17 +97,17 @@ def test_granted_workflow_filter_returns_granted_records(client):
         assert row["workflow_state"] == "GRANTED"
 
 
-def test_granted_workflow_filter_includes_known_granted_record(client):
+def test_granted_workflow_filter_includes_known_granted_record(client, granted_record):
     r = client.get("/api/v1/admin/ip-records?workflow_state=GRANTED&per_page=100", headers=_h(client, ADMIN))
     assert r.status_code == 200, r.text
     ids = [row["id"] for row in r.json()["records"]]
-    assert RECORD_A in ids
+    assert granted_record in ids
 
 
-def test_granted_record_row_carries_relevant_fields(client):
+def test_granted_record_row_carries_relevant_fields(client, granted_record):
     r = client.get("/api/v1/admin/ip-records?workflow_state=GRANTED&per_page=100", headers=_h(client, ADMIN))
     assert r.status_code == 200, r.text
-    row = next(row for row in r.json()["records"] if row["id"] == RECORD_A)
+    row = next(row for row in r.json()["records"] if row["id"] == granted_record)
     for key in ("id", "ip_type", "title", "verification_status", "processing_status", "workflow_state"):
         assert key in row, f"granted row missing {key}"
     assert row["workflow_state"] == "GRANTED"

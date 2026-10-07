@@ -135,6 +135,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .badge-inactive, .badge-dismissed, .badge-cancelled { background: #f2f4f7; color: var(--muted); }
 .badge-rejected, .badge-not-me, .badge-failed, .badge-duplicate, .badge-conflict, .badge-open, .badge-high, .badge-urgent { background: #fff0f2; color: var(--error); }
 .badge-clarification-requested, .badge-medium, .badge-needs-review, .badge-duplicate-review, .badge-data-conflict, .badge-mismatch { background: #fff7e8; color: var(--warning); }
+/* Staged association workflow states (items 2/9). */
+.badge-hod-association-pending, .badge-hod-verification-pending, .badge-faculty-approval-pending { background: #fff7e8; color: var(--warning); }
+.badge-hod-association-accepted { background: #eef3fb; color: var(--primary); }
+.badge-faculty-approved { background: #eef8f2; color: var(--success); }
 .badge-low, .badge-uploaded, .badge-processing { background: #eef3fb; color: var(--primary); }
 
 /* --- bar chart --- */

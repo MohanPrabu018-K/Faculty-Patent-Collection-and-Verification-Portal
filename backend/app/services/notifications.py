@@ -23,6 +23,11 @@ class NotificationType(Enum):
     ASSOCIATION_REJECTED = "association_rejected"
     ASSOCIATION_CLARIFICATION = "association_clarification"
     ASSOCIATION_NOT_ME = "association_not_me"
+    # Staged HOD association workflow: HOD acceptance precedes faculty
+    # requests; the bound HOD is notified when the record is ready for
+    # manual verification. Plain-string backed (no DB enum migration).
+    HOD_ASSOCIATION_REQUEST = "hod_association_request"
+    HOD_VERIFICATION_READY = "hod_verification_ready"
     CONFLICT_DETECTED = "conflict_detected"
     CONFLICT_RESOLVED = "conflict_resolved"
     ADMIN_ACTION_REQUIRED = "admin_action_required"

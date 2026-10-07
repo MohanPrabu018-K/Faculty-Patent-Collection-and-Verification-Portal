@@ -80,6 +80,7 @@ describe('HOD Manual Verify gate (Bug 3)', () => {
     const user = userEvent.setup();
     apiStubs.institutionalStatus.mockResolvedValue({
       institutional: null, final_verification: null, pending_approvals: [],
+      hod_association: { status: 'ACCEPTED', hod_user_id: 'hod-1', hod_name: 'HOD One' },
     });
     apiStubs.institutionalVerify.mockResolvedValue({
       decision: 'verify', final_verification_status: 'VERIFIED',
@@ -94,5 +95,23 @@ describe('HOD Manual Verify gate (Bug 3)', () => {
     expect(screen.queryByText(/blocked until required internal faculty acceptance/i)).toBeNull();
     await user.click(confirm);
     await waitFor(() => expect(apiStubs.institutionalVerify).toHaveBeenCalled());
+  });
+
+  it('disables Confirm Verified while the HOD association itself is pending', async () => {
+    const user = userEvent.setup();
+    apiStubs.institutionalStatus.mockResolvedValue({
+      institutional: null, final_verification: null, pending_approvals: [],
+      hod_association: { status: 'PENDING', hod_user_id: 'hod-9', hod_name: 'HOD Nine' },
+    });
+    renderPage();
+
+    await waitFor(() => expect(screen.getByText('Widget')).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: 'Manual Verify' }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/HOD association acceptance is still pending/i)).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Confirm Verified' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeEnabled();
+    expect(apiStubs.institutionalVerify).not.toHaveBeenCalled();
   });
 });

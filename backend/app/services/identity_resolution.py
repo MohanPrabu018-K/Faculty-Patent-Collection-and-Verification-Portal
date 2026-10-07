@@ -226,6 +226,7 @@ class IdentityResolutionService:
         public_data: dict[str, Any] | None = None,
         existing_associations: list[dict[str, Any]] | None = None,
         faculty_db: list[dict[str, Any]] | None = None,
+        role: str = "faculty",
     ) -> IdentityMatchResult:
         """Resolve faculty identity from extracted certificate data."""
         start_time = time.time()
@@ -240,7 +241,7 @@ class IdentityResolutionService:
         # Load the REAL faculty master database when the caller did not pass an
         # explicit candidate list. Mock data is never used in production.
         if faculty_db is None:
-            faculty_db = self._load_faculty_from_db()
+            faculty_db = self._load_faculty_from_db(role=role)
         
         # Find matching candidates
         candidates = self._find_candidates(
@@ -511,11 +512,14 @@ class IdentityResolutionService:
         
         return "Review required per policy"
     
-    def _load_faculty_from_db(self) -> list[dict[str, Any]]:
-        """Load the real faculty master database from PostgreSQL.
+    def _load_faculty_from_db(self, role: str = "faculty") -> list[dict[str, Any]]:
+        """Load the real user master database from PostgreSQL.
 
         Never falls back to mock data. If the DB is unavailable, returns an empty
         list so identity resolution correctly flags "No matching faculty found".
+
+        The role filter defaults to "faculty" (existing behavior); pass
+        "hod_admin" to match HOD records for the staged HOD association flow.
         """
         try:
             from sqlalchemy import select
@@ -536,7 +540,7 @@ class IdentityResolutionService:
                     )
                     .outerjoin(Department, User.department_id == Department.id)
                     .outerjoin(Designation, User.designation_id == Designation.id)
-                    .where(User.role == "faculty")
+                    .where(User.role == role)
                 ).all()
             finally:
                 session.close()
@@ -608,4 +612,23 @@ async def resolve_faculty_identity(
         public_data=public_data,
         existing_associations=existing_associations,
         faculty_db=faculty_db,
+    )
+
+
+async def resolve_hod_identity(
+    extracted_name: str,
+    extracted_department: str | None = None,
+    faculty_db: list[dict[str, Any]] | None = None,
+) -> IdentityMatchResult:
+    """Match an extracted HOD name against active hod_admin accounts.
+
+    Same scorers and thresholds as faculty matching; only the candidate pool
+    differs (hod_admin role). Used by the staged HOD association workflow.
+    """
+    service = get_identity_resolution_service()
+    return await service.resolve_identity(
+        extracted_name=extracted_name,
+        extracted_department=extracted_department,
+        faculty_db=faculty_db,
+        role="hod_admin",
     )

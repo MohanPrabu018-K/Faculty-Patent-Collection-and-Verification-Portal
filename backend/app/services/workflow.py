@@ -25,11 +25,19 @@ class WorkflowState(str, Enum):
     GRANTED = "GRANTED"
     REJECTED = "REJECTED"
     FAILED = "FAILED"
+    # Staged association workflow (HOD → faculty → HOD verification).
+    # HOD association acceptance and HOD manual verification are distinct
+    # stages; "HOD Approved" maps to VERIFIED (HOD approval completes
+    # verification, which is also the Super Admin grant prerequisite).
+    HOD_ASSOCIATION_PENDING = "HOD_ASSOCIATION_PENDING"
+    HOD_ASSOCIATION_ACCEPTED = "HOD_ASSOCIATION_ACCEPTED"
+    FACULTY_APPROVED = "FACULTY_APPROVED"
+    HOD_VERIFICATION_PENDING = "HOD_VERIFICATION_PENDING"
 
 
 # Allowed transitions. A key maps to the set of states it may transition into.
 _TRANSITIONS: dict[WorkflowState, set[WorkflowState]] = {
-    WorkflowState.UPLOADED: {WorkflowState.PROCESSING, WorkflowState.FAILED, WorkflowState.REJECTED},
+    WorkflowState.UPLOADED: {WorkflowState.PROCESSING, WorkflowState.FAILED, WorkflowState.REJECTED, WorkflowState.HOD_ASSOCIATION_PENDING},
     WorkflowState.PROCESSING: {
         WorkflowState.OCR_COMPLETED,
         WorkflowState.QR_DETECTED,
@@ -53,12 +61,14 @@ _TRANSITIONS: dict[WorkflowState, set[WorkflowState]] = {
         WorkflowState.NEEDS_REVIEW,
         WorkflowState.DATA_CONFLICT,
         WorkflowState.FAILED,
+        WorkflowState.HOD_ASSOCIATION_PENDING,
     },
     WorkflowState.VERIFICATION_REQUIRED: {
         WorkflowState.VERIFIED,
         WorkflowState.NEEDS_REVIEW,
         WorkflowState.FACULTY_APPROVAL_PENDING,
         WorkflowState.REJECTED,
+        WorkflowState.HOD_ASSOCIATION_PENDING,
     },
     WorkflowState.EXTERNAL_VERIFICATION_FAILURE: {
         WorkflowState.VERIFICATION_PENDING,
@@ -68,13 +78,18 @@ _TRANSITIONS: dict[WorkflowState, set[WorkflowState]] = {
     WorkflowState.DATA_CONFLICT: {WorkflowState.NEEDS_REVIEW, WorkflowState.VERIFICATION_PENDING},
     WorkflowState.IDENTITY_REVIEW: {WorkflowState.NEEDS_REVIEW, WorkflowState.IDENTIFIER_FOUND, WorkflowState.REJECTED},
     WorkflowState.CONTRIBUTOR_REVIEW: {WorkflowState.NEEDS_REVIEW, WorkflowState.IDENTIFIER_FOUND, WorkflowState.REJECTED},
-    WorkflowState.FACULTY_APPROVAL_PENDING: {WorkflowState.VERIFIED, WorkflowState.NEEDS_REVIEW, WorkflowState.REJECTED},
+    WorkflowState.FACULTY_APPROVAL_PENDING: {WorkflowState.VERIFIED, WorkflowState.NEEDS_REVIEW, WorkflowState.REJECTED, WorkflowState.FACULTY_APPROVED, WorkflowState.HOD_VERIFICATION_PENDING, WorkflowState.HOD_ASSOCIATION_PENDING},
+    WorkflowState.FACULTY_APPROVED: {WorkflowState.HOD_VERIFICATION_PENDING, WorkflowState.NEEDS_REVIEW},
+    WorkflowState.HOD_ASSOCIATION_PENDING: {WorkflowState.HOD_ASSOCIATION_ACCEPTED, WorkflowState.NEEDS_REVIEW, WorkflowState.REJECTED},
+    WorkflowState.HOD_ASSOCIATION_ACCEPTED: {WorkflowState.FACULTY_APPROVAL_PENDING, WorkflowState.HOD_VERIFICATION_PENDING, WorkflowState.NEEDS_REVIEW},
+    WorkflowState.HOD_VERIFICATION_PENDING: {WorkflowState.VERIFIED, WorkflowState.NEEDS_REVIEW, WorkflowState.REJECTED},
     WorkflowState.DUPLICATE_REVIEW: {WorkflowState.IDENTIFIER_FOUND, WorkflowState.NEEDS_REVIEW, WorkflowState.REJECTED},
     WorkflowState.NEEDS_REVIEW: {
         WorkflowState.VERIFIED,
         WorkflowState.VERIFICATION_PENDING,
         WorkflowState.REJECTED,
         WorkflowState.IDENTIFIER_FOUND,
+        WorkflowState.HOD_ASSOCIATION_PENDING,
     },
     WorkflowState.VERIFIED: {WorkflowState.GRANTED},  # VERIFIED -> GRANTED is the grant action
     WorkflowState.GRANTED: set(),  # Terminal
@@ -184,5 +199,9 @@ def describe_state(state: str | None) -> dict[str, Any]:
             WorkflowState.DATA_CONFLICT,
             WorkflowState.VERIFICATION_REQUIRED,
             WorkflowState.FACULTY_APPROVAL_PENDING,
+            WorkflowState.HOD_ASSOCIATION_PENDING,
+            WorkflowState.HOD_ASSOCIATION_ACCEPTED,
+            WorkflowState.FACULTY_APPROVED,
+            WorkflowState.HOD_VERIFICATION_PENDING,
         },
     }

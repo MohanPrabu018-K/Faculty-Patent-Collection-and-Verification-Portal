@@ -37,6 +37,7 @@ export function AppShell() {
     { to: '/hod/conflicts', label: 'Conflicts', icon: GitCompareArrows, show: isHod },
     { to: '/hod/reports', label: 'Reports', icon: BarChart3, show: isHod },
     { to: '/hod/audit', label: 'Audit', icon: ScrollText, show: isHod },
+    { to: '/hod/associations', label: 'Associations', icon: Link2, show: isHod },
     { to: '/hod/upload', label: 'My Uploads', icon: Upload, show: isHod },
 
     // Super Admin

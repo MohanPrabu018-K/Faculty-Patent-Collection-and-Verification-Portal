@@ -68,17 +68,23 @@ export function AdminFacultyPage() {
       setForm(EMPTY_FORM);
       await refresh();
     },
-    onError: (e) => notify('error', e instanceof Error ? e.message : 'Create failed'),
+    onError: (e) => notify('error', friendlyAdminError(e)),
   });
   const update = useMutation({
     mutationFn: ({ id, body }: { id: string; body: Record<string, unknown> }) => api.adminUpdateFaculty(id, clean(submitBody(body))),
     onSuccess: async () => { notify('success', 'Faculty updated'); setEditing(null); await refresh(); },
-    onError: (e) => notify('error', e instanceof Error ? e.message : 'Update failed'),
+    onError: (e) => notify('error', friendlyAdminError(e)),
   });
   const toggleActive = useMutation({
     mutationFn: ({ id, activate }: { id: string; activate: boolean }) => (activate ? api.adminActivateFaculty(id) : api.adminDeactivateFaculty(id)),
     onSuccess: async () => { notify('success', 'Status updated'); await refresh(); },
     onError: () => notify('error', 'Failed to update status'),
+  });
+  const [deleting, setDeleting] = useState<FacultyRow | null>(null);
+  const remove = useMutation({
+    mutationFn: (id: string) => api.adminDeleteFaculty(id),
+    onSuccess: async () => { notify('success', 'Faculty deleted'); setDeleting(null); await refresh(); },
+    onError: (e) => notify('error', friendlyAdminError(e)),
   });
 
   const rows = list.data?.faculty ?? [];
@@ -113,6 +119,8 @@ export function AdminFacultyPage() {
     const official = typeof body.official_email === 'string' ? body.official_email.trim() : '';
     return { ...body, official_email: official, email: official };
   };
+  const pickedDesig = displayDesigList.find((d: any) => String(d.id) === String(form.designation_id ?? ''));
+  const pickedIsHod = String((pickedDesig as any)?.title || (pickedDesig as any)?.name || '').trim().toUpperCase() === 'HOD';
 
   return (
     <SectionCard
@@ -172,6 +180,7 @@ export function AdminFacultyPage() {
                         <button className="btn btn-sm btn-ghost" disabled={toggleActive.isPending} onClick={() => toggleActive.mutate({ id: String(r.id), activate: !r.is_active })}>
                           {r.is_active ? 'Deactivate' : 'Activate'}
                         </button>
+                        <button className="btn btn-sm btn-danger" onClick={() => setDeleting(r)}>Delete</button>
                       </div>
                     </td>
                   </tr>
@@ -220,6 +229,11 @@ export function AdminFacultyPage() {
             </>
           }
         >
+          {creating && pickedIsHod ? (
+            <p className="alert alert-info" style={{ marginBottom: 12 }}>
+              Choosing the HOD designation creates an HOD account. Only one active HOD is allowed per department.
+            </p>
+          ) : null}
           <FormField label="Full name *"><input className="toolbar-input" value={String(form.full_name ?? '')} onChange={(e) => setForm({ ...form, full_name: e.target.value })} /></FormField>
           <FormField label="Official email *"><input className="toolbar-input" type="email" value={String(form.official_email ?? '')} onChange={(e) => setForm({ ...form, official_email: e.target.value })} /></FormField>
           <FormField label="Faculty ID"><input className="toolbar-input" value={String(form.faculty_id ?? '')} onChange={(e) => setForm({ ...form, faculty_id: e.target.value })} placeholder="auto-generated if blank" /></FormField>
@@ -241,6 +255,34 @@ export function AdminFacultyPage() {
             <input type="checkbox" checked={Boolean(form.is_active)} onChange={(e) => setForm({ ...form, is_active: e.target.checked })} />
             <span>Active</span>
           </label>
+        </Modal>
+      )}
+      {deleting && (
+        <Modal
+          title="Delete faculty"
+          onClose={() => setDeleting(null)}
+          footer={
+            <>
+              <button className="btn btn-secondary" onClick={() => setDeleting(null)}>Cancel</button>
+              <button
+                className="btn btn-danger"
+                disabled={remove.isPending}
+                onClick={() => remove.mutate(String(deleting.id))}
+              >
+                {remove.isPending ? 'Deleting…' : 'Yes, delete'}
+              </button>
+            </>
+          }
+        >
+          <p>Are you sure you want to delete this Faculty?</p>
+          <div className="kv-grid" style={{ marginTop: 12 }}>
+            <div className="detail-field"><span>Name</span><strong>{display(deleting.full_name)}</strong></div>
+            <div className="detail-field"><span>Faculty ID</span><strong>{display(deleting.faculty_id)}</strong></div>
+          </div>
+          <p className="muted" style={{ marginTop: 12 }}>
+            Deletion is refused when the account owns uploaded records or participates in workflow data.
+            Deactivate instead if the account must be preserved without access.
+          </p>
         </Modal>
       )}
       {createdTempPassword && (
@@ -268,6 +310,28 @@ export function AdminFacultyPage() {
 
 function FormField({ label, children }: { label: string; children: React.ReactNode }) {
   return <label className="field"><span>{label}</span>{children}</label>;
+}
+
+/** Backend keeps structured JSON internally; surface the human message. */
+function friendlyAdminError(e: unknown): string {
+  if (e instanceof Error) {
+    const text = e.message.trim();
+    if (text.startsWith('{')) {
+      try {
+        const parsed: unknown = JSON.parse(text);
+        const message =
+          parsed && typeof parsed === 'object' && typeof (parsed as Record<string, unknown>).message === 'string'
+            ? String((parsed as Record<string, unknown>).message)
+            : null;
+        if (message) return message;
+      } catch {
+        /* fall through */
+      }
+      return 'Operation failed. Please try again.';
+    }
+    return e.message;
+  }
+  return 'Operation failed. Please try again.';
 }
 
 function clean(body: Record<string, unknown>): Record<string, unknown> {

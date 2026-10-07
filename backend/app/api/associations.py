@@ -60,6 +60,177 @@ def _assoc_row_to_dict(item: AssociationRequest, requester: User | None, recipie
     }
 
 
+async def _association_stage(db: AsyncSession, request_obj: AssociationRequest) -> str:
+    """Workflow stage of a request, derived live from the recipient's role.
+
+    'HOD' when the recipient (target) is an active hod_admin, otherwise
+    'FACULTY'. No schema column is needed: role is the source of truth, so
+    promotion/demotion can never desynchronize a stored stage value.
+    """
+    target_id = request_obj.target_faculty_id or request_obj.recipient_id
+    if not target_id:
+        return "FACULTY"
+    target = (await db.execute(select(User).where(User.id == target_id))).scalar_one_or_none()
+    if target is not None and target.role == "hod_admin":
+        return "HOD"
+    return "FACULTY"
+
+
+async def _live_hod_request(
+    db: AsyncSession, record_id: str | None, master_ip_id: str | None, accepted_only: bool = False
+) -> AssociationRequest | None:
+    """The live HOD-stage request for a record, if any.
+
+    HOD-stage = recipient is an hod_admin. With accepted_only, only an
+    ACCEPTED/APPROVED one qualifies (the bound-HOD lookup).
+    """
+    if not record_id and not master_ip_id:
+        return None
+    scope = AssociationRequest.ip_record_id == record_id if record_id else False
+    if master_ip_id:
+        scope = or_(scope, AssociationRequest.master_ip_id == master_ip_id) if record_id else (AssociationRequest.master_ip_id == master_ip_id)
+    statuses = ("ACCEPTED", "APPROVED") if accepted_only else ("PENDING", "CLARIFICATION_REQUESTED", "ADMIN_REVIEW")
+    rows = (
+        await db.execute(select(AssociationRequest).where(scope, AssociationRequest.status.in_(statuses)))
+    ).scalars().all()
+    if not rows:
+        return None
+    target_ids = {r.target_faculty_id or r.recipient_id for r in rows} - {None}
+    if not target_ids:
+        return None
+    hods = {
+        u.id
+        for u in (
+            await db.execute(select(User).where(User.id.in_(sorted(target_ids)), User.role == "hod_admin"))
+        ).scalars().all()
+    }
+    for req in rows:
+        if (req.target_faculty_id or req.recipient_id) in hods:
+            return req
+    return None
+
+
+async def _has_live_pair_request(
+    db: AsyncSession, record: IpRecord, requester_id: str, target_id: str
+) -> bool:
+    """Any live (non-terminal) request between a pair on a record/master."""
+    scope = AssociationRequest.ip_record_id == record.id
+    if record.master_ip_id:
+        scope = or_(scope, AssociationRequest.master_ip_id == record.master_ip_id)
+    pair = or_(
+        or_(AssociationRequest.requesting_faculty_id == requester_id, AssociationRequest.requester_id == requester_id)
+        & or_(AssociationRequest.target_faculty_id == target_id, AssociationRequest.recipient_id == target_id),
+        or_(AssociationRequest.requesting_faculty_id == target_id, AssociationRequest.requester_id == target_id)
+        & or_(AssociationRequest.target_faculty_id == requester_id, AssociationRequest.recipient_id == requester_id),
+    )
+    hit = (
+        await db.execute(
+            select(AssociationRequest).where(
+                pair,
+                scope,
+                AssociationRequest.status.in_(("PENDING", "CLARIFICATION_REQUESTED", "ADMIN_REVIEW", "ACCEPTED", "APPROVED")),
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    return hit is not None
+
+
+async def _dispatch_faculty_requests(
+    db: AsyncSession, hod_request: AssociationRequest, record: IpRecord, hod_user_id: str
+) -> list[str]:
+    """Create faculty-stage requests after an HOD acceptance (items 2/4).
+
+    One request per internal contributor (non-external, user-linked, active),
+    INCLUDING the uploader when their identity is linked to a contributor row
+    — item 4: the uploader is asked because they are named, never merely for
+    uploading. Self-requests (requester == recipient == uploader) are created
+    only by this system path; the manual endpoints keep rejecting them.
+    Returns the recipient user ids that now have a live request.
+    """
+    from app.models.base import IpContributor as _IpContributor
+
+    contribs = (
+        await db.execute(
+            select(_IpContributor).where(
+                _IpContributor.ip_record_id == record.id,
+                _IpContributor.is_external.is_(False),
+                _IpContributor.user_id.is_not(None),
+            )
+        )
+    ).scalars().all()
+    if not contribs:
+        return []
+
+    users = {
+        u.id: u
+        for u in (
+            await db.execute(
+                select(User).where(User.id.in_({c.user_id for c in contribs if c.user_id}))
+            )
+        ).scalars().all()
+    }
+    requester_id = record.uploader_id or hod_user_id
+    created: list[str] = []
+    for contrib in contribs:
+        uid = contrib.user_id
+        if not uid or uid == hod_user_id:
+            continue
+        user = users.get(uid)
+        if user is None or not user.is_active:
+            continue
+        if await _has_live_pair_request(db, record, requester_id, uid):
+            if uid not in created:
+                created.append(uid)
+            continue
+        db.add(
+            AssociationRequest(
+                id=str(uuid.uuid4()),
+                ip_record_id=record.id,
+                master_ip_id=record.master_ip_id,
+                requesting_faculty_id=requester_id,
+                target_faculty_id=uid,
+                requester_id=requester_id,
+                recipient_id=uid,
+                reason="Faculty association: named in the patent; acceptance required before HOD verification",
+                status="PENDING",
+            )
+        )
+        if uid != requester_id:
+            await _notify(
+                uid,
+                NotificationType.ASSOCIATION_REQUEST,
+                "New association request",
+                "You are named in a patent record. Please review and respond.",
+                related_entity_id=record.id,
+                priority=NotificationPriority.HIGH,
+                action_url="/faculty/associations",
+                action_label="Review request",
+                metadata={"record_id": record.id},
+            )
+        created.append(uid)
+    return created
+
+
+async def _notify_hod_ready(db: AsyncSession, record: IpRecord, hod_user_id: str | None) -> None:
+    """Tell the bound HOD the record is ready for manual verification."""
+    if not hod_user_id:
+        return
+    hod = (await db.execute(select(User).where(User.id == hod_user_id))).scalar_one_or_none()
+    if hod is None or not hod.is_active:
+        return
+    await _notify(
+        hod_user_id,
+        NotificationType.HOD_VERIFICATION_READY,
+        "Patent ready for manual verification",
+        f"'{record.title or record.patent_number or record.design_number or record.id}' has all required association approvals and is ready for your manual verification.",
+        related_entity_id=record.id,
+        priority=NotificationPriority.HIGH,
+        action_url="/hod/documents",
+        action_label="Review documents",
+        metadata={"record_id": record.id},
+    )
+
+
 async def _notify(
     user_id: str,
     notification_type: NotificationType,
@@ -174,6 +345,19 @@ async def send_association_request(request: Request, recipient_faculty_id: str, 
     record = await _resolve_associated_record(db, record_id)
 
     resolved_record_id = record.id if record else record_id
+    # Staged workflow: faculty-stage requests stay blocked while the HOD
+    # association for the record is still pending. Requests addressed to an
+    # HOD are HOD-stage and are never blocked by this rule.
+    if recipient.role != "hod_admin":
+        pending_hod = await _live_hod_request(
+            db, resolved_record_id, record.master_ip_id if record else None
+        )
+        if pending_hod is not None:
+            raise PortalError(
+                message="HOD association acceptance is required before faculty association requests",
+                error_code="HOD_ASSOCIATION_PENDING",
+                status_code=409,
+            )
     duplicate = (
         await db.execute(
             select(AssociationRequest).where(
@@ -297,6 +481,41 @@ async def respond_association_request(request: Request, request_id: str, action:
                         is_external=False,
                     )
                 )
+
+    # Staged workflow (items 2/4/9/10): drive record workflow, fan out
+    # faculty requests on HOD acceptance, and notify the bound HOD when the
+    # record becomes ready for manual verification. Everything below stays in
+    # the same transaction as the status change; master-only requests keep
+    # the legacy status-only behavior.
+    if action in ("accepted", "approved"):
+        stage = await _association_stage(db, request_obj)
+        record = None
+        if request_obj.ip_record_id:
+            record = (
+                await db.execute(select(IpRecord).where(IpRecord.id == request_obj.ip_record_id))
+            ).scalar_one_or_none()
+        if record is not None:
+            from app.services.workflow import advance_through
+
+            if stage == "HOD":
+                record.workflow_state = advance_through(record.workflow_state, "HOD_ASSOCIATION_ACCEPTED")
+                faculty_uids = await _dispatch_faculty_requests(db, request_obj, record, responder_id)
+                if faculty_uids:
+                    record.workflow_state = advance_through(record.workflow_state, "FACULTY_APPROVAL_PENDING")
+                else:
+                    # No internal faculty to approve: the record is ready for
+                    # the bound HOD immediately.
+                    record.workflow_state = advance_through(record.workflow_state, "HOD_VERIFICATION_PENDING")
+                    await _notify_hod_ready(db, record, responder_id)
+            else:
+                bound = await _live_hod_request(db, record.id, record.master_ip_id, accepted_only=True)
+                if bound is not None:
+                    from app.api.verification import _pending_internal_approvals
+
+                    if not await _pending_internal_approvals(db, record):
+                        record.workflow_state = advance_through(record.workflow_state, "HOD_VERIFICATION_PENDING")
+                        bound_hod = bound.responder_id or bound.target_faculty_id or bound.recipient_id
+                        await _notify_hod_ready(db, record, bound_hod)
 
     await db.commit()
 

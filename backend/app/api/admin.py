@@ -18,6 +18,7 @@ from app.models.base import (
     PROCESSING_STATUS_CHOICES,
     VERIFICATION_STATUS_CHOICES,
     AssociationRequest,
+    AuditLog,
     ConflictCase,
     Department,
     Designation,
@@ -29,11 +30,39 @@ from app.models.base import (
     MasterIpRecord,
     Notification,
     ProcessingJob,
+    SecurityEvent,
     User,
     VerificationAttempt,
 )
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"], dependencies=[Depends(require_super_admin)])
+
+
+async def _ensure_single_active_hod(
+    db: AsyncSession, department_id: str | None, exclude_user_id: str | None = None
+) -> None:
+    """Enforce one active HOD per department (item 7).
+
+    Raises 409 when another active hod_admin already owns the department.
+    The database partial unique index is the final backstop; this gives the
+    required human-readable message.
+    """
+    if not department_id:
+        return
+    query = select(User).where(
+        User.role == "hod_admin",
+        User.is_active.is_(True),
+        User.department_id == department_id,
+    )
+    if exclude_user_id:
+        query = query.where(User.id != exclude_user_id)
+    clash = (await db.execute(query)).scalar_one_or_none()
+    if clash is not None:
+        raise PortalError(
+            message="An HOD is already assigned to this department. Please update the existing HOD instead of creating a new one.",
+            error_code="DUPLICATE_HOD",
+            status_code=409,
+        )
 
 
 async def _record_display_map(db: AsyncSession, record_ids: list[str]) -> dict[str, dict]:
@@ -331,6 +360,11 @@ async def create_faculty(request: Request, current_user: dict = Depends(get_curr
         if desig_row and (desig_row.title or "").strip().upper() == "HOD":
             role = "hod_admin"
 
+    # Item 7: only one ACTIVE HOD per department (backend validation; the
+    # partial unique index is the final backstop).
+    if role == "hod_admin" and body.get("is_active", True) and body.get("department_id"):
+        await _ensure_single_active_hod(db, body.get("department_id"))
+
     user = User(
         id=str(uuid.uuid4()),
         email=body["email"],
@@ -393,6 +427,20 @@ async def update_faculty(faculty_id: str, request: Request, current_user: dict =
     if not user:
         raise NotFoundError("Faculty", faculty_id)
     before = {"email": user.email, "full_name": user.full_name, "is_active": user.is_active, "department_id": user.department_id, "designation_id": user.designation_id, "role": user.role}
+    # Item 7: validate the POST-update identity BEFORE mutating. Mutating
+    # first would let query autoflush trip the DB backstop with a 500
+    # instead of this human-readable 409.
+    new_department_id = body.get("department_id", user.department_id)
+    new_is_active = body.get("is_active", user.is_active)
+    new_role = user.role
+    if "designation_id" in body:
+        _desig = (await db.execute(select(Designation).where(Designation.id == body.get("designation_id")))).scalar_one_or_none() if body.get("designation_id") else None
+        if _desig and (_desig.title or "").strip().upper() == "HOD":
+            new_role = "hod_admin"
+        elif _desig and (_desig.title or "").strip().upper() == "FACULTY":
+            new_role = "faculty"
+    if new_role == "hod_admin" and new_is_active and new_department_id:
+        await _ensure_single_active_hod(db, new_department_id, exclude_user_id=user.id)
     for field in ("email", "official_email", "full_name", "faculty_id", "is_active", "department_id", "designation_id", "status"):
         if field in body:
             setattr(user, field, body[field])
@@ -408,6 +456,70 @@ async def update_faculty(faculty_id: str, request: Request, current_user: dict =
     await db.commit()
     log_audit(actor=current_user.get("id"), action="FACULTY_UPDATED", target_type="user", target_id=user.id, status="success", before=before, after={"full_name": user.full_name, "department_id": user.department_id, "designation_id": user.designation_id, "is_active": user.is_active, "role": user.role})
     return {"id": user.id, "message": "Faculty updated", "before": before}
+
+
+@router.delete("/faculty/{faculty_id}", status_code=status.HTTP_200_OK)
+async def delete_faculty(faculty_id: str, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+    """Delete a faculty/HOD account with safe relationship handling (item 6).
+
+    Refuses (409) when the account owns uploaded records or participates in
+    any association/verification workflow rows — deleting those would orphan
+    other users' data. Clean accounts (never uploaded, no workflow rows) are
+    removed together with their own notifications, security events and audit
+    rows. Departments/designations are shared reference data and are kept.
+    """
+    from sqlalchemy import delete as sa_delete
+    from sqlalchemy import or_ as sa_or
+
+    user = (await db.execute(select(User).where(User.id == faculty_id, User.role.in_(["faculty", "hod_admin"])))).scalar_one_or_none()
+    if not user:
+        raise NotFoundError("Faculty", faculty_id)
+    if user.id == current_user.get("id"):
+        raise PortalError(message="You cannot delete your own account", error_code="VALIDATION_ERROR", status_code=422)
+
+    blockers: list[str] = []
+    owned = (await db.execute(select(func.count()).select_from(IpRecord).where(IpRecord.uploader_id == user.id))).scalar_one()
+    if owned:
+        blockers.append(f"{owned} uploaded record(s)")
+    assoc = (await db.execute(select(func.count()).select_from(AssociationRequest).where(sa_or(
+        AssociationRequest.requesting_faculty_id == user.id,
+        AssociationRequest.requester_id == user.id,
+        AssociationRequest.target_faculty_id == user.id,
+        AssociationRequest.recipient_id == user.id,
+        AssociationRequest.responder_id == user.id,
+    )))).scalar_one()
+    if assoc:
+        blockers.append(f"{assoc} association request(s)")
+    contrib = (await db.execute(select(func.count()).select_from(IpContributor).where(IpContributor.user_id == user.id))).scalar_one()
+    if contrib:
+        blockers.append(f"{contrib} contributor link(s)")
+    mcontrib = (await db.execute(select(func.count()).select_from(MasterIpContributor).where(MasterIpContributor.matched_faculty_id == user.id))).scalar_one()
+    if mcontrib:
+        blockers.append(f"{mcontrib} master contributor link(s)")
+    cases = (await db.execute(select(func.count()).select_from(DuplicateCase).where(sa_or(
+        DuplicateCase.resolved_by == user.id, DuplicateCase.detected_by == user.id)))).scalar_one()
+    cases += (await db.execute(select(func.count()).select_from(ConflictCase).where(sa_or(
+        ConflictCase.resolved_by == user.id, ConflictCase.assigned_to == user.id)))).scalar_one()
+    if cases:
+        blockers.append(f"{cases} review case reference(s)")
+    if blockers:
+        raise PortalError(
+            message="Cannot delete faculty with associated workflow data: " + ", ".join(blockers),
+            error_code="FACULTY_HAS_DATA",
+            status_code=409,
+        )
+
+    await db.execute(sa_delete(Notification).where(Notification.user_id == user.id))
+    await db.execute(sa_delete(SecurityEvent).where(SecurityEvent.user_id == user.id))
+    await db.execute(sa_delete(AuditLog).where(sa_or(
+        AuditLog.actor_id == user.id,
+        AuditLog.entity_id == user.id,
+        AuditLog.target_id == user.id,
+    )))
+    await db.delete(user)
+    await db.commit()
+    log_audit(actor=current_user.get("id"), action="FACULTY_DELETED", target_type="user", target_id=faculty_id, status="success", extra={"email": user.email})
+    return {"id": faculty_id, "message": "Faculty deleted"}
 
 
 @router.post("/faculty/{faculty_id}/activate", status_code=status.HTTP_200_OK)
@@ -531,6 +643,7 @@ async def admin_settings(current_user: dict = Depends(get_current_user)):
         upload_settings,
         verification_settings,
     )
+    from app.core.config import smtp_settings as _smtp_settings
     from app.services.ocr_pipeline import _resolve_tesseract_cmd
 
     tesseract_path = _resolve_tesseract_cmd()
@@ -569,6 +682,12 @@ async def admin_settings(current_user: dict = Depends(get_current_user)):
             },
             "default_country": getattr(verification_settings, "default_country", "IN"),
             "manual_fallback": "ENABLED",
+        },
+        "email": {
+            # Item 1: operability indicator only — never secrets. Lets an
+            # admin verify whether password-reset delivery can work.
+            "status": "CONFIGURED" if (_smtp_settings.smtp_enabled and _smtp_settings.smtp_host) else "DISABLED",
+            "reset_token_expiry_hours": getattr(_smtp_settings, "reset_token_expiry_hours", 1),
         },
         "uploads": {
             "allowed_extensions": list(getattr(upload_settings, "allowed_extensions", [])),

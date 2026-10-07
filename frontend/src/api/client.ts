@@ -329,6 +329,7 @@ export const api = {
   adminUpdateFaculty: (id: string, body: Record<string, unknown>) => requestWithBody(`/admin/faculty/${id}`, body, { method: 'PATCH' }),
   adminActivateFaculty: (id: string) => request(`/admin/faculty/${id}/activate`, { method: 'POST' }),
   adminDeactivateFaculty: (id: string) => request(`/admin/faculty/${id}/deactivate`, { method: 'POST' }),
+  adminDeleteFaculty: (id: string) => request<{ id: string; message: string }>(`/admin/faculty/${id}`, { method: 'DELETE' }),
   adminDepartments: () => request<{ departments: Array<Record<string, unknown>>; total: number }>('/admin/departments?per_page=100'),
   adminDesignations: () => request<{ designations: Array<Record<string, unknown>>; total: number }>('/admin/designations?per_page=100'),
   adminRecords: (params = '', signal?: AbortSignal) => request<{ records: Array<Record<string, unknown>>; total: number; page: number; per_page: number }>(`/admin/ip-records${params}`, { signal }),
@@ -370,7 +371,7 @@ export const api = {
     requestWithBody<{ job_id: string; format: string; status: string; created_at: string }>(`/exports/?format=${format}`, { filters: filters ?? {}, selected_fields: selectedFields ?? null }, { method: 'POST' }),
   exportStatus: (jobId: string) => request<Record<string, unknown>>(`/exports/${jobId}`),
   exportDownloadUrl: (jobId: string) => `${API_BASE}/exports/${jobId}/download`,
-  institutionalStatus: (recordId: string) => request<{ record_id: string; official_verification_status: string; verification_status: string; workflow_state: string; final_verification: Record<string, unknown> | null; institutional: Record<string, unknown> | null; history: Array<Record<string, unknown>>; pending_approvals?: string[] }>(`/verification/institutional/${recordId}`),
+  institutionalStatus: (recordId: string) => request<{ record_id: string; official_verification_status: string; verification_status: string; workflow_state: string; final_verification: Record<string, unknown> | null; institutional: Record<string, unknown> | null; history: Array<Record<string, unknown>>; pending_approvals?: string[]; hod_association?: { status: string | null; hod_user_id: string | null; hod_name: string | null } }>(`/verification/institutional/${recordId}`),
   institutionalVerify: (recordId: string, body: { decision: 'verify' | 'reject' | 'clarification'; remarks?: string; evidence_ref?: string }) => requestWithBody<{ record_id: string; decision: string; institutional_status: string; official_verification_status: string; final_verification_status: string; workflow_state: string; missing_conditions: string[]; attempt_id: string }>(`/verification/institutional/${recordId}`, body, { method: 'POST' }),
   pendingAssociationsReport: (params = '', signal?: AbortSignal) => request<{ associations: Array<Record<string, unknown>>; total: number; pending_count: number; by_status: Record<string, number>; page: number; per_page: number }>(`/admin/reports/pending-associations${params}`, { signal }),
   adminUpdateSettings: (body: Record<string, unknown>) => requestWithBody<{ max_upload_mb: number; message: string }>('/admin/settings', body, { method: 'PATCH' }),
@@ -418,6 +419,7 @@ export type AdminSettingsResponse = {
   verification: Record<string, unknown>;
   uploads: Record<string, unknown>;
   session: Record<string, unknown>;
+  email?: Record<string, unknown>;
 };
 
 export type SearchResultRow = {

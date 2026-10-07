@@ -212,6 +212,24 @@ async def _pending_internal_approvals(db: AsyncSession, record: IpRecord) -> lis
         if not await _has_accepted(uid):
             _note(uid)
 
+    # Item 4: the uploader approves by uploading ONLY while no request names
+    # them. Once a request is addressed to the uploader (named contributor),
+    # their explicit acceptance is required like everyone else's.
+    uploader_open = (
+        await db.execute(
+            select(AssociationRequest).where(
+                scope,
+                AssociationRequest.status.in_(("PENDING", "CLARIFICATION_REQUESTED")),
+                or_(
+                    AssociationRequest.target_faculty_id == record.uploader_id,
+                    AssociationRequest.recipient_id == record.uploader_id,
+                ),
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    if uploader_open is not None and record.uploader_id:
+        _note(record.uploader_id)
+
     # Requests that name an internal participant but have no contributor row
     # yet (e.g. identified purely via the request flow) still gate.
     open_rows = (
@@ -281,6 +299,23 @@ async def list_institutional_verifications(record_id: str, current_user: dict = 
     # Bug 3: expose outstanding internal approvals so the HOD UI can disable
     # "Confirm Verified" before required acceptance (backend still enforces).
     pending_approvals = await _pending_internal_approvals(db, record)
+    # Staged workflow: expose the HOD association state so the UI can show
+    # which HOD owns verification (or that HOD acceptance is still pending).
+    from app.api.associations import _live_hod_request as _live_hod
+
+    _hod_open = await _live_hod(db, record.id, record.master_ip_id)
+    _hod_done = await _live_hod(db, record.id, record.master_ip_id, accepted_only=True)
+    _hod_req = _hod_open or _hod_done
+    _hod_uid = None
+    _hod_name = None
+    if _hod_req is not None:
+        _hod_uid = _hod_req.responder_id or _hod_req.target_faculty_id or _hod_req.recipient_id
+        _hod_user = (
+            (await db.execute(select(User).where(User.id == _hod_uid))).scalar_one_or_none()
+            if _hod_uid
+            else None
+        )
+        _hod_name = _hod_user.full_name if _hod_user else None
     return {
         "record_id": record_id,
         "official_verification_status": official,
@@ -290,6 +325,11 @@ async def list_institutional_verifications(record_id: str, current_user: dict = 
         "institutional": latest,
         "history": [_institutional_to_dict(r) for r in rows],
         "pending_approvals": pending_approvals,
+        "hod_association": {
+            "status": _hod_req.status if _hod_req else None,
+            "hod_user_id": _hod_uid,
+            "hod_name": _hod_name,
+        },
     }
 
 
@@ -320,10 +360,28 @@ async def submit_institutional_verification(record_id: str, request: Request, cu
     record = (await db.execute(select(IpRecord).where(IpRecord.id == record_id))).scalar_one_or_none()
     if not record:
         raise NotFoundError("IP record", record_id)
-    # Bug 3: a "verify" decision is REJECTED (never recorded) while required
-    # internal faculty acceptance is outstanding. Reject/clarification
-    # outcomes do not claim verification, so they remain recordable.
+    # Staged workflow (items 2/10): HOD association acceptance and HOD manual
+    # verification are distinct stages bound to the SAME HOD.
+    from app.api.associations import _live_hod_request
+
+    hod_pending = await _live_hod_request(db, record.id, record.master_ip_id)
+    hod_accepted = await _live_hod_request(db, record.id, record.master_ip_id, accepted_only=True)
     if decision == "verify":
+        if hod_pending is not None:
+            raise PortalError(
+                message="HOD association acceptance is required before manual verification",
+                error_code="HOD_ASSOCIATION_PENDING",
+                status_code=409,
+                details={"hod_request_id": hod_pending.id},
+            )
+        if hod_accepted is not None and role == "hod_admin":
+            bound = hod_accepted.responder_id or hod_accepted.target_faculty_id or hod_accepted.recipient_id
+            if bound and bound != current_user.get("id"):
+                raise PortalError(
+                    message="Only the HOD associated with this record may perform manual verification",
+                    error_code="AUTHORIZATION_ERROR",
+                    status_code=403,
+                )
         pending = await _pending_internal_approvals(db, record)
         if pending:
             raise PortalError(
