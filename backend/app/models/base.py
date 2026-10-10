@@ -1,7 +1,18 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Column,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -191,7 +202,9 @@ class IpRecord(Base):
     publication_date = Column(DateTime, nullable=True)
     filing_date = Column(DateTime, nullable=True)
     registration_date = Column(DateTime, nullable=True)
-    grant_date = Column(DateTime, nullable=True)
+    # BUG 7: grant date is a calendar DATE (migration 009), never a
+    # timestamp. Filing/publication dates intentionally stay DateTime.
+    grant_date = Column(Date, nullable=True)
 
     # Contributor info
     contributor_name = Column(String, nullable=True)
@@ -663,7 +676,8 @@ class MasterIpRecord(Base):
     filing_date = Column(DateTime, nullable=True)
     publication_date = Column(DateTime, nullable=True)
     registration_date = Column(DateTime, nullable=True)
-    grant_date = Column(DateTime, nullable=True)
+    # BUG 7: grant date is a calendar DATE (migration 009), never a timestamp.
+    grant_date = Column(Date, nullable=True)
 
     status = Column(String, default="ACTIVE", nullable=False, index=True)
     official_source = Column(String, nullable=True)

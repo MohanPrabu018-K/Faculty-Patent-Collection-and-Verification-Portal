@@ -87,10 +87,10 @@ describe('RecordDetailPage certificate dates (Bug 1)', () => {
       qr_data: [],
     });
     renderPage();
-    // Extracted Information shows calendar dates…
+    // Extracted Information shows calendar dates in DD/MM/YYYY…
     await screen.findByText('Extracted Information');
-    expect(screen.getAllByText('2024-10-22').length).toBeGreaterThanOrEqual(2);
-    expect(screen.getByText('2024-01-15')).toBeInTheDocument();
+    expect(screen.getAllByText('22/10/2024').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText('15/01/2024')).toBeInTheDocument();
     // …and no timestamp leaks anywhere on the page.
     expect(screen.queryByText(/T00:00:00/)).toBeNull();
     expect(screen.queryByText(/\+00:00/)).toBeNull();

@@ -4,7 +4,7 @@ import { keepPreviousData, useQuery, useMutation, useQueryClient } from '@tansta
 import { api } from '../../api/client';
 import {
   SectionCard, StatusBadge, ErrorBlock, EmptyState,
-  Toolbar, TableWrap, Pagination, formatDate, display, downloadFile,
+  Toolbar, TableWrap, Pagination, formatDateOnly, display, downloadFile,
 } from '../../components/ui';
 import { useToast } from '../../stores/toast';
 import { useDebounce } from '../../hooks/useDebounce';
@@ -140,7 +140,9 @@ export function AdminGrantedPatentsPage() {
             </thead>
             <tbody>
               {rows.map((r) => {
-                const isVerified = String(r.verification_status || '') === 'VERIFIED' && String(r.workflow_state || '') !== 'GRANTED';
+                const state = String(r.workflow_state || '');
+                const isGrantEligible = String(r.verification_status || '') === 'VERIFIED'
+                  && (state === 'VERIFIED' || state === 'FACULTY_ASSOCIATION_COMPLETE');
                 const isGranted = String(r.workflow_state || '') === 'GRANTED';
                 return (
                   <tr key={String(r.id)}>
@@ -149,14 +151,14 @@ export function AdminGrantedPatentsPage() {
                     <td>{display(r.title)}</td>
                     <td>{display(r.contributor_name)}</td>
                     <td>{display(r.applicant || r.patentee)}</td>
-                    <td>{r.grant_date ? formatDate(r.grant_date) : '—'}</td>
+                    <td>{r.grant_date ? formatDateOnly(r.grant_date) : '—'}</td>
                     <td><StatusBadge value={String(r.processing_status || 'UNKNOWN')} /></td>
                     <td><StatusBadge value={String(r.verification_status || 'UNKNOWN')} /></td>
                     <td><StatusBadge value={isGranted ? 'GRANTED' : String(r.workflow_state || '—')} /></td>
                     <td>
                       {isGranted ? (
                         <span style={{ color: '#059669', fontWeight: 600, fontSize: 13 }}>Granted</span>
-                      ) : isVerified ? (
+                      ) : isGrantEligible ? (
                         <button className="btn btn-sm btn-primary" onClick={() => setGrantConfirmId(String(r.id))}>Grant Patent</button>
                       ) : (
                         <Link className="link" to={`/faculty/records/${r.id}`}>Open</Link>

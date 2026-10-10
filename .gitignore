@@ -34,6 +34,7 @@ node_modules/
 /frontend/test-results/
 /frontend/playwright-report/
 /frontend/tsconfig.tsbuildinfo
+/frontend/.vitest/
 /openapi.json
 
 # Local editor / tooling scaffolding (not part of the project)
@@ -49,11 +50,20 @@ Thumbs.db
 storage/
 /backend/storage/
 
+# Session/review reports and run-books (local working docs, never source)
+/FINAL_*.md
+/FPP_*.md
+/OVERNIGHT_HANDOFF.md
+/PROJECT_BLUEPRINT*.md
+
 # Local session/auth artifacts (never commit)
 /backend/login.json
 /backend/auth-cookies.txt
 /backend/cookies.txt
 /cookies.txt
+/admin_cred.json
+/ashwin_login.json
+/cookies_admin.txt
 
 # One-off DB diagnostic / reset helper scripts (local machine only)
 /backend/reset_e2e.py

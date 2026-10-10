@@ -10,6 +10,7 @@ from app.api.deps import get_current_user, require_department_scope, require_hod
 from app.core.database import get_async_session
 from app.core.exceptions import NotFoundError, PortalError
 from app.core.logging import log_audit
+from app.services.export_renderers import api_date_only
 from app.models.base import (
     AssociationRequest,
     AuditLog,
@@ -188,6 +189,57 @@ async def faculty(current_user: dict = Depends(get_current_user), search: str | 
     return {"faculty": out, "count": len(out), "department_id": department_id}
 
 
+async def _hod_visible_record_ids(db: AsyncSession, hod_user_id: str, department_id: str) -> set[str] | None:
+    """Record ids an HOD may see (exact business rule).
+
+    Returns None when the HOD's department has no represented records at all
+    (caller then returns empty). A record is visible when EITHER:
+    (a) a live (non-terminal) association/review request is addressed to this
+        HOD — covers legacy in-flight HOD associations and new HOD reviews; OR
+    (b) the record is past the faculty stage (association-complete,
+        VERIFIED, GRANTED, REJECTED) AND this HOD's department is among the
+        record's represented departments (uploader/contributor departments or
+        the record department).
+    Records still in faculty association are NEVER visible: HODs must not see
+    the patent before all required faculty accept.
+    """
+    from app.api.associations import _represented_department_ids
+
+    live_req_rows = (
+        await db.execute(
+            select(AssociationRequest.ip_record_id).where(
+                or_(
+                    AssociationRequest.target_faculty_id == hod_user_id,
+                    AssociationRequest.recipient_id == hod_user_id,
+                ),
+                AssociationRequest.status.in_(("PENDING", "CLARIFICATION_REQUESTED", "ADMIN_REVIEW")),
+            )
+        )
+    ).scalars().all()
+    visible = {rid for rid in live_req_rows if rid}
+    review_rows = (
+        await db.execute(
+            select(IpRecord).where(
+                IpRecord.workflow_state.in_((
+                    "FACULTY_ASSOCIATION_COMPLETE",
+                    "VERIFIED", "GRANTED", "REJECTED",
+                ))
+            )
+        )
+    ).scalars().all()
+    for rec in review_rows:
+        if rec.department_id == department_id:
+            visible.add(rec.id)
+            continue
+        try:
+            represented = await _represented_department_ids(db, rec)
+        except Exception:
+            represented = []
+        if department_id in represented:
+            visible.add(rec.id)
+    return visible
+
+
 @router.get("/documents", status_code=status.HTTP_200_OK)
 async def documents(
     current_user: dict = Depends(get_current_user),
@@ -199,8 +251,12 @@ async def documents(
     db: AsyncSession = Depends(get_async_session),
 ):
     department_id = _ensure_department(current_user)
-    query = select(IpRecord, User.full_name, User.faculty_id).join(User, User.id == IpRecord.uploader_id).where(IpRecord.department_id == department_id)
-    count_query = select(func.count()).select_from(IpRecord).where(IpRecord.department_id == department_id)
+    hod_user_id = current_user.get("id") or ""
+    visible_ids = await _hod_visible_record_ids(db, hod_user_id, department_id)
+    if not visible_ids:
+        return {"documents": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
+    query = select(IpRecord, User.full_name, User.faculty_id).join(User, User.id == IpRecord.uploader_id).where(IpRecord.id.in_(sorted(visible_ids)))
+    count_query = select(func.count()).select_from(IpRecord).where(IpRecord.id.in_(sorted(visible_ids)))
     if status_filter:
         cond = or_(
             cast(IpRecord.processing_status, String) == status_filter,
@@ -245,7 +301,7 @@ async def documents(
                 "patent_number": r.patent_number,
                 "design_number": r.design_number,
                 "application_number": r.application_number,
-                "grant_date": r.grant_date.isoformat() if r.grant_date else None,
+                "grant_date": api_date_only(r.grant_date),
                 "uploader_id": r.uploader_id,
                 "faculty_name": fname,
                 "faculty_id": fid,

@@ -265,6 +265,18 @@ export function AdminFacultyPage() {
             <>
               <button className="btn btn-secondary" onClick={() => setDeleting(null)}>Cancel</button>
               <button
+                className="btn btn-secondary"
+                disabled={toggleActive.isPending}
+                onClick={() => {
+                  if (deleting) {
+                    toggleActive.mutate({ id: String(deleting.id), activate: false });
+                    setDeleting(null);
+                  }
+                }}
+              >
+                Deactivate instead
+              </button>
+              <button
                 className="btn btn-danger"
                 disabled={remove.isPending}
                 onClick={() => remove.mutate(String(deleting.id))}

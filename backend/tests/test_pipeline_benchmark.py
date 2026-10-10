@@ -60,6 +60,16 @@ def three_page_pdf():
 
 
 class TestQrDecoderBudgets:
+    @pytest.fixture(autouse=True)
+    def _fresh_caches(self):
+        # Engine-call budgets measure uncached work: bypass the
+        # per-content memoization so each test observes a real decode.
+        from app.services.ocr_pipeline import clear_ocr_caches
+
+        clear_ocr_caches()
+        yield
+        clear_ocr_caches()
+
     def test_pyzbar_call_count_scales_linearly(self, three_page_pdf, monkeypatch):
         import pyzbar.pyzbar as pyzbar_mod
 
@@ -111,6 +121,41 @@ class TestQrDecoderBudgets:
         assert result.success is False
         assert result.qr_data == []
         assert dt < 180, f"QR decode pathologically slow: {dt:.1f}s"
+
+
+class TestMemoizationCorrectness:
+    """Per-content memoization returns identical results and skips rework."""
+
+    def test_process_document_repeat_is_identical_and_cached(self, three_page_pdf):
+        from app.services.ocr_pipeline import clear_ocr_caches, process_document
+
+        clear_ocr_caches()
+        first = process_document(three_page_pdf, filename="bench.pdf")
+        second = process_document(three_page_pdf, filename="bench.pdf")
+        assert second is first
+        assert second.ocr.text == first.ocr.text
+        assert second.qr.qr_data == first.qr.qr_data
+        assert second.success == first.success
+        clear_ocr_caches()
+
+    def test_qr_repeat_is_identical_and_cached(self, three_page_pdf):
+        from app.services.ocr_pipeline import clear_ocr_caches, decode_qr_payloads
+
+        clear_ocr_caches()
+        first = decode_qr_payloads(three_page_pdf, filename="bench.pdf")
+        second = decode_qr_payloads(three_page_pdf, filename="bench.pdf")
+        assert second is first
+        assert second.qr_data == first.qr_data
+        clear_ocr_caches()
+
+    def test_different_content_is_not_shared(self, three_page_pdf):
+        from app.services.ocr_pipeline import clear_ocr_caches, decode_qr_payloads
+
+        clear_ocr_caches()
+        other = _make_text_pdf(1)
+        assert decode_qr_payloads(other, filename="bench.pdf") is not decode_qr_payloads(
+            three_page_pdf, filename="bench.pdf")
+        clear_ocr_caches()
 
 
 class TestExtractionBudgets:

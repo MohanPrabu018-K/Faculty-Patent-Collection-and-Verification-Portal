@@ -110,23 +110,24 @@ export function formatDate(value: unknown): string {
 }
 
 /**
- * Date-only display (YYYY-MM-DD) for certificate dates such as Grant date.
- * The database stores these as datetimes (midnight), so a raw ISO string
- * renders as "2024-10-22T00:00:00". This helper strips the time component
- * without touching the underlying value: ISO-like input keeps the calendar
- * date exactly as written (no timezone shift); anything else falls back to
- * the local calendar date, then to the raw string.
+ * Date-only display (DD/MM/YYYY) for certificate dates such as Grant date.
+ * The API carries dates without any time component; a raw value must never
+ * render as an ISO timestamp ("2024-10-22T00:00:00"). ISO-like input keeps
+ * the calendar date exactly as written (no timezone shift); anything else
+ * falls back to the local calendar date, then to the raw string.
  */
 export function formatDateOnly(value: unknown): string {
   if (value === null || value === undefined || value === '') return '—';
   const text = String(value).trim();
-  const isoDate = text.match(/^(\d{4}-\d{2}-\d{2})/);
-  if (isoDate) return isoDate[1];
+  const already = text.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+  if (already) return `${already[1]}/${already[2]}/${already[3]}`;
+  const isoDate = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoDate) return `${isoDate[3]}/${isoDate[2]}/${isoDate[1]}`;
   const d = new Date(text);
   if (!Number.isNaN(d.getTime())) {
     const month = String(d.getMonth() + 1).padStart(2, '0');
     const day = String(d.getDate()).padStart(2, '0');
-    return `${d.getFullYear()}-${month}-${day}`;
+    return `${day}/${month}/${d.getFullYear()}`;
   }
   return text;
 }

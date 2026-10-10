@@ -144,21 +144,48 @@ async def retry_verification(attempt_id: str, current_user: dict = Depends(get_c
 INSTITUTIONAL_SOURCE = "institutional_hod"
 _DECISION_TO_STATUS = {"verify": "VERIFIED", "reject": "MISMATCH", "clarification": "VERIFICATION_REQUIRED"}
 
+# Records that entered the staged association flow must complete it: manual
+# verification requires an ACCEPTED HOD association, never merely the absence
+# of a pending one (dispatch may have failed silently or the request may have
+# been rejected/expired). Legacy non-staged states keep the previous behavior.
+_STAGED_WORKFLOW_STATES = frozenset({
+    "HOD_ASSOCIATION_PENDING",
+    "HOD_ASSOCIATION_ACCEPTED",
+    "FACULTY_APPROVAL_PENDING",
+    "FACULTY_APPROVED",
+    "HOD_VERIFICATION_PENDING",
+})
 
-async def _pending_internal_approvals(db: AsyncSession, record: IpRecord) -> list[str]:
-    """Internal faculty whose acceptance is still outstanding for a record.
 
-    Bug 3: HOD manual verification must not complete before required internal
-    faculty acceptance. An approver is outstanding when they are an internal
-    (non-external, user-linked, active) participant other than the uploader
-    without an ACCEPTED/APPROVED association on this record (or its master),
-    or when a PENDING/CLARIFICATION_REQUESTED request involving an active
-    internal user is still open. Returns user ids ( [] means HOD may verify).
+async def _internal_approval_state(
+    db: AsyncSession, record: IpRecord
+) -> tuple[list[str], list[str]]:
+    """    (required_ids, pending_ids) for internal faculty acceptance.
+
+    Exact business rule: the UPLOADER is automatically accepted and is NEVER
+    part of this set — no self-association request can exist, so the uploader
+    is neither required nor pending, ever. An approver is outstanding when
+    they are an OTHER internal (non-external, user-linked, active) faculty
+    participant without an ACCEPTED/APPROVED association on this record (or
+    its master), or when a PENDING/CLARIFICATION_REQUESTED request involving
+    an active internal user is still open. HOD accounts are NOT part of this
+    set: their acceptance flows through the separate HOD-review stage
+    (hod_pending / hod_accepted gates and HOD-review decisions), so counting
+    them here would inflate the faculty required/accepted counts. Required
+    ids are the full other-faculty set; pending ids are the subset still
+    outstanding.
     """
     from sqlalchemy import or_
 
+    required: list[str] = []
+    seen_req: set[str] = set()
     outstanding: list[str] = []
     seen: set[str] = set()
+
+    def _require(uid: str | None) -> None:
+        if uid and uid not in seen_req:
+            seen_req.add(uid)
+            required.append(uid)
 
     def _note(uid: str | None) -> None:
         if uid and uid not in seen:
@@ -205,30 +232,14 @@ async def _pending_internal_approvals(db: AsyncSession, record: IpRecord) -> lis
             users_by_id[u.id] = u
     for uid in internal_ids:
         u = users_by_id.get(uid)
-        if u is not None and not u.is_active:
+        if u is not None and (not u.is_active or u.role == "hod_admin"):
             # Deactivated faculty can no longer accept (Bug 8 blocks new
-            # requests); they must not hold HOD verification hostage.
+            # requests); they must not hold HOD verification hostage. HOD
+            # accounts accept via the HOD-association stage, never here.
             continue
+        _require(uid)
         if not await _has_accepted(uid):
             _note(uid)
-
-    # Item 4: the uploader approves by uploading ONLY while no request names
-    # them. Once a request is addressed to the uploader (named contributor),
-    # their explicit acceptance is required like everyone else's.
-    uploader_open = (
-        await db.execute(
-            select(AssociationRequest).where(
-                scope,
-                AssociationRequest.status.in_(("PENDING", "CLARIFICATION_REQUESTED")),
-                or_(
-                    AssociationRequest.target_faculty_id == record.uploader_id,
-                    AssociationRequest.recipient_id == record.uploader_id,
-                ),
-            ).limit(1)
-        )
-    ).scalar_one_or_none()
-    if uploader_open is not None and record.uploader_id:
-        _note(record.uploader_id)
 
     # Requests that name an internal participant but have no contributor row
     # yet (e.g. identified purely via the request flow) still gate.
@@ -253,10 +264,68 @@ async def _pending_internal_approvals(db: AsyncSession, record: IpRecord) -> lis
         for u in (
             await db.execute(select(User).where(User.id.in_(sorted(party_ids))))
         ).scalars().all():
-            if u.is_active and u.id not in seen and not await _has_accepted(u.id):
+            if not u.is_active or u.role == "hod_admin":
+                continue
+            _require(u.id)
+            if u.id not in seen and not await _has_accepted(u.id):
                 _note(u.id)
 
-    return outstanding
+    # Rejected / not-me requests are unresolved disputes: the faculty member
+    # stays required until a fresh request is sent and accepted. Without
+    # this, a rejection could be bypassed by verifying directly.
+    refused_rows = (
+        await db.execute(
+            select(AssociationRequest).where(
+                scope,
+                AssociationRequest.status.in_(("REJECTED", "NOT_ME")),
+            )
+        )
+    ).scalars().all()
+    refused_ids: set[str] = set()
+    for req in refused_rows:
+        for pid in (req.target_faculty_id, req.recipient_id):
+            if pid and pid != record.uploader_id:
+                refused_ids.add(pid)
+    if refused_ids:
+        for u in (
+            await db.execute(select(User).where(User.id.in_(sorted(refused_ids))))
+        ).scalars().all():
+            if not u.is_active or u.role == "hod_admin":
+                continue
+            _require(u.id)
+            if u.id not in seen and not await _has_accepted(u.id):
+                _note(u.id)
+
+    return required, outstanding
+
+
+async def _pending_internal_approvals(db: AsyncSession, record: IpRecord) -> list[str]:
+    """Outstanding internal approver user ids ([] means HOD may verify)."""
+    _, pending = await _internal_approval_state(db, record)
+    return pending
+
+
+async def _approval_summary(db: AsyncSession, record: IpRecord) -> dict:
+    """Machine-readable faculty-approval progress for 409s and the HOD UI.
+
+    {pending_approvals, pending_count, required_count, accepted_count,
+    pending_faculty: [{id, name}]}. Names are internal colleague display
+    names (already visible across the portal), safe to expose to the HOD.
+    """
+    required, pending = await _internal_approval_state(db, record)
+    names: dict[str, str | None] = {}
+    if pending:
+        for u in (
+            await db.execute(select(User).where(User.id.in_(pending)))
+        ).scalars().all():
+            names[u.id] = u.full_name or u.email
+    return {
+        "pending_approvals": pending,
+        "pending_count": len(pending),
+        "required_count": len(required),
+        "accepted_count": len(required) - len(pending),
+        "pending_faculty": [{"id": uid, "name": names.get(uid)} for uid in pending],
+    }
 
 
 def _institutional_to_dict(a: VerificationAttempt) -> dict:
@@ -298,7 +367,8 @@ async def list_institutional_verifications(record_id: str, current_user: dict = 
     final = evidence.get("final_verification") if isinstance(evidence, dict) else None
     # Bug 3: expose outstanding internal approvals so the HOD UI can disable
     # "Confirm Verified" before required acceptance (backend still enforces).
-    pending_approvals = await _pending_internal_approvals(db, record)
+    approval_summary = await _approval_summary(db, record)
+    pending_approvals = approval_summary["pending_approvals"]
     # Staged workflow: expose the HOD association state so the UI can show
     # which HOD owns verification (or that HOD acceptance is still pending).
     from app.api.associations import _live_hod_request as _live_hod
@@ -325,6 +395,12 @@ async def list_institutional_verifications(record_id: str, current_user: dict = 
         "institutional": latest,
         "history": [_institutional_to_dict(r) for r in rows],
         "pending_approvals": pending_approvals,
+        "approval_counts": {
+            "pending": approval_summary["pending_count"],
+            "required": approval_summary["required_count"],
+            "accepted": approval_summary["accepted_count"],
+        },
+        "pending_faculty": approval_summary["pending_faculty"],
         "hod_association": {
             "status": _hod_req.status if _hod_req else None,
             "hod_user_id": _hod_uid,
@@ -353,6 +429,11 @@ async def submit_institutional_verification(record_id: str, request: Request, cu
     role = current_user.get("role", "")
     if role not in ("hod_admin", "super_admin"):
         raise AuthorizationError("Only HOD or Super Admin can perform institutional verification")
+    # BUG 5: deactivated accounts cannot perform verification actions, even
+    # with an in-flight token (login already blocks them at issuance).
+    actor = (await db.execute(select(User).where(User.id == current_user.get("id")))).scalar_one_or_none()
+    if actor is None or not actor.is_active:
+        raise AuthorizationError("Deactivated accounts cannot perform verification")
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
     decision = str(body.get("decision", "")).lower()
     if decision not in _DECISION_TO_STATUS:
@@ -360,6 +441,14 @@ async def submit_institutional_verification(record_id: str, request: Request, cu
     record = (await db.execute(select(IpRecord).where(IpRecord.id == record_id))).scalar_one_or_none()
     if not record:
         raise NotFoundError("IP record", record_id)
+    # Terminal states are immutable: a REJECTED record can never be verified
+    # or resurrected into the workflow, and GRANTED records are final.
+    if (record.workflow_state or "") in ("REJECTED", "GRANTED"):
+        raise PortalError(
+            message="Terminal records cannot be re-verified",
+            error_code="RECORD_TERMINAL",
+            status_code=409,
+        )
     # Staged workflow (items 2/10): HOD association acceptance and HOD manual
     # verification are distinct stages bound to the SAME HOD.
     from app.api.associations import _live_hod_request
@@ -382,8 +471,34 @@ async def submit_institutional_verification(record_id: str, request: Request, cu
                     error_code="AUTHORIZATION_ERROR",
                     status_code=403,
                 )
+        # BUG 3: a staged record with no ACCEPTED HOD request must not be
+        # verifiable — the HOD stage was skipped, not completed. The HOD (or
+        # admin) must first create/accept the HOD association.
+        if hod_accepted is None and (record.workflow_state or "") in _STAGED_WORKFLOW_STATES:
+            raise PortalError(
+                message="HOD association acceptance is required before manual verification",
+                error_code="HOD_ASSOCIATION_PENDING",
+                status_code=409,
+                details={"workflow_state": record.workflow_state},
+            )
+        # Exact business workflow: records in the multi-department HOD-review
+        # flow (or awaiting Super Admin grant) are decided ONLY through HOD
+        # review requests — direct manual verification would bypass the
+        # all-HODs-accepted rule.
+        if (record.workflow_state or "") in (
+            "HOD_REVIEW_PENDING", "HOD_REVIEW_IN_PROGRESS", "SUPER_ADMIN_GRANT_PENDING",
+        ):
+            raise PortalError(
+                message="This record is decided through HOD review requests; complete the pending HOD decisions first",
+                error_code="HOD_REVIEW_PENDING",
+                status_code=409,
+                details={"workflow_state": record.workflow_state},
+            )
         pending = await _pending_internal_approvals(db, record)
         if pending:
+            # BUG 2: the 409 carries machine-readable progress (pending /
+            # required / accepted counts plus pending names) and no attempt
+            # row is recorded for the blocked action (db.add happens below).
             raise PortalError(
                 message=(
                     "HOD verification is blocked until required internal "
@@ -391,7 +506,7 @@ async def submit_institutional_verification(record_id: str, request: Request, cu
                 ),
                 error_code="ASSOCIATION_PENDING",
                 status_code=409,
-                details={"pending_approvals": pending},
+                details=await _approval_summary(db, record),
             )
     if role == "hod_admin":
         hod_dept = current_user.get("department_id")

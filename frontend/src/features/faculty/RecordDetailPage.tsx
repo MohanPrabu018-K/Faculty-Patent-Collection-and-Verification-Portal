@@ -21,14 +21,25 @@ function displayApplicant(value: unknown): string {
 
 function workflowGuidance(state: unknown): string | null {
   switch (String(state ?? '')) {
+    case 'FACULTY_ASSOCIATION_PENDING':
+      return 'What you need to do: as the uploader you are automatically accepted — click Send Association Request once so every other named internal faculty member can approve.';
     case 'FACULTY_APPROVAL_PENDING':
       return 'What you need to do: ask each listed internal faculty member to accept the association request.';
+    case 'FACULTY_ASSOCIATION_COMPLETE':
+      return 'All required faculty approvals are recorded. HOD review routing is next.';
+    case 'HOD_REVIEW_PENDING':
+    case 'HOD_REVIEW_IN_PROGRESS':
+      return 'Faculty approvals are complete. Each relevant HOD must now explicitly accept or reject.';
+    case 'SUPER_ADMIN_GRANT_PENDING':
+      return 'All HOD reviews are accepted. The patent awaits Super Admin grant.';
     case 'DUPLICATE_REVIEW':
       return 'What you need to do: compare with the existing record below. No action is needed unless the records are unrelated.';
     case 'NEEDS_REVIEW':
       return 'What you need to do: confirm or correct the extracted fields in Review & Confirm.';
     case 'VERIFIED':
       return 'This record has completed verification.';
+    case 'REJECTED':
+      return 'This record was rejected and cannot proceed to grant.';
     default:
       return null;
   }
@@ -78,36 +89,41 @@ export function RecordDetailPage() {
     }
   };
 
-  // Uploader-only association requests. Hooks must stay above the early
-  // returns. Creation always goes through the existing POST /associations/
-  // endpoint (backend enforces uploader authorization + duplicate
-  // prevention); the query only loads the uploader's own sent requests.
+  // Uploader association flow (exact business rule): the uploader is
+  // automatically accepted and NEVER gets a self-association button. Their
+  // single action is [Send Association Request], which asks ONLY OTHER
+  // internal faculty (backend enforces + de-duplicates). Hooks stay above
+  // the early returns; the query loads the uploader's sent requests.
   const assocRecord = (data ?? {}) as Record<string, unknown>;
   const assocUploaderId = typeof assocRecord.uploader_id === 'string' ? assocRecord.uploader_id : null;
   const assocViewerIsUploader = Boolean(user?.id && assocUploaderId && user.id === assocUploaderId);
   const { data: assocData } = useQuery({ queryKey: ['associations'], queryFn: api.associations, enabled: Boolean(recordId) && assocViewerIsUploader });
   const [assocFeedback, setAssocFeedback] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
-  const sendAssoc = useMutation({
-    mutationFn: ({ facultyId }: { facultyId: string; name: string; ckey: string }) =>
-      api.sendAssociation(facultyId, { record_id: String(recordId || ''), reason: 'Please confirm your contribution to this record.' }),
-    onSuccess: async (_res, vars) => {
-      setAssocFeedback({ kind: 'success', text: `Association request sent to ${vars.name}.` });
+  const sendAll = useMutation({
+    mutationFn: () => api.sendAllAssociations(String(recordId || '')),
+    onSuccess: async (res) => {
+      const n = Array.isArray(res?.created) ? res.created.length : 0;
+      setAssocFeedback({
+        kind: 'success',
+        text: n > 0
+          ? `Association requests sent to ${n} other facult${n === 1 ? 'y' : 'ies'}.`
+          : 'No new requests needed — every other internal faculty member is already covered.',
+      });
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['associations'] }),
         queryClient.invalidateQueries({ queryKey: ['faculty-record', recordId] }),
       ]);
     },
-    onError: async (err, vars) => {
+    onError: async (err) => {
       if (err instanceof ApiError && err.status === 409) {
-        // A live request already exists: adopt the pending state, no duplicate.
-        setAssocFeedback({ kind: 'success', text: `A request already exists for ${vars.name} — showing as sent.` });
+        setAssocFeedback({ kind: 'error', text: 'Association requests can only be sent while faculty association is pending for this record.' });
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: ['associations'] }),
           queryClient.invalidateQueries({ queryKey: ['faculty-record', recordId] }),
         ]);
         return;
       }
-      setAssocFeedback({ kind: 'error', text: err instanceof Error ? `Could not send request to ${vars.name}: ${err.message}` : `Could not send request to ${vars.name}.` });
+      setAssocFeedback({ kind: 'error', text: err instanceof Error ? `Could not send association requests: ${err.message}` : 'Could not send association requests.' });
     },
   });
 
@@ -218,31 +234,37 @@ export function RecordDetailPage() {
 
       <SectionCard title="Contributors & Associations" subtitle="Everyone named in the document, and their college association state.">
         {assocFeedback ? <div className={assocFeedback.kind === 'success' ? 'alert alert-success' : 'alert alert-error'}>{assocFeedback.text}</div> : null}
+        {isUploader && String(record.workflow_state || '') === 'FACULTY_ASSOCIATION_PENDING' ? (
+          <div className="stack" style={{ marginBottom: 12 }}>
+            <div className="alert alert-info" role="status">
+              You uploaded this patent, so you are automatically accepted — no action is needed for yourself.
+              Click below once to request explicit approval from every other internal faculty member named in the document.
+            </div>
+            <div>
+              <button
+                type="button"
+                className="btn btn-sm btn-primary"
+                disabled={sendAll.isPending}
+                aria-label="Send Association Request"
+                onClick={() => sendAll.mutate()}
+              >
+                {sendAll.isPending ? 'Sending…' : 'Send Association Request'}
+              </button>
+            </div>
+          </div>
+        ) : null}
         {contributors.length === 0 ? <div className="empty-cell">No contributors are available yet.</div> : <div className="stack">{contributors.map((contributor) => {
           const ckey = String(contributor.id || contributor.name);
           const assocState = associationSendState(contributor, { currentUserId, isUploader, recordId: String(recordId || ''), requests: assocRows });
-          const isSending = sendAssoc.isPending && sendAssoc.variables?.ckey === ckey;
           const contributorName = String(contributor.name || 'contributor');
+          const isSelfRow = Boolean(currentUserId && String(contributor.user_id || '') !== '' && String(contributor.user_id) === String(currentUserId));
           return (
             <div key={ckey} className="mini-card">
               <strong>{display(contributor.name)}</strong>
               <div className="muted">{contributor.is_external ? 'External contributor — not college faculty' : `Internal faculty${contributor.faculty_id ? ` · ${display(contributor.faculty_id)}` : ''}`}</div>
-              <div className="muted">Association: {display(contributor.match_status)}</div>
-              {assocState === 'sendable' ? (
-                <div style={{ marginTop: 8 }}>
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-primary"
-                    disabled={isSending}
-                    aria-label={`Send association request to ${contributorName}`}
-                    onClick={() => sendAssoc.mutate({ facultyId: String(contributor.faculty_id), name: contributorName, ckey })}
-                  >
-                    {isSending ? 'Sending…' : 'Send Association Request'}
-                  </button>
-                </div>
-              ) : null}
-              {assocState === 'pending' ? <div className="muted" style={{ marginTop: 8 }}>Request Sent · Pending recipient decision</div> : null}
-              {assocState === 'accepted' ? <div className="muted" style={{ marginTop: 8 }}>Association Accepted</div> : null}
+              <div className="muted">Association: {isSelfRow && isUploader ? 'Automatically accepted (uploader)' : display(contributor.match_status)}</div>
+              {assocState === 'pending' && !isSelfRow ? <div className="muted" style={{ marginTop: 8 }}>Request Sent · Pending recipient decision</div> : null}
+              {assocState === 'accepted' && !isSelfRow ? <div className="muted" style={{ marginTop: 8 }}>Association Accepted</div> : null}
             </div>
           );
         })}</div>}
@@ -265,7 +287,7 @@ export function RecordDetailPage() {
         ]} />
       </SectionCard>
 
-      <InstitutionalVerificationCard recordId={String(recordId || '')} canVerify={user?.role === 'hod_admin' || user?.role === 'super_admin'} />
+      <InstitutionalVerificationCard recordId={String(recordId || '')} />
 
       <SectionCard title="Workflow & Master Record" subtitle="Where this submission stands, and the master record it belongs to.">
         <SectionList items={[
@@ -381,26 +403,10 @@ export function RecordDetailPage() {
   );
 }
 
-function InstitutionalVerificationCard({ recordId, canVerify }: { recordId: string; canVerify: boolean }) {
-  const queryClient = useQueryClient();
-  const [decision, setDecision] = useState<'verify' | 'reject' | 'clarification'>('verify');
-  const [remarks, setRemarks] = useState('');
-  const [evidenceRef, setEvidenceRef] = useState('');
-  const [confirmed, setConfirmed] = useState(false);
-  const [result, setResult] = useState<{ final_verification_status: string; workflow_state: string; official_verification_status: string; missing_conditions: string[] } | null>(null);
+function InstitutionalVerificationCard({ recordId }: { recordId: string }) {
   const { data, isLoading, error } = useQuery({ queryKey: ['institutional', recordId], queryFn: () => api.institutionalStatus(recordId), enabled: Boolean(recordId) });
-  const submit = useMutation({
-    mutationFn: () => api.institutionalVerify(recordId, { decision, remarks: remarks || undefined, evidence_ref: evidenceRef || undefined }),
-    onSuccess: async (res) => {
-      setRemarks(''); setEvidenceRef(''); setConfirmed(false);
-      setResult({ final_verification_status: res.final_verification_status, workflow_state: res.workflow_state, official_verification_status: res.official_verification_status, missing_conditions: res.missing_conditions ?? [] });
-      await queryClient.invalidateQueries({ queryKey: ['institutional', recordId] });
-      await queryClient.invalidateQueries({ queryKey: ['faculty-record', recordId] });
-    },
-  });
   const inst = (data?.institutional ?? null) as Record<string, unknown> | null;
   const final = (data?.final_verification ?? null) as Record<string, unknown> | null;
-  const needsManualCheck = String(data?.official_verification_status || 'VERIFICATION_REQUIRED') === 'VERIFICATION_REQUIRED' && (!inst || inst.decision !== 'verify');
   return (
     <SectionCard title="Institutional Verification (HOD)" subtitle="Human department review — distinct from official IP India verification. Official state is never overwritten.">
       {isLoading ? <div className="muted">Loading institutional state…</div> : error ? <div className="alert alert-error">{String(error)}</div> : (
@@ -413,38 +419,7 @@ function InstitutionalVerificationCard({ recordId, canVerify }: { recordId: stri
             ...(final?.rationale ? [{ label: 'Final rationale', value: display(final.rationale) }] : []),
             ...(Array.isArray(final?.missing_conditions) && (final.missing_conditions as unknown[]).length ? [{ label: 'Blocked by', value: (final.missing_conditions as unknown[]).map(String).join('; ') }] : []),
           ]} />
-          {needsManualCheck && canVerify ? (
-            <div className="alert" style={{ background: '#fff7e8', border: '1px solid #f0d9a8' }}>
-              Manual official verification required: check this record against the official IP portal, then record your decision below.
-            </div>
-          ) : null}
-          {canVerify ? (
-            <div className="stack">
-              <div className="toolbar">
-                <select className="toolbar-input" value={decision} onChange={(e) => { setDecision(e.target.value as any); setConfirmed(false); setResult(null); }} aria-label="Decision">
-                  <option value="verify">Verify / Accept</option>
-                  <option value="reject">Reject</option>
-                  <option value="clarification">Needs clarification</option>
-                </select>
-              </div>
-              <label className="field"><span>Remarks (optional)</span><input className="toolbar-input" value={remarks} onChange={(e) => setRemarks(e.target.value)} placeholder="Review notes" /></label>
-              <label className="field"><span>Evidence / reference (optional)</span><input className="toolbar-input" value={evidenceRef} onChange={(e) => setEvidenceRef(e.target.value)} placeholder="Certificate page, register entry…" /></label>
-              {decision === 'verify' ? (
-                <label className="pill-row" style={{ gap: 8, alignItems: 'flex-start' }}>
-                  <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} aria-label="Manual official verification confirmation" style={{ marginTop: 4 }} />
-                  <span>I have checked this IP record against the official IP portal and confirm that the submitted details match.</span>
-                </label>
-              ) : null}
-              {submit.isError ? <div className="alert alert-error">{String(submit.error)}</div> : null}
-              {result ? (
-                <div className="alert alert-success">
-                  Decision recorded. Official: {result.official_verification_status} (unchanged) · Final: {result.final_verification_status} · Workflow: {result.workflow_state}
-                  {result.missing_conditions.length ? ` · Blocked by: ${result.missing_conditions.join('; ')}` : ''}
-                </div>
-              ) : null}
-              <button className="btn btn-primary" disabled={submit.isPending || (decision === 'verify' && !confirmed)} onClick={() => submit.mutate()}>{submit.isPending ? 'Saving…' : 'Submit institutional decision'}</button>
-            </div>
-          ) : <p className="muted">Only HOD (own department) or Super Admin can submit institutional verification.</p>}
+          <p className="muted">Institutional review is read-only here. Faculty association and Super Admin grant are the human gates for this record.</p>
         </div>
       )}
     </SectionCard>

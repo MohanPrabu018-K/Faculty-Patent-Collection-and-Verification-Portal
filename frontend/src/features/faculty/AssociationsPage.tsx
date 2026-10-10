@@ -84,7 +84,10 @@ export function AssociationsPage() {
           {rows.map((r) => {
             const isRecipient = r.recipient_id === user?.id;
             const isRequester = r.requester_id === user?.id;
-            const canRespond = isRecipient && RESPONDABLE.has(r.status);
+            // HOD is a read-only visibility role: never offer accept/reject
+            // actions to HOD accounts (backend also treats HOD responses as
+            // status-only with zero workflow effect).
+            const canRespond = isRecipient && RESPONDABLE.has(r.status) && user?.role !== 'hod_admin';
             const canClarifyBack = isRequester && r.status === 'CLARIFICATION_REQUESTED';
             const canCancel = isRequester && r.status === 'PENDING';
             return (

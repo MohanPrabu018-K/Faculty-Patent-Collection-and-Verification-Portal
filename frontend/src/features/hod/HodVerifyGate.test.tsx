@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import '@testing-library/jest-dom/vitest';
@@ -10,8 +9,6 @@ import { HodDocumentsPage } from './HodPages';
 const { apiStubs, notifyMock } = vi.hoisted(() => ({
   apiStubs: {
     hodDocuments: vi.fn(),
-    institutionalStatus: vi.fn(),
-    institutionalVerify: vi.fn(),
   },
   notifyMock: vi.fn(),
 }));
@@ -24,7 +21,7 @@ vi.mock('../../stores/toast', () => ({
   useToast: () => ({ notify: notifyMock }),
 }));
 
-function doc() {
+function doc(overrides: Record<string, unknown> = {}) {
   return {
     id: 'rec-1',
     title: 'Widget',
@@ -32,6 +29,8 @@ function doc() {
     faculty_name: 'Uploader',
     verification_status: 'VERIFICATION_REQUIRED',
     processing_status: 'COMPLETED',
+    grant_date: '2024-10-22',
+    ...overrides,
   };
 }
 
@@ -49,69 +48,28 @@ function renderPage() {
 beforeEach(() => {
   cleanup();
   apiStubs.hodDocuments.mockReset();
-  apiStubs.institutionalStatus.mockReset();
-  apiStubs.institutionalVerify.mockReset();
   notifyMock.mockReset();
   apiStubs.hodDocuments.mockResolvedValue({
     documents: [doc()], total: 1, page: 1, per_page: 20, total_pages: 1,
   });
 });
 
-describe('HOD Manual Verify gate (Bug 3)', () => {
-  it('disables Confirm Verified while internal acceptance is pending', async () => {
-    const user = userEvent.setup();
-    apiStubs.institutionalStatus.mockResolvedValue({
-      institutional: null, final_verification: null, pending_approvals: ['user-b'],
-    });
+describe('HOD read-only documents (simplified workflow: no HOD approval actions)', () => {
+  it('renders department documents with grant date and zero approval buttons', async () => {
     renderPage();
-
     await waitFor(() => expect(screen.getByText('Widget')).toBeInTheDocument());
-    await user.click(screen.getByRole('button', { name: 'Manual Verify' }));
-
-    await waitFor(() =>
-      expect(screen.getByText(/blocked until required internal faculty acceptance/i)).toBeInTheDocument());
-    expect(screen.getByRole('button', { name: 'Confirm Verified' })).toBeDisabled();
-    // Non-approving outcomes stay available.
-    expect(screen.getByRole('button', { name: 'Reject' })).toBeEnabled();
-    expect(apiStubs.institutionalVerify).not.toHaveBeenCalled();
+    expect(screen.getByText('22/10/2024')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Manual Verify' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Confirm Verified' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Reject' })).toBeNull();
+    expect(screen.queryByText(/HOD Manual Official Verification/)).toBeNull();
+    expect(apiStubs.hodDocuments).toHaveBeenCalled();
   });
 
-  it('allows Confirm Verified once approvals are recorded', async () => {
-    const user = userEvent.setup();
-    apiStubs.institutionalStatus.mockResolvedValue({
-      institutional: null, final_verification: null, pending_approvals: [],
-      hod_association: { status: 'ACCEPTED', hod_user_id: 'hod-1', hod_name: 'HOD One' },
-    });
-    apiStubs.institutionalVerify.mockResolvedValue({
-      decision: 'verify', final_verification_status: 'VERIFIED',
-    });
+  it('offers only a View link per document', async () => {
     renderPage();
-
     await waitFor(() => expect(screen.getByText('Widget')).toBeInTheDocument());
-    await user.click(screen.getByRole('button', { name: 'Manual Verify' }));
-
-    const confirm = await screen.findByRole('button', { name: 'Confirm Verified' });
-    await waitFor(() => expect(confirm).toBeEnabled());
-    expect(screen.queryByText(/blocked until required internal faculty acceptance/i)).toBeNull();
-    await user.click(confirm);
-    await waitFor(() => expect(apiStubs.institutionalVerify).toHaveBeenCalled());
-  });
-
-  it('disables Confirm Verified while the HOD association itself is pending', async () => {
-    const user = userEvent.setup();
-    apiStubs.institutionalStatus.mockResolvedValue({
-      institutional: null, final_verification: null, pending_approvals: [],
-      hod_association: { status: 'PENDING', hod_user_id: 'hod-9', hod_name: 'HOD Nine' },
-    });
-    renderPage();
-
-    await waitFor(() => expect(screen.getByText('Widget')).toBeInTheDocument());
-    await user.click(screen.getByRole('button', { name: 'Manual Verify' }));
-
-    await waitFor(() =>
-      expect(screen.getByText(/HOD association acceptance is still pending/i)).toBeInTheDocument());
-    expect(screen.getByRole('button', { name: 'Confirm Verified' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Reject' })).toBeEnabled();
-    expect(apiStubs.institutionalVerify).not.toHaveBeenCalled();
+    expect(screen.getByRole('link', { name: 'View' })).toBeInTheDocument();
+    expect(screen.queryByText(/Confirm Verified|Manual Verify/)).toBeNull();
   });
 });

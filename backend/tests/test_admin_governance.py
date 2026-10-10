@@ -145,11 +145,8 @@ class TestHodUniqueness:
                                   "department_id": dept, "designation_id": desig},
                             headers=_admin_h(client))
             assert r.status_code == 409, r.text
-            assert r.json()["error"] == "DUPLICATE_HOD"
-            assert r.json()["message"] == (
-                "An HOD is already assigned to this department. "
-                "Please update the existing HOD instead of creating a new one."
-            )
+            assert r.json()["error"] == "ACTIVE_HOD_EXISTS"
+            assert r.json()["message"] == "An active HOD already exists for this department."
         finally:
             _run(_wipe_users([h1], [dept]))
 
@@ -167,7 +164,7 @@ class TestHodUniqueness:
                              json={"designation_id": desig, "department_id": d1},
                              headers=_admin_h(client))
             assert r.status_code == 409, r.text
-            assert r.json()["error"] == "DUPLICATE_HOD"
+            assert r.json()["error"] == "ACTIVE_HOD_EXISTS"
         finally:
             _run(_wipe_users([h1, fac], [d1, d2]))
 
@@ -198,6 +195,36 @@ class TestHodUniqueness:
                 _run(_wipe_users([new_id], []))
         finally:
             _run(_wipe_users([h1], [dept]))
+
+    def test_activate_second_hod_blocked_with_message(self, client):
+        """BUG 6 root cause: activation used to skip the single-HOD check, so
+        an HOD created inactive could be activated next to an active HOD."""
+        dept = _run(_mkdept("d4b"))
+        h1 = f"gv-had8-{TAG}"
+        h2 = f"gv-hbe9-{TAG}"
+        try:
+            _run(_mkuser(h1, f"{h1}@example.test", "hod_admin", dept))
+            _run(_mkuser(h2, f"{h2}@example.test", "hod_admin", dept, active=False))
+            r = client.post(f"/api/v1/admin/faculty/{h2}/activate", headers=_admin_h(client))
+            assert r.status_code == 409, r.text
+            assert r.json()["error"] == "ACTIVE_HOD_EXISTS"
+            assert r.json()["message"] == "An active HOD already exists for this department."
+            # Loser stays inactive; winner untouched.
+            async def _check():
+                async with get_async_session_context() as db:
+                    rows = (await db.execute(select(User).where(
+                        User.id.in_([h1, h2])))).scalars().all()
+                    by_id = {u.id: u.is_active for u in rows}
+                    assert by_id == {h1: True, h2: False}
+            _run(_check())
+        finally:
+            _run(_wipe_users([h1, h2], [dept]))
+
+    def test_activate_deactivate_unknown_is_404(self, client):
+        r = client.post("/api/v1/admin/faculty/no-such-id/activate", headers=_admin_h(client))
+        assert r.status_code == 404, r.text
+        r = client.post("/api/v1/admin/faculty/no-such-id/deactivate", headers=_admin_h(client))
+        assert r.status_code == 404, r.text
 
 
 async def _get_hod_designation():
@@ -279,6 +306,114 @@ class TestFacultyDelete:
         r2 = client.delete(f"/api/v1/admin/faculty/{ADMIN['id']}", headers=_admin_h(client))
         assert r2.status_code == 404, r2.text
 
+    def test_delete_file_uploader_refused(self, client):
+        """BUG 5: IpFile.uploaded_by is a user FK without cascade — the
+        delete must refuse (409) instead of 500ing on the FK."""
+        from app.models.base import IpFile as _IpFile
+
+        dept = _run(_mkdept("d8"))
+        uid = f"gv-fil-{TAG}"
+        fid = f"gv-file-{TAG}"
+        try:
+            _run(_mkuser(uid, f"{uid}@example.test", "faculty", dept))
+
+            async def _file():
+                async with get_async_session_context() as db:
+                    db.add(_IpFile(id=fid, ip_record_id=None, master_ip_id=None,
+                                   uploaded_by=uid, storage_key=f"gv-key-{TAG}",
+                                   original_filename="cert.pdf", file_extension="pdf",
+                                   file_size_bytes=1234, mime_type="application/pdf"))
+                    await db.commit()
+            _run(_file())
+            r = client.delete(f"/api/v1/admin/faculty/{uid}", headers=_admin_h(client))
+            assert r.status_code == 409, r.text
+            assert r.json()["error"] == "FACULTY_HAS_DATA"
+            assert "uploaded file" in r.json()["message"]
+        finally:
+            async def _drop():
+                async with get_async_session_context() as db:
+                    await db.execute(delete(_IpFile).where(_IpFile.id == fid))
+                    await db.commit()
+            _run(_drop())
+            _run(_wipe_users([uid], [dept]))
+
+    def test_delete_blockers_details_are_structured(self, client):
+        dept = _run(_mkdept("d9"))
+        uid = f"gv-blk-{TAG}"
+        rid = f"gv-rec-blk-{TAG}"
+        try:
+            _run(_mkuser(uid, f"{uid}@example.test", "faculty", dept))
+
+            async def _rec():
+                async with get_async_session_context() as db:
+                    db.add(IpRecord(id=rid, ip_type="PATENT", patent_number=f"GVB-{TAG}",
+                                    title="GV blockers", verification_status="VERIFICATION_REQUIRED",
+                                    processing_status="COMPLETED", workflow_state="NEEDS_REVIEW",
+                                    uploader_id=uid, department_id=dept, is_archived=False))
+                    await db.commit()
+            _run(_rec())
+            r = client.delete(f"/api/v1/admin/faculty/{uid}", headers=_admin_h(client))
+            assert r.status_code == 409, r.text
+            blockers = r.json()["details"]["blockers"]
+            assert blockers["uploaded_records"] == 1
+            assert blockers["association_requests"] == 0
+        finally:
+            _run(_wipe_users([uid], [dept], [rid]))
+
+
+class TestDeactivationEnforcement:
+    def test_deactivated_responder_cannot_respond(self, client):
+        """BUG 5: deactivation must prevent new verification actions."""
+        dept = _run(_mkdept("d10"))
+        a = f"gv-dra-{TAG}"
+        b = f"gv-drb-{TAG}"
+        rid = f"gv-rec-dr-{TAG}"
+        try:
+            _run(_mkuser(a, f"{a}@example.test", "faculty", dept))
+            _run(_mkuser(b, f"{b}@example.test", "faculty", dept, active=False))
+
+            async def _seed():
+                async with get_async_session_context() as db:
+                    db.add(IpRecord(id=rid, ip_type="PATENT", patent_number=f"GVD-{TAG}",
+                                    title="GV deact", verification_status="VERIFICATION_REQUIRED",
+                                    processing_status="COMPLETED", workflow_state="NEEDS_REVIEW",
+                                    uploader_id=a, department_id=dept, is_archived=False))
+                    db.add(AssociationRequest(id=f"gv-ar-dr-{TAG}", ip_record_id=rid,
+                                              requesting_faculty_id=a, target_faculty_id=b,
+                                              requester_id=a, recipient_id=b, status="PENDING"))
+                    await db.commit()
+            _run(_seed())
+            bh = _h(client, _tok(b, f"{b}@example.test", "faculty"))
+            r = client.post(f"/api/v1/associations/gv-ar-dr-{TAG}/respond?action=accepted",
+                            json={}, headers=bh)
+            assert r.status_code == 403, r.text
+        finally:
+            _run(_wipe_users([a, b], [dept], [rid]))
+
+    def test_deactivated_requester_cannot_send(self, client):
+        dept = _run(_mkdept("d11"))
+        a = f"gv-dsa-{TAG}"
+        b = f"gv-dsb-{TAG}"
+        rid = f"gv-rec-ds-{TAG}"
+        try:
+            _run(_mkuser(a, f"{a}@example.test", "faculty", dept, active=False))
+            _run(_mkuser(b, f"{b}@example.test", "faculty", dept))
+
+            async def _seed():
+                async with get_async_session_context() as db:
+                    db.add(IpRecord(id=rid, ip_type="PATENT", patent_number=f"GVS-{TAG}",
+                                    title="GV send", verification_status="VERIFICATION_REQUIRED",
+                                    processing_status="COMPLETED", workflow_state="UPLOADED",
+                                    uploader_id=b, department_id=dept, is_archived=False))
+                    await db.commit()
+            _run(_seed())
+            ah = _h(client, _tok(a, f"{a}@example.test", "faculty"))
+            r = client.post(f"/api/v1/associations/?recipient_faculty_id={('FAC-GV-' + b[:6]).upper()}",
+                            json={"record_id": rid}, headers=ah)
+            assert r.status_code == 403, r.text
+        finally:
+            _run(_wipe_users([a, b], [dept], [rid]))
+
 
 class TestGrantDateFormats:
     def test_dotted_and_iso_dotted_dates(self):
@@ -320,6 +455,55 @@ class TestGrantDateFormats:
             "PATENT",
         )
         assert res["normalized_fields"].get("grant_date") is None
+
+    def test_all_required_grant_formats(self):
+        """BUG 7: every required calendar format normalizes to the same date."""
+        from datetime import date
+
+        from app.services.extraction import normalize_date
+
+        expected = date(2024, 10, 22)
+        for raw in ("22.10.2024", "22-10-2024", "22/10/2024",
+                    "2024.10.22", "2024-10-22", "2024/10/22",
+                    "22 October 2024", "October 22, 2024"):
+            assert normalize_date(raw) == expected, raw
+
+    def test_grant_context_per_format_and_filing_disambiguation(self):
+        """BUG 7: grant dates come from grant context only; the filing date
+        must never be mistaken for the grant date."""
+        from datetime import date
+
+        from app.services.extraction import StructuredExtractionService
+
+        cases = [
+            ("Date of Grant: 22.10.2024", date(2024, 10, 22)),
+            ("Date of Grant: 22-10-2024", date(2024, 10, 22)),
+            ("Date of Grant: 22/10/2024", date(2024, 10, 22)),
+            ("Date of Grant: 2024.10.22", date(2024, 10, 22)),
+            ("Date of Grant: 2024-10-22", date(2024, 10, 22)),
+            ("Date of Grant: 2024/10/22", date(2024, 10, 22)),
+        ]
+        for grant_line, expected in cases:
+            svc = StructuredExtractionService()
+            res = svc.extract_from_text(
+                "Patent Number : IN777001\nTitle : Fmt\n"
+                f"Filing Date: 01/01/2020\n{grant_line}\nApplicant : Someone",
+                "PATENT",
+            )
+            nf = res["normalized_fields"].get("grant_date")
+            assert nf and nf[0]["value"] == expected, grant_line
+
+    def test_as_grant_date_keeps_calendar_date_only(self):
+        """BUG 7: pipeline persistence truncates timestamps to DATE."""
+        from datetime import date, datetime
+
+        from app.workers.orchestrator_task import _as_grant_date
+
+        assert _as_grant_date(datetime(2024, 10, 22, 15, 30, 45)) == date(2024, 10, 22)
+        assert _as_grant_date(date(2024, 10, 22)) == date(2024, 10, 22)
+        assert _as_grant_date(2024) is None
+        assert _as_grant_date("2024-10-22") is None
+        assert _as_grant_date(None) is None
 
 
 class TestHodExtraction:

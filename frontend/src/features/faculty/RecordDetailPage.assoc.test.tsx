@@ -24,7 +24,7 @@ const { authState, apiStubs, FakeApiError } = vi.hoisted(() => {
       facultyRecordStatus: vi.fn(),
       associations: vi.fn(),
       institutionalStatus: vi.fn(),
-      sendAssociation: vi.fn(),
+      sendAllAssociations: vi.fn(),
       facultyRecordReview: vi.fn(),
     },
   };
@@ -36,7 +36,7 @@ vi.mock('../../api/client', () => ({
     facultyRecordStatus: apiStubs.facultyRecordStatus,
     associations: apiStubs.associations,
     institutionalStatus: apiStubs.institutionalStatus,
-    sendAssociation: apiStubs.sendAssociation,
+    sendAllAssociations: apiStubs.sendAllAssociations,
     facultyRecordReview: apiStubs.facultyRecordReview,
     downloadRecordFile: vi.fn(),
   },
@@ -99,78 +99,89 @@ beforeEach(() => {
   apiStubs.facultyRecordStatus.mockReset();
   apiStubs.associations.mockReset();
   apiStubs.institutionalStatus.mockReset();
-  apiStubs.sendAssociation.mockReset();
+  apiStubs.sendAllAssociations.mockReset();
   apiStubs.facultyRecordReview.mockReset();
   apiStubs.institutionalStatus.mockResolvedValue({ institutional: null, final_verification: null });
   apiStubs.associations.mockResolvedValue({ associations: [], count: 0 });
 });
 
-describe('RecordDetailPage association send action', () => {
-  it('uploader sees one Send button per unresolved internal contributor', async () => {
+describe('RecordDetailPage association send action (exact rule: one bulk send, never self)', () => {
+  function pendingPayload(contributors: Record<string, unknown>[]) {
+    return { ...recordPayload(contributors), workflow_state: 'FACULTY_ASSOCIATION_PENDING' };
+  }
+
+  it('uploader sees exactly one Send button for all other internal contributors', async () => {
     apiStubs.facultyRecordStatus.mockResolvedValue(
-      recordPayload([contributor('ashwin'), contributor('rajashekar'), contributor('monika', { contributor_type: 'EXTERNAL', is_external: true, user_id: null, faculty_id: null })]),
+      pendingPayload([contributor('ashwin'), contributor('rajashekar'), contributor('monika', { contributor_type: 'EXTERNAL', is_external: true, user_id: null, faculty_id: null })]),
     );
     renderPage();
-    const buttons = await screen.findAllByRole('button', { name: /send association request/i });
-    expect(buttons).toHaveLength(2);
+    const buttons = await screen.findAllByRole('button', { name: /^Send Association Request$/ });
+    expect(buttons).toHaveLength(1);
+    expect(await screen.findByText(/You uploaded this patent, so you are automatically accepted/)).toBeInTheDocument();
   });
 
   it('non-uploader and HOD do not see the send button', async () => {
-    apiStubs.facultyRecordStatus.mockResolvedValue(recordPayload([contributor('ashwin')]));
+    apiStubs.facultyRecordStatus.mockResolvedValue(pendingPayload([contributor('ashwin')]));
     authState.user = { id: 'someone-else', role: 'faculty' };
     const { unmount } = renderPage();
     await screen.findByText('ashwin');
-    expect(screen.queryByRole('button', { name: /send association request/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Send Association Request$/ })).toBeNull();
     unmount();
     authState.user = { id: 'hod-1', role: 'hod_admin' };
     renderPage();
     await screen.findByText('ashwin');
-    expect(screen.queryByRole('button', { name: /send association request/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Send Association Request$/ })).toBeNull();
   });
 
-  it('self contributor never shows the button', async () => {
+  it('self contributor row shows auto-accepted, never a per-person button', async () => {
     apiStubs.facultyRecordStatus.mockResolvedValue(
-      recordPayload([contributor('myself', { name: 'Self Contributor', user_id: 'uploader-1', faculty_id: 'FAC-UP' })]),
+      pendingPayload([contributor('myself', { name: 'Self Contributor', user_id: 'uploader-1', faculty_id: 'FAC-UP' })]),
     );
     renderPage();
     await screen.findByText('Self Contributor');
-    expect(screen.queryByRole('button', { name: /send association request/i })).toBeNull();
+    expect(await screen.findByText(/Automatically accepted \(uploader\)/)).toBeInTheDocument();
+    // The single bulk action exists, but no per-contributor self button.
+    const buttons = await screen.findAllByRole('button', { name: /^Send Association Request$/ });
+    expect(buttons).toHaveLength(1);
   });
 
-  it('successful send shows confirmation and pending state', async () => {
+  it('button hidden once faculty association is no longer pending', async () => {
     apiStubs.facultyRecordStatus.mockResolvedValue(recordPayload([contributor('ashwin')]));
-    apiStubs.sendAssociation.mockResolvedValue({ id: 'assoc-1', status: 'pending' });
-    apiStubs.associations
-      .mockResolvedValueOnce({ associations: [], count: 0 })
-      .mockResolvedValue({ associations: [{ id: 'assoc-1', record_id: 'rec-1', recipient_id: 'user-ashwin', status: 'PENDING' }], count: 1 });
-    const user = userEvent.setup();
     renderPage();
-    const button = await screen.findByRole('button', { name: /send association request to/i });
-    await user.click(button);
-    expect(apiStubs.sendAssociation).toHaveBeenCalledWith('FAC-ashwin', expect.objectContaining({ record_id: 'rec-1' }));
-    await screen.findByText(/association request sent to/i);
-    await waitFor(() => expect(screen.getByText(/pending recipient decision/i)).toBeInTheDocument());
+    await screen.findByText('ashwin');
+    expect(screen.queryByRole('button', { name: /^Send Association Request$/ })).toBeNull();
   });
 
-  it('409 duplicate is adopted as sent, not an error', async () => {
-    apiStubs.facultyRecordStatus.mockResolvedValue(recordPayload([contributor('ashwin')]));
-    apiStubs.sendAssociation.mockRejectedValue(new FakeApiError(409, 'exists'));
+  it('successful send shows confirmation for other faculty', async () => {
+    apiStubs.facultyRecordStatus.mockResolvedValue(pendingPayload([contributor('ashwin')]));
+    apiStubs.sendAllAssociations.mockResolvedValue({ record_id: 'rec-1', created: ['user-ashwin'], already_pending: [], workflow_state: 'FACULTY_ASSOCIATION_PENDING' });
     const user = userEvent.setup();
     renderPage();
-    const button = await screen.findByRole('button', { name: /send association request to/i });
+    const button = await screen.findByRole('button', { name: /^Send Association Request$/ });
     await user.click(button);
-    await screen.findByText(/already exists.*showing as sent/i);
+    expect(apiStubs.sendAllAssociations).toHaveBeenCalledWith('rec-1');
+    await screen.findByText(/Association requests sent to 1 other faculty/);
+  });
+
+  it('409 means not-pending, surfaced without a misleading error', async () => {
+    apiStubs.facultyRecordStatus.mockResolvedValue(pendingPayload([contributor('ashwin')]));
+    apiStubs.sendAllAssociations.mockRejectedValue(new FakeApiError(409, 'exists'));
+    const user = userEvent.setup();
+    renderPage();
+    const button = await screen.findByRole('button', { name: /^Send Association Request$/ });
+    await user.click(button);
+    await screen.findByText(/only be sent while faculty association is pending/i);
     expect(screen.queryByText(/could not send/i)).toBeNull();
   });
 
   it('API failure shows a useful error', async () => {
-    apiStubs.facultyRecordStatus.mockResolvedValue(recordPayload([contributor('ashwin')]));
-    apiStubs.sendAssociation.mockRejectedValue(new FakeApiError(500, 'boom'));
+    apiStubs.facultyRecordStatus.mockResolvedValue(pendingPayload([contributor('ashwin')]));
+    apiStubs.sendAllAssociations.mockRejectedValue(new FakeApiError(500, 'boom'));
     const user = userEvent.setup();
     renderPage();
-    const button = await screen.findByRole('button', { name: /send association request to/i });
+    const button = await screen.findByRole('button', { name: /^Send Association Request$/ });
     await user.click(button);
-    await screen.findByText(/could not send request/i);
+    await screen.findByText(/could not send association requests/i);
   });
 
   it('grant date renders as a calendar date with no time component', async () => {
@@ -180,7 +191,7 @@ describe('RecordDetailPage association send action', () => {
     });
     renderPage();
     await screen.findByText('ashwin');
-    expect(screen.getByText('2024-10-22')).toBeInTheDocument();
+    expect(screen.getByText('22/10/2024')).toBeInTheDocument();
     expect(screen.queryByText(/T00:00:00/)).toBeNull();
   });
 });

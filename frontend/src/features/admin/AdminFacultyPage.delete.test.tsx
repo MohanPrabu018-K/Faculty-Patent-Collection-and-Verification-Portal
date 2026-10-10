@@ -80,13 +80,24 @@ describe('AdminFacultyPage delete flow (item 6)', () => {
     await waitFor(() => expect(apiStubs.adminFaculty.mock.calls.length).toBeGreaterThan(1));
   });
 
-  it('cancel leaves the account untouched', async () => {
-    const user = userEvent.setup();
+  it('cancel leaves the account untouched', async () => {    const user = userEvent.setup();
     renderPage();
     await screen.findByText('Deletable Faculty');
     await user.click(screen.getByRole('button', { name: 'Delete' }));
     await screen.findByText('Are you sure you want to delete this Faculty?');
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(apiStubs.adminDeleteFaculty).not.toHaveBeenCalled();
+  });
+
+  it('delete modal offers "Deactivate instead" which deactivates without deleting', async () => {
+    const user = userEvent.setup();
+    apiStubs.adminDeactivateFaculty.mockResolvedValue({ id: 'fac-1', status: 'inactive' });
+    renderPage();
+    await screen.findByText('Deletable Faculty');
+    await user.click(screen.getByRole('button', { name: 'Delete' }));
+    await screen.findByText('Are you sure you want to delete this Faculty?');
+    await user.click(screen.getByRole('button', { name: 'Deactivate instead' }));
+    await waitFor(() => expect(apiStubs.adminDeactivateFaculty).toHaveBeenCalledWith('fac-1'));
     expect(apiStubs.adminDeleteFaculty).not.toHaveBeenCalled();
   });
 
@@ -108,7 +119,7 @@ describe('AdminFacultyPage delete flow (item 6)', () => {
   it('duplicate-HOD 409 surfaces the required guidance message', async () => {
     const user = userEvent.setup();
     apiStubs.adminCreateFaculty.mockRejectedValue(
-      new Error('{"error":"DUPLICATE_HOD","message":"An HOD is already assigned to this department. Please update the existing HOD instead of creating a new one."}'),
+      new Error('{"error":"ACTIVE_HOD_EXISTS","message":"An active HOD already exists for this department."}'),
     );
     renderPage();
     await screen.findByText('Deletable Faculty');
@@ -117,7 +128,8 @@ describe('AdminFacultyPage delete flow (item 6)', () => {
     await user.type(screen.getByLabelText('Official email *'), 'hod2@example.test');
     await user.click(screen.getByRole('button', { name: 'Create' }));
     await waitFor(() => expect(notifyMock).toHaveBeenCalledWith(
-      'error', expect.stringContaining('already assigned to this department'),
+      'error', expect.stringContaining('active HOD already exists for this department'),
     ));
+    expect(notifyMock).not.toHaveBeenCalledWith('error', expect.stringContaining('ACTIVE_HOD_EXISTS'));
   });
 });

@@ -8,14 +8,16 @@ vi.mock('./client', () => ({
 }));
 
 describe('formatDateOnly', () => {
-  it('strips the time component from ISO datetimes', () => {
-    expect(formatDateOnly('2024-10-22T00:00:00')).toBe('2024-10-22');
-    expect(formatDateOnly('2024-10-22T00:00:00.000Z')).toBe('2024-10-22');
-    expect(formatDateOnly('2024-10-22T15:30:45+05:30')).toBe('2024-10-22');
+  it('renders DD/MM/YYYY and never an ISO timestamp', () => {
+    expect(formatDateOnly('2024-10-22T00:00:00')).toBe('22/10/2024');
+    expect(formatDateOnly('2024-10-22T00:00:00.000Z')).toBe('22/10/2024');
+    expect(formatDateOnly('2024-10-22T15:30:45+05:30')).toBe('22/10/2024');
+    expect(formatDateOnly('2024-10-22')).toBe('22/10/2024');
+    expect(formatDateOnly('22/10/2024')).toBe('22/10/2024');
   });
 
   it('passes date-only values through unchanged', () => {
-    expect(formatDateOnly('2024-10-22')).toBe('2024-10-22');
+    expect(formatDateOnly('22/10/2024')).toBe('22/10/2024');
   });
 
   it('returns the placeholder for empty values', () => {

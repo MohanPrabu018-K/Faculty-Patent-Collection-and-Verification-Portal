@@ -33,11 +33,21 @@ class WorkflowState(str, Enum):
     HOD_ASSOCIATION_ACCEPTED = "HOD_ASSOCIATION_ACCEPTED"
     FACULTY_APPROVED = "FACULTY_APPROVED"
     HOD_VERIFICATION_PENDING = "HOD_VERIFICATION_PENDING"
+    # Exact business workflow (uploader auto-accepted → explicit faculty
+    # association → multi-department HOD review → Super Admin grant).
+    # The uploader never receives a self-association request; HOD review
+    # requests are created only after ALL other internal faculty accept,
+    # one per represented department.
+    FACULTY_ASSOCIATION_PENDING = "FACULTY_ASSOCIATION_PENDING"
+    FACULTY_ASSOCIATION_COMPLETE = "FACULTY_ASSOCIATION_COMPLETE"
+    HOD_REVIEW_PENDING = "HOD_REVIEW_PENDING"
+    HOD_REVIEW_IN_PROGRESS = "HOD_REVIEW_IN_PROGRESS"
+    SUPER_ADMIN_GRANT_PENDING = "SUPER_ADMIN_GRANT_PENDING"
 
 
 # Allowed transitions. A key maps to the set of states it may transition into.
 _TRANSITIONS: dict[WorkflowState, set[WorkflowState]] = {
-    WorkflowState.UPLOADED: {WorkflowState.PROCESSING, WorkflowState.FAILED, WorkflowState.REJECTED, WorkflowState.HOD_ASSOCIATION_PENDING},
+    WorkflowState.UPLOADED: {WorkflowState.PROCESSING, WorkflowState.FAILED, WorkflowState.REJECTED, WorkflowState.HOD_ASSOCIATION_PENDING, WorkflowState.FACULTY_ASSOCIATION_PENDING},
     WorkflowState.PROCESSING: {
         WorkflowState.OCR_COMPLETED,
         WorkflowState.QR_DETECTED,
@@ -78,11 +88,8 @@ _TRANSITIONS: dict[WorkflowState, set[WorkflowState]] = {
     WorkflowState.DATA_CONFLICT: {WorkflowState.NEEDS_REVIEW, WorkflowState.VERIFICATION_PENDING},
     WorkflowState.IDENTITY_REVIEW: {WorkflowState.NEEDS_REVIEW, WorkflowState.IDENTIFIER_FOUND, WorkflowState.REJECTED},
     WorkflowState.CONTRIBUTOR_REVIEW: {WorkflowState.NEEDS_REVIEW, WorkflowState.IDENTIFIER_FOUND, WorkflowState.REJECTED},
-    WorkflowState.FACULTY_APPROVAL_PENDING: {WorkflowState.VERIFIED, WorkflowState.NEEDS_REVIEW, WorkflowState.REJECTED, WorkflowState.FACULTY_APPROVED, WorkflowState.HOD_VERIFICATION_PENDING, WorkflowState.HOD_ASSOCIATION_PENDING},
-    WorkflowState.FACULTY_APPROVED: {WorkflowState.HOD_VERIFICATION_PENDING, WorkflowState.NEEDS_REVIEW},
-    WorkflowState.HOD_ASSOCIATION_PENDING: {WorkflowState.HOD_ASSOCIATION_ACCEPTED, WorkflowState.NEEDS_REVIEW, WorkflowState.REJECTED},
-    WorkflowState.HOD_ASSOCIATION_ACCEPTED: {WorkflowState.FACULTY_APPROVAL_PENDING, WorkflowState.HOD_VERIFICATION_PENDING, WorkflowState.NEEDS_REVIEW},
-    WorkflowState.HOD_VERIFICATION_PENDING: {WorkflowState.VERIFIED, WorkflowState.NEEDS_REVIEW, WorkflowState.REJECTED},
+    WorkflowState.FACULTY_APPROVAL_PENDING: {WorkflowState.VERIFIED, WorkflowState.NEEDS_REVIEW, WorkflowState.REJECTED, WorkflowState.FACULTY_APPROVED, WorkflowState.HOD_VERIFICATION_PENDING, WorkflowState.HOD_ASSOCIATION_PENDING, WorkflowState.FACULTY_ASSOCIATION_PENDING, WorkflowState.FACULTY_ASSOCIATION_COMPLETE},
+    WorkflowState.FACULTY_APPROVED: {WorkflowState.HOD_VERIFICATION_PENDING, WorkflowState.NEEDS_REVIEW, WorkflowState.FACULTY_ASSOCIATION_COMPLETE},
     WorkflowState.DUPLICATE_REVIEW: {WorkflowState.IDENTIFIER_FOUND, WorkflowState.NEEDS_REVIEW, WorkflowState.REJECTED},
     WorkflowState.NEEDS_REVIEW: {
         WorkflowState.VERIFIED,
@@ -95,6 +102,59 @@ _TRANSITIONS: dict[WorkflowState, set[WorkflowState]] = {
     WorkflowState.GRANTED: set(),  # Terminal
     WorkflowState.REJECTED: set(),  # Terminal
     WorkflowState.FAILED: {WorkflowState.PROCESSING, WorkflowState.REJECTED},  # Retry allowed
+    # Exact business flow: uploader auto-accepted at upload; the uploader
+    # explicitly sends association requests to OTHER internal faculty;
+    # HOD review (one request per represented department) starts only after
+    # every required faculty acceptance; any HOD rejection ends REJECTED and
+    # all-HOD acceptance opens the Super Admin grant stage.
+    WorkflowState.FACULTY_ASSOCIATION_PENDING: {
+        WorkflowState.FACULTY_ASSOCIATION_COMPLETE,
+        WorkflowState.NEEDS_REVIEW,
+        WorkflowState.REJECTED,
+    },
+    # Legacy association-pending states normalize forward into the
+    # simplified flow (in-flight records keep their history; only the state
+    # pointer moves, audited at the call site).
+    WorkflowState.HOD_ASSOCIATION_PENDING: {
+        WorkflowState.HOD_ASSOCIATION_ACCEPTED,
+        WorkflowState.NEEDS_REVIEW,
+        WorkflowState.REJECTED,
+        WorkflowState.FACULTY_ASSOCIATION_PENDING,
+    },
+    WorkflowState.HOD_ASSOCIATION_ACCEPTED: {
+        WorkflowState.FACULTY_APPROVAL_PENDING,
+        WorkflowState.HOD_VERIFICATION_PENDING,
+        WorkflowState.NEEDS_REVIEW,
+        WorkflowState.FACULTY_ASSOCIATION_PENDING,
+        WorkflowState.FACULTY_ASSOCIATION_COMPLETE,
+    },
+    WorkflowState.HOD_VERIFICATION_PENDING: {
+        WorkflowState.VERIFIED,
+        WorkflowState.NEEDS_REVIEW,
+        WorkflowState.REJECTED,
+        WorkflowState.FACULTY_ASSOCIATION_COMPLETE,
+    },
+    WorkflowState.FACULTY_ASSOCIATION_COMPLETE: {
+        WorkflowState.HOD_REVIEW_PENDING,
+        WorkflowState.NEEDS_REVIEW,
+        WorkflowState.REJECTED,
+        WorkflowState.GRANTED,
+    },
+    WorkflowState.HOD_REVIEW_PENDING: {
+        WorkflowState.HOD_REVIEW_IN_PROGRESS,
+        WorkflowState.NEEDS_REVIEW,
+        WorkflowState.REJECTED,
+    },
+    WorkflowState.HOD_REVIEW_IN_PROGRESS: {
+        WorkflowState.SUPER_ADMIN_GRANT_PENDING,
+        WorkflowState.NEEDS_REVIEW,
+        WorkflowState.REJECTED,
+    },
+    WorkflowState.SUPER_ADMIN_GRANT_PENDING: {
+        WorkflowState.GRANTED,
+        WorkflowState.NEEDS_REVIEW,
+        WorkflowState.REJECTED,
+    },
 }
 
 
@@ -203,5 +263,10 @@ def describe_state(state: str | None) -> dict[str, Any]:
             WorkflowState.HOD_ASSOCIATION_ACCEPTED,
             WorkflowState.FACULTY_APPROVED,
             WorkflowState.HOD_VERIFICATION_PENDING,
+            WorkflowState.FACULTY_ASSOCIATION_PENDING,
+            WorkflowState.FACULTY_ASSOCIATION_COMPLETE,
+            WorkflowState.HOD_REVIEW_PENDING,
+            WorkflowState.HOD_REVIEW_IN_PROGRESS,
+            WorkflowState.SUPER_ADMIN_GRANT_PENDING,
         },
     }

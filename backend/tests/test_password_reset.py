@@ -23,6 +23,7 @@ from app.main import app
 from app.models.base import AuditLog, Notification, SecurityEvent, User
 
 GENERIC_MESSAGE = "If the email is registered, a password reset link has been sent."
+UNAVAILABLE_MESSAGE = "Password reset email is currently unavailable. Please contact the administrator."
 
 
 @pytest.fixture(scope="module")
@@ -108,7 +109,38 @@ def _plant_event(uid: str, token: str, hours_valid: float = 1.0):
     asyncio.run(_run())
 
 
-def test_forgot_registered_returns_generic_success_and_creates_event(client, temp_user):
+def _enable_fake_smtp(monkeypatch, captured=None, fail_send=False):
+    """Point the app at a fake SMTP transport (nothing is really sent)."""
+    import smtplib
+
+    from app.core.config import smtp_settings
+
+    class _FakeSMTP:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def starttls(self):
+            pass
+
+        def login(self, *args):
+            pass
+
+        def sendmail(self, from_email, to_email, msg):
+            if fail_send:
+                raise ConnectionError("smtp transport down")
+            if captured is not None:
+                captured.update({"from": from_email, "to": to_email, "msg": msg})
+
+        def quit(self):
+            pass
+
+    monkeypatch.setattr(smtp_settings, "smtp_enabled", True)
+    monkeypatch.setattr(smtp_settings, "smtp_host", "smtp.example.test")
+    monkeypatch.setattr(smtplib, "SMTP", _FakeSMTP)
+
+
+def test_forgot_registered_returns_generic_success_and_creates_event(client, temp_user, monkeypatch):
+    _enable_fake_smtp(monkeypatch)
     r = client.post("/api/v1/auth/forgot-password", json={"email": temp_user["email"]})
     assert r.status_code == 200, r.text
     assert r.json() == {"message": GENERIC_MESSAGE}
@@ -122,7 +154,8 @@ def test_forgot_registered_returns_generic_success_and_creates_event(client, tem
     assert "token" not in {k for k in details if k != "token_hash"}
 
 
-def test_forgot_unregistered_returns_identical_response(client):
+def test_forgot_unregistered_returns_identical_response(client, monkeypatch):
+    _enable_fake_smtp(monkeypatch)
     r = client.post("/api/v1/auth/forgot-password", json={"email": f"nobody.{uuid.uuid4().hex[:8]}@gmail.com"})
     assert r.status_code == 200, r.text
     assert r.json() == {"message": GENERIC_MESSAGE}
@@ -182,11 +215,12 @@ def test_old_password_fails_after_reset(client, temp_user):
     assert new.status_code == 200, new.text
 
 
-def test_smtp_disabled_reports_failure_but_keeps_generic_response(client, temp_user, monkeypatch):
-    """Honest behavior when email is unconfigured (current production state).
+def test_smtp_disabled_returns_honest_unavailable_for_any_email(client, temp_user, monkeypatch):
+    """BUG 1: never fake email success (current production state is SMTP-off).
 
-    No send is attempted, the FAILED audit row is written, and the caller
-    still receives the identical privacy-preserving message.
+    SMTP unconfigured -> 503 EMAIL_UNAVAILABLE with a clean message that is
+    IDENTICAL for registered and unregistered emails (privacy: no
+    enumeration), no reset token is minted, and SMTP is never contacted.
     """
     import smtplib
 
@@ -201,28 +235,30 @@ def test_smtp_disabled_reports_failure_but_keeps_generic_response(client, temp_u
     monkeypatch.setattr(smtplib, "SMTP", _boom)
     monkeypatch.setattr(smtplib, "SMTP_SSL", _boom)
 
+    for email in (temp_user["email"], f"nobody.{uuid.uuid4().hex[:8]}@gmail.com"):
+        r = client.post("/api/v1/auth/forgot-password", json={"email": email})
+        assert r.status_code == 503, r.text
+        body = r.json()
+        assert body["error"] == "EMAIL_UNAVAILABLE"
+        assert body["message"] == UNAVAILABLE_MESSAGE
+
+    # No token minted when delivery is impossible (nothing to retry with).
+    assert _events_for(temp_user["id"]) == []
+
+
+def test_smtp_send_failure_keeps_generic_response_with_valid_token(client, temp_user, monkeypatch):
+    """SMTP configured but transport fails: the minted token stays valid so
+    the user can retry; the privacy-preserving generic message is returned
+    (a per-user failure code would leak account existence)."""
+    _enable_fake_smtp(monkeypatch, fail_send=True)
+
     r = client.post("/api/v1/auth/forgot-password", json={"email": temp_user["email"]})
     assert r.status_code == 200, r.text
     assert r.json() == {"message": GENERIC_MESSAGE}
 
-    async def _check():
-        async with get_async_session_context() as db:
-            rows = (await db.execute(
-                select(AuditLog).where(
-                    AuditLog.action == "PASSWORD_RESET_EMAIL_FAILED",
-                    AuditLog.target_id == temp_user["id"],
-                )
-            )).scalars().all()
-            assert len(rows) >= 1
-            sent = (await db.execute(
-                select(AuditLog).where(
-                    AuditLog.action == "PASSWORD_RESET_EMAIL_SENT",
-                    AuditLog.target_id == temp_user["id"],
-                )
-            )).scalars().all()
-            assert sent == []
-
-    asyncio.run(_check())
+    events = _events_for(temp_user["id"])
+    assert len(events) == 1
+    assert (events[0].details or {}).get("used") is False
 
 
 def test_reset_link_format_uses_configured_frontend_url(client, temp_user, monkeypatch):

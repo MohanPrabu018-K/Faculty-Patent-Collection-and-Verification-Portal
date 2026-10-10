@@ -413,8 +413,11 @@ async def forgot_password(
     """
     Request a password reset token.
 
-    Always returns a success message regardless of whether the email exists,
-    to avoid leaking information about registered accounts.
+    Privacy: when email delivery is available, always returns the same
+    generic message regardless of whether the email exists, to avoid
+    leaking information about registered accounts. When SMTP is not
+    configured (delivery impossible), returns 503 EMAIL_UNAVAILABLE with
+    an honest message instead of fake success.
     """
     client_ip = request.client.host if request.client else "unknown"
 
@@ -436,6 +439,25 @@ async def forgot_password(
             content={
                 "error": "RATE_LIMIT_EXCEEDED",
                 "message": "Too many attempts. Please try again later.",
+            },
+        )
+
+    # BUG 1 (production hardening): never fake email success. When SMTP is
+    # not configured no email can be dispatched, so return an honest
+    # service-unavailable message INSTEAD of the generic "link has been sent"
+    # text. This branch runs before the user lookup and is identical for
+    # registered and unregistered emails, so account-enumeration privacy is
+    # preserved. No reset token is minted when delivery is impossible.
+    if not smtp_settings.smtp_enabled or not smtp_settings.smtp_host:
+        logger.info("password_reset_unavailable", reason="SMTP not configured")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "EMAIL_UNAVAILABLE",
+                "message": (
+                    "Password reset email is currently unavailable. "
+                    "Please contact the administrator."
+                ),
             },
         )
 

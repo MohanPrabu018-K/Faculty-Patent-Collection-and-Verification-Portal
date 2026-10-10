@@ -10,6 +10,7 @@ from app.core.config import app_settings, upload_settings
 from app.api.deps import get_current_user
 from app.core.exceptions import PortalError
 from app.core.database import get_async_session
+from app.services.export_renderers import api_date_only
 from app.models.base import (
     AssociationRequest,
     AuditLog,
@@ -566,11 +567,7 @@ async def my_ip_records(
                     if r.filing_date
                     else None
                 ),
-                "grant_date": (
-                    r.grant_date.isoformat()
-                    if r.grant_date
-                    else None
-                ),
+                "grant_date": api_date_only(r.grant_date),
                 "published_date": (
                     r.published_date.isoformat()
                     if r.published_date
@@ -856,11 +853,7 @@ async def get_record_status(
             if ip_record.filing_date
             else None
         ),
-        "grant_date": (
-            ip_record.grant_date.isoformat()
-            if ip_record.grant_date
-            else None
-        ),
+        "grant_date": api_date_only(ip_record.grant_date),
         "published_date": (
             ip_record.published_date.isoformat()
             if ip_record.published_date
@@ -1330,6 +1323,15 @@ async def request_association(
         "role",
         "faculty",
     )
+
+    # BUG 5: deactivated accounts cannot initiate new workflow actions.
+    _requester = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if _requester is None or not _requester.is_active:
+        raise PortalError(
+            message="Deactivated accounts cannot send association requests",
+            error_code="AUTHORIZATION_ERROR",
+            status_code=403,
+        )
 
     # Verify record and access
     query = (

@@ -13,6 +13,7 @@ from app.core.config import upload_settings
 from app.core.database import get_async_session
 from app.core.exceptions import NotFoundError, PortalError
 from app.core.logging import log_audit
+from app.services.export_renderers import api_date_only
 from app.models.base import IpRecord
 
 logger = structlog.get_logger()
@@ -39,7 +40,7 @@ def _record_to_dict(record: IpRecord) -> dict:
         "designation_id": record.designation_id,
         "master_ip_id": record.master_ip_id,
         "filing_date": record.filing_date.isoformat() if record.filing_date else None,
-        "grant_date": record.grant_date.isoformat() if record.grant_date else None,
+        "grant_date": api_date_only(record.grant_date),
         "published_date": record.published_date.isoformat() if record.published_date else None,
         "created_at": record.created_at.isoformat() if record.created_at else None,
         "updated_at": record.updated_at.isoformat() if record.updated_at else None,

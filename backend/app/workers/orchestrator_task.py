@@ -62,6 +62,11 @@ def _persist_orchestrator_result(ip_record_id: str, result):
         ip_record = session.execute(select(IpRecord).where(IpRecord.id == ip_record_id)).scalar_one_or_none()
         if not ip_record:
             return
+        # Entry state BEFORE agent updates: fresh uploads start UPLOADED, and
+        # the new faculty/HOD states are reachable from there. Deriving from
+        # the agent-mutated state instead would strand records, because
+        # nothing transitions out of NEEDS_REVIEW into the faculty stage.
+        entry_state = ip_record.workflow_state or "UPLOADED"
         _update_ip_record_from_agents(ip_record, result)
         _create_contributors(ip_record, result)
         _create_or_link_master_record(ip_record, result)
@@ -70,16 +75,36 @@ def _persist_orchestrator_result(ip_record_id: str, result):
         _create_final_verification_attempt(ip_record, result)
         _create_duplicate_cases(ip_record, result)
         _create_conflict_cases(ip_record, result)
-        # Staged HOD association (items 2-4): auto-dispatch runs before the
-        # workflow derivation so a live HOD request steers the state machine.
-        # _dispatch opens its own session; only the returned flag is used here.
-        hod_stage = _dispatch_hod_association(ip_record, result)
-        if hod_stage and (ip_record.workflow_state or "UPLOADED") in _HOD_STAGE_ENTRY_STATES | {"FACULTY_APPROVAL_PENDING"}:
+        # Simplified business workflow: the pipeline NEVER creates HOD review
+        # requests. Blocking duplicate/conflict/identity signals keep the
+        # legacy derivation; otherwise the uploader is automatically accepted
+        # and the record waits for their explicit Send Association Request
+        # when OTHER internal faculty exist. With no faculty stage needed,
+        # the record completes immediately when identifier and processing
+        # allow it (grant-eligible without any human association step).
+        if _pipeline_has_blockers(result):
+            ip_record.workflow_state = _derive_workflow_state(ip_record, result)
+        else:
             from app.services.workflow import advance_through
 
-            ip_record.workflow_state = advance_through(ip_record.workflow_state, "HOD_ASSOCIATION_PENDING")
-        else:
-            ip_record.workflow_state = _derive_workflow_state(ip_record, result)
+            if _other_internal_user_ids_sync(session, ip_record):
+                ip_record.workflow_state = advance_through(
+                    entry_state, "FACULTY_ASSOCIATION_PENDING"
+                )
+            else:
+                identifier = (
+                    ip_record.patent_number or ip_record.application_number
+                    or ip_record.design_number or ip_record.serial_number
+                )
+                if identifier:
+                    ip_record.workflow_state = advance_through(
+                        entry_state, "FACULTY_ASSOCIATION_COMPLETE"
+                    )
+                    ip_record.verification_status = "VERIFIED"
+                else:
+                    ip_record.workflow_state = advance_through(
+                        entry_state, "FACULTY_ASSOCIATION_PENDING"
+                    )
         ip_record.processing_status = _map_overall_status(result.overall_status)
         ip_record.updated_at = datetime.now(timezone.utc)
         _capture_profile_snapshot(ip_record)
@@ -89,6 +114,40 @@ def _persist_orchestrator_result(ip_record_id: str, result):
         raise
     finally:
         session.close()
+
+
+def _pipeline_has_blockers(result) -> bool:
+    """True when duplicate/conflict/identity signals must stop the workflow."""
+    return any(
+        a.get("agent_name") in (
+            "DuplicateDetectionAgent", "ConflictResolutionAgent",
+            "FacultyIdentityResolutionAgent",
+        ) and a.get("conflicts")
+        for a in result.agent_outputs or []
+    )
+
+
+def _other_internal_user_ids_sync(session, ip_record) -> list[str]:
+    """OTHER internal faculty for a record (uploader excluded, HODs excluded).
+
+    Sync variant of the exact business rule for the pipeline persist step.
+    """
+    rows = session.execute(
+        select(IpContributor.user_id).where(
+            IpContributor.ip_record_id == ip_record.id,
+            IpContributor.is_external.is_(False),
+            IpContributor.user_id.is_not(None),
+            IpContributor.user_id != ip_record.uploader_id,
+        )
+    ).scalars().all()
+    ids = sorted({uid for uid in rows if uid})
+    if not ids:
+        return []
+    users = session.execute(select(User).where(User.id.in_(ids))).scalars().all()
+    return sorted(
+        u.id for u in users
+        if u.is_active and u.role != "hod_admin" and u.id != ip_record.uploader_id
+    )
 
 
 def _enum_safe_verification_status(status: str | None) -> str:
@@ -119,6 +178,21 @@ def _collapse_value(value):
     if isinstance(value, dict):
         return value.get("value")
     return value
+
+
+def _as_grant_date(value):
+    """BUG 7: coerce a pipeline grant-date value to a calendar date.
+
+    The grant_date columns are DATE (migration 009): datetimes are
+    truncated to their calendar date, dates pass through, and anything
+    else (bare years, strings) is rejected so malformed values can never
+    reach the column.
+    """
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return None
 
 
 def _coerce_record_datetime(value):
@@ -185,10 +259,15 @@ def _update_ip_record_from_agents(ip_record, result):
                         # would destroy evidence instead of resolving anything.
                         setattr(ip_record, key, value)
                 for key in ("filing_date", "grant_date", "published_date"):
-                    # DateTime columns: coerce safely (Bug 9). A bare year or
-                    # unparseable value is skipped, never persisted.
+                    # BUG 7: grant_date is a DATE column (migration 009) —
+                    # persist the calendar date, never a timestamp. A bare
+                    # year or unparseable value is skipped, never persisted.
                     value = _coerce_record_datetime(_collapse_value(extracted_data.get(key)))
                     if value is not None:
+                        if key == "grant_date":
+                            value = _as_grant_date(value)
+                            if value is None:
+                                continue
                         setattr(ip_record, key, value)
                 inventors = _collapse_value(extracted_data.get("inventors"))
                 if inventors:
@@ -749,208 +828,6 @@ def _create_or_link_master_record(ip_record, result):
         session.close()
 
 
-_HOD_STAGE_ENTRY_STATES = frozenset({
-    "UPLOADED",
-    "PROCESSING",
-    "OCR_COMPLETED",
-    "QR_DETECTED",
-    "IDENTIFIER_FOUND",
-    "VERIFICATION_PENDING",
-    "VERIFICATION_REQUIRED",
-    "EXTERNAL_VERIFICATION_FAILURE",
-    "NEEDS_REVIEW",
-})
-
-
-def _dispatch_hod_association(ip_record, result) -> bool:
-    """Auto-create the HOD-stage association request for a matched HOD.
-
-    Staged workflow (items 2-4): when the document names an HOD who matches
-    an active hod_admin in the record's department, the pipeline sends that
-    HOD an association request first. Faculty requests follow only after the
-    HOD accepts. Returns True when a live unaccepted HOD-stage request exists
-    afterwards (newly created or pre-existing).
-
-    Idempotent (skips when any live request already covers the pair),
-    best-effort (never fails the pipeline), and human-gated (the HOD must
-    still explicitly accept; nothing is auto-approved). Must only be called
-    from synchronous contexts (it runs its own event loop for matching).
-    """
-    import asyncio as _asyncio
-
-    from sqlalchemy import or_ as _or
-
-    from app.models.base import AssociationRequest as _AssocRequest
-
-    session = get_session()
-    try:
-        hod_name = None
-        for agent_output in result.agent_outputs or []:
-            if agent_output.get("agent_name") != "OCRExtractionAgent":
-                continue
-            hod_name = _collapse_value((agent_output.get("extracted_data") or {}).get("hod_name"))
-            if hod_name:
-                break
-        if not hod_name or not isinstance(hod_name, str):
-            return _live_hod_request_exists(session, ip_record)
-
-        from app.services.identity_resolution import resolve_hod_identity
-
-        match = _asyncio.run(resolve_hod_identity(hod_name))
-        best = (match.best_match if match else None)
-        if not best:
-            return False
-        try:
-            confidence = float(best.overall_confidence or 0.0)
-        except (TypeError, ValueError):
-            return False
-        if confidence < 0.4:
-            return False
-        hod_user_id = best.user_id
-        if not hod_user_id:
-            return False
-        hod = session.execute(select(User).where(User.id == hod_user_id)).scalar_one_or_none()
-        if hod is None or not hod.is_active or hod.role != "hod_admin":
-            return False
-        if ip_record.department_id and hod.department_id != ip_record.department_id:
-            return False
-        if hod_user_id == ip_record.uploader_id:
-            return False
-
-        if _live_request_exists(session, ip_record, ip_record.uploader_id, hod_user_id):
-            return _live_hod_request_exists(session, ip_record)
-        if _live_request_exists(session, ip_record, hod_user_id, ip_record.uploader_id):
-            return _live_hod_request_exists(session, ip_record)
-
-        assoc = _AssocRequest(
-            id=str(uuid.uuid4()),
-            ip_record_id=ip_record.id,
-            master_ip_id=ip_record.master_ip_id,
-            requesting_faculty_id=ip_record.uploader_id,
-            target_faculty_id=hod_user_id,
-            requester_id=ip_record.uploader_id,
-            recipient_id=hod_user_id,
-            reason="HOD association: patent names this HOD; acceptance required before faculty stage",
-            status="PENDING",
-        )
-        session.add(assoc)
-        session.commit()
-
-        try:
-            from app.services.notifications import (
-                NotificationPriority,
-                NotificationType,
-                get_notification_service,
-            )
-
-            async def _notify():
-                await get_notification_service().create_notification(
-                    user_id=hod_user_id,
-                    notification_type=NotificationType.HOD_ASSOCIATION_REQUEST,
-                    title="HOD association request",
-                    message="A patent naming you as HOD needs your association acceptance before faculty review.",
-                    priority=NotificationPriority.HIGH,
-                    related_entity_type="association_request",
-                    related_entity_id=assoc.id,
-                    action_url="/hod/associations",
-                    action_label="Review request",
-                    metadata={"request_id": assoc.id, "record_id": ip_record.id},
-                )
-
-            _asyncio.run(_notify())
-        except Exception:
-            logger.warning("hod_association_notification_failed", association_id=assoc.id)
-
-        try:
-            from app.core.logging import log_audit
-
-            log_audit(
-                actor=ip_record.uploader_id or "system",
-                action="HOD_ASSOCIATION_REQUESTED",
-                target_type="association_request",
-                target_id=assoc.id,
-                status="pending",
-                after={"record_id": ip_record.id, "hod_user_id": hod_user_id},
-            )
-        except Exception:
-            pass
-        return True
-    except Exception as exc:
-        try:
-            session.rollback()
-        except Exception:
-            pass
-        logger.warning("hod_association_dispatch_failed", ip_record_id=getattr(ip_record, "id", None), error=str(exc))
-        return False
-    finally:
-        session.close()
-
-
-def _live_request_exists(session, ip_record, requester_id, target_id) -> bool:
-    """Any live (unresolved, non-terminal) request between a pair on a record."""
-    from sqlalchemy import or_ as _or
-
-    from app.models.base import AssociationRequest as _AssocRequest
-
-    scope = _AssocRequest.ip_record_id == ip_record.id
-    if getattr(ip_record, "master_ip_id", None):
-        scope = _or(scope, _AssocRequest.master_ip_id == ip_record.master_ip_id)
-    pair = _or(
-        _or(
-            _AssocRequest.requesting_faculty_id == requester_id,
-            _AssocRequest.requester_id == requester_id,
-        )
-        & _or(
-            _AssocRequest.target_faculty_id == target_id,
-            _AssocRequest.recipient_id == target_id,
-        ),
-        _or(
-            _AssocRequest.requesting_faculty_id == target_id,
-            _AssocRequest.requester_id == target_id,
-        )
-        & _or(
-            _AssocRequest.target_faculty_id == requester_id,
-            _AssocRequest.recipient_id == requester_id,
-        ),
-    )
-    hit = session.execute(
-        select(_AssocRequest).where(
-            pair,
-            scope,
-            _AssocRequest.status.in_(("PENDING", "CLARIFICATION_REQUESTED", "ADMIN_REVIEW", "ACCEPTED", "APPROVED")),
-        ).limit(1)
-    ).scalar_one_or_none()
-    return hit is not None
-
-
-def _live_hod_request_exists(session, ip_record) -> bool:
-    """A live unaccepted HOD-stage request (target is an active hod_admin)."""
-    from app.models.base import AssociationRequest as _AssocRequest
-
-    scope = _AssocRequest.ip_record_id == ip_record.id
-    if getattr(ip_record, "master_ip_id", None):
-        from sqlalchemy import or_ as _or
-
-        scope = _or(scope, _AssocRequest.master_ip_id == ip_record.master_ip_id)
-    rows = session.execute(
-        select(_AssocRequest).where(
-            scope,
-            _AssocRequest.status.in_(("PENDING", "CLARIFICATION_REQUESTED", "ADMIN_REVIEW")),
-        )
-    ).scalars().all()
-    if not rows:
-        return False
-    hod_ids = {
-        u.id
-        for u in session.execute(
-            select(User).where(User.role == "hod_admin", User.is_active.is_(True))
-        ).scalars().all()
-    }
-    for req in rows:
-        targets = {req.target_faculty_id, req.recipient_id} - {None}
-        if targets & hod_ids:
-            return True
-    return False
 
 
 def _capture_profile_snapshot(ip_record):

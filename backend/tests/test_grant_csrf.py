@@ -131,16 +131,26 @@ def test_grant_with_csrf_pair_but_no_auth_is_unauthorized(client):
 def test_grant_requires_verified_status(client, temp_unverified_record):
     # Valid super-admin Bearer passes CSRF; a non-VERIFIED record must 422
     # without any state change (proves the business rule, not just wiring).
-    r = client.post(f"/api/v1/admin/ip-records/{temp_unverified_record}/grant", headers=_h(client, ADMIN), json={})
+    r = client.post(f"/api/v1/admin/ip-records/{temp_unverified_record}/grant", headers=_h(client, ADMIN), json={"confirm": True})
     assert r.status_code == 422, r.text
     assert r.json().get("error") == "GRANT_NOT_ELIGIBLE"
+
+
+def test_grant_requires_explicit_confirmation(client, temp_verified_record):
+    r = client.post(
+        f"/api/v1/admin/ip-records/{temp_verified_record}/grant",
+        headers=_h(client, ADMIN),
+        json={},
+    )
+    assert r.status_code == 422, r.text
+    assert r.json().get("error") == "GRANT_CONFIRMATION_REQUIRED"
 
 
 def test_grant_succeeds_with_valid_session(client, temp_verified_record):
     r = client.post(
         f"/api/v1/admin/ip-records/{temp_verified_record}/grant",
         headers=_h(client, ADMIN),
-        json={},
+        json={"confirm": True},
     )
     assert r.status_code == 200, r.text
     body = r.json()

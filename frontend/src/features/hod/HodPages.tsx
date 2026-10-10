@@ -4,7 +4,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import { api } from '../../api/client';
 import {
   SectionCard, StatCard, StatusBadge, ErrorBlock, EmptyState,
-  Toolbar, TableWrap, Pagination, Modal, formatDateTime, formatDate, display, docName, personName,
+  Toolbar, TableWrap, Pagination, Modal, formatDateTime, formatDate, formatDateOnly, display, docName, personName,
 } from '../../components/ui';
 import { useToast } from '../../stores/toast';
 import { useDebounce } from '../../hooks/useDebounce';
@@ -106,15 +106,14 @@ export function HodFacultyPage() {
 /* --------------------------------- Documents ------------------------------- */
 
 export function HodDocumentsPage() {
-  const client = useQueryClient();
-  const { notify } = useToast();
+  // HOD is a READ-ONLY institutional review/visibility role: this page
+  // lists department documents with full detail links. There are no HOD
+  // approval actions anywhere — faculty association and Super Admin grant
+  // are the only human gates.
   const [page, setPage] = useState(1);
   const [status, setStatus] = useState('');
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebounce(search, 400);
-  const [verifyTarget, setVerifyTarget] = useState<Record<string, unknown> | null>(null);
-  const [verifyRemarks, setVerifyRemarks] = useState('');
-  const [verifyEvidenceRef, setVerifyEvidenceRef] = useState('');
 
   const params = useMemo(() => {
     const q = new URLSearchParams({ page: String(page), per_page: '20' });
@@ -124,43 +123,6 @@ export function HodDocumentsPage() {
   }, [page, status, debouncedSearch]);
 
   const { data, isLoading, error, isFetching, refetch } = useQuery({ queryKey: ['hod-documents', params], queryFn: ({ signal }) => api.hodDocuments(params, signal), placeholderData: keepPreviousData });
-
-  const verifyMutation = useMutation({
-    mutationFn: ({ recordId, decision, remarks, evidenceRef }: { recordId: string; decision: 'verify' | 'reject' | 'clarification'; remarks?: string; evidenceRef?: string }) =>
-      api.institutionalVerify(recordId, { decision, remarks, evidence_ref: evidenceRef }),
-    onSuccess: async (result) => {
-      notify('success', `Institutional verification recorded: ${result.decision}. Final status: ${result.final_verification_status}`);
-      setVerifyTarget(null);
-      setVerifyRemarks('');
-      setVerifyEvidenceRef('');
-      await Promise.all([
-        client.invalidateQueries({ queryKey: ['hod-documents'] }),
-        client.invalidateQueries({ queryKey: ['hod-dashboard'] }),
-      ]);
-    },
-    onError: (e) => notify('error', e instanceof Error ? e.message : 'Verification failed'),
-  });
-
-  // Bug 3: when the HOD opens the verify dialog, load the record's
-  // outstanding internal approvals. "Confirm Verified" stays disabled while
-  // acceptance is pending (the backend rejects verify with 409 regardless).
-  const verifyRecordId = verifyTarget ? String(verifyTarget.id) : '';
-  const verifyEligibility = useQuery({
-    queryKey: ['hod-verify-eligibility', verifyRecordId],
-    queryFn: () => api.institutionalStatus(verifyRecordId),
-    enabled: Boolean(verifyRecordId),
-    staleTime: 30 * 1000,
-  });
-  const pendingApprovals = Array.isArray(verifyEligibility.data?.pending_approvals)
-    ? (verifyEligibility.data?.pending_approvals as string[])
-    : [];
-  const verifyBlocked = pendingApprovals.length > 0;
-  // Staged workflow: the record may additionally wait on HOD association
-  // acceptance itself. Confirm is enabled only when neither gate blocks.
-  const hodAssoc = (verifyEligibility.data?.hod_association ?? null) as Record<string, unknown> | null;
-  const hodAssocStatus = typeof hodAssoc?.status === 'string' ? hodAssoc.status : null;
-  const hodStageBlocked = hodAssocStatus !== null && !['ACCEPTED', 'APPROVED'].includes(hodAssocStatus);
-  const hodAssocName = typeof hodAssoc?.hod_name === 'string' && hodAssoc.hod_name ? hodAssoc.hod_name : null;
 
   const docs = data?.documents ?? [];
 
@@ -207,7 +169,7 @@ export function HodDocumentsPage() {
                   </td>
                   <td>{display(d.faculty_name)}<div className="muted">{display(d.faculty_id)}</div></td>
                   <td>{display(d.ip_type)}</td>
-                  <td>{d.grant_date ? formatDate(d.grant_date) : '—'}</td>
+                  <td>{d.grant_date ? formatDateOnly(d.grant_date) : '—'}</td>
                   <td>{formatDate(d.created_at)}</td>
                   <td><StatusBadge value={String(d.processing_status || 'UNKNOWN')} /></td>
                   <td><StatusBadge value={String(d.verification_status || 'UNKNOWN')} /></td>
@@ -221,11 +183,6 @@ export function HodDocumentsPage() {
                   <td>
                     <div className="btn-row">
                       <Link className="link" to={`/faculty/records/${d.id}`}>View</Link>
-                      {String(d.verification_status) !== 'VERIFIED' && (
-                        <button className="btn btn-sm btn-primary" onClick={() => { setVerifyTarget(d); setVerifyRemarks(''); setVerifyEvidenceRef(''); }}>
-                          Manual Verify
-                        </button>
-                      )}
                     </div>
                   </td>
                 </tr>
@@ -237,65 +194,6 @@ export function HodDocumentsPage() {
       )}
       <Pagination page={page} totalPages={data?.total_pages ?? 1} onChange={setPage} disabled={isFetching} />
 
-      {verifyTarget && (
-        <Modal
-          title="HOD Manual Official Verification"
-          onClose={() => { setVerifyTarget(null); setVerifyRemarks(''); setVerifyEvidenceRef(''); }}
-          footer={
-            <>
-              <button className="btn btn-secondary" onClick={() => { setVerifyTarget(null); setVerifyRemarks(''); setVerifyEvidenceRef(''); }}>Cancel</button>
-              <button className="btn btn-secondary" disabled={verifyMutation.isPending} onClick={() => verifyMutation.mutate({ recordId: String(verifyTarget.id), decision: 'reject', remarks: verifyRemarks || undefined, evidenceRef: verifyEvidenceRef || undefined })}>
-                {verifyMutation.isPending ? 'Saving…' : 'Reject'}
-              </button>
-              <button className="btn btn-primary" disabled={verifyMutation.isPending || verifyBlocked || hodStageBlocked} onClick={() => verifyMutation.mutate({ recordId: String(verifyTarget.id), decision: 'verify', remarks: verifyRemarks || undefined, evidenceRef: verifyEvidenceRef || undefined })}>
-                {verifyMutation.isPending ? 'Saving…' : 'Confirm Verified'}
-              </button>
-            </>
-          }
-        >
-          <div className="stack">
-            {hodStageBlocked ? (
-              <div className="alert alert-error" role="alert">
-                HOD association acceptance is still pending
-                {hodAssocName ? ` (awaiting ${hodAssocName})` : ''}. Manual verification unlocks after the HOD accepts.
-              </div>
-            ) : null}
-            {verifyBlocked ? (
-              <div className="alert alert-error" role="alert">
-                Verification is blocked until required internal faculty acceptance is recorded
-                ({pendingApprovals.length} pending). The “Confirm Verified” action is disabled.
-              </div>
-            ) : null}
-            <div className="alert alert-info" style={{ background: '#eef3fb', color: 'var(--primary)', border: '1px solid #cdd8ea' }}>
-              <strong>Manual Official Verification</strong>
-              <p style={{ margin: '6px 0 0', fontSize: 13 }}>
-                By clicking "Confirm Verified", you certify that you have manually checked this record against the official IP portal
-                and the submitted details match. This is an institutional verification — not an automated IP India verification.
-              </p>
-            </div>
-            <div className="detail-field">
-              <span>Record</span>
-              <strong>{display(verifyTarget.title || verifyTarget.patent_number || verifyTarget.design_number || verifyTarget.id)}</strong>
-            </div>
-            <div className="detail-field">
-              <span>Faculty</span>
-              <strong>{display(verifyTarget.faculty_name)}</strong>
-            </div>
-            <div className="detail-field">
-              <span>Current verification status</span>
-              <strong><StatusBadge value={String(verifyTarget.verification_status || 'UNKNOWN')} /></strong>
-            </div>
-            <label className="field">
-              <span>Remarks (optional)</span>
-              <textarea className="toolbar-input" rows={3} placeholder="e.g. Checked IP India portal on 2025-01-15, patent number matches" value={verifyRemarks} onChange={(e) => setVerifyRemarks(e.target.value)} />
-            </label>
-            <label className="field">
-              <span>Evidence reference (optional)</span>
-              <input className="toolbar-input" placeholder="e.g. IP India screenshot URL or reference number" value={verifyEvidenceRef} onChange={(e) => setVerifyEvidenceRef(e.target.value)} />
-            </label>
-          </div>
-        </Modal>
-      )}
     </SectionCard>
   );
 }

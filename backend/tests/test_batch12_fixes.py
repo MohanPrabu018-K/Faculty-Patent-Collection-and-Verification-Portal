@@ -418,7 +418,7 @@ class TestHodManualVerifyAndGrantVisibility:
             assert v.status_code == 200, v.text
             assert v.json()["final_verification_status"] == "VERIFIED"
 
-            g = client.post(f"/api/v1/admin/ip-records/{rid}/grant", json={},
+            g = client.post(f"/api/v1/admin/ip-records/{rid}/grant", json={"confirm": True},
                             headers=_admin_headers(client))
             assert g.status_code == 200, g.text
             assert g.json()["workflow_state"] == "GRANTED"

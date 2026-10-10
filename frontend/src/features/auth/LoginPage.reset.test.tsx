@@ -54,8 +54,22 @@ describe('LoginPage forgot/reset views (Bug 3: reset-link flow)', () => {
     await screen.findByText(/If the email is registered/);
   });
 
-  it('forgot view exposes no manual token entry', async () => {
+  it('forgot view shows the honest unavailable message on 503, never fake success', async () => {
     const user = userEvent.setup();
+    apiStubs.forgotPassword.mockRejectedValue(
+      new Error('{"error":"EMAIL_UNAVAILABLE","message":"Password reset email is currently unavailable. Please contact the administrator."}'),
+    );
+    renderPage();
+    await user.click(screen.getByRole('button', { name: /Forgot password/ }));
+    await user.type(screen.getByLabelText('Email'), 'faculty@example.edu');
+    await user.click(screen.getByRole('button', { name: /Send reset link/ }));
+    await screen.findByText(/Password reset email is currently unavailable/);
+    expect(screen.queryByText(/If the email is registered/)).toBeNull();
+    expect(screen.queryByText(/EMAIL_UNAVAILABLE/)).toBeNull();
+    expect(screen.queryByText(/"error"/)).toBeNull();
+  });
+
+  it('forgot view exposes no manual token entry', async () => {    const user = userEvent.setup();
     renderPage();
     await user.click(screen.getByRole('button', { name: /Forgot password/ }));
     expect(screen.queryByText(/Already have a reset token/)).toBeNull();
@@ -128,6 +142,20 @@ describe('friendlyAuthError (Bug 3: no raw JSON in UI)', () => {
       new Error('{"error":"RATE_LIMIT_EXCEEDED","message":"Too many attempts. Please try again later."}'),
       'fallback',
     )).toMatch(/Too many attempts/);
+  });
+
+  it('maps SMTP-unavailable to the honest message, never raw JSON or fake success', () => {
+    expect(friendlyAuthError(
+      new Error('{"error":"EMAIL_UNAVAILABLE","message":"Password reset email is currently unavailable. Please contact the administrator.","details":{}}'),
+      'fallback',
+    )).toBe('Password reset email is currently unavailable. Please contact the administrator.');
+  });
+
+  it('maps FastAPI validation envelopes to friendly text, never raw JSON', () => {
+    expect(friendlyAuthError(
+      new Error('{"detail":[{"type":"value_error","loc":["body","email"],"msg":"value is not a valid email address","input":"x","ctx":{"reason":"bad"}}]}'),
+      'fallback',
+    )).toBe('Please enter a valid email address.');
   });
 
   it('passes through safe backend messages and never emits raw JSON', () => {

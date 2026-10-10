@@ -34,17 +34,28 @@ ALL_FIELD_KEYS = set(FIELDNAMES)
 
 
 def _date_only(value: Any) -> str:
-    """Format a stored datetime as a calendar date (YYYY-MM-DD) for display.
+    """Format a stored date/datetime as a calendar date (YYYY-MM-DD).
 
-    Grant dates are stored as midnight datetimes; exports must show the date
-    without a time component. The underlying value is untouched — this is
-    presentation formatting only.
+    Grant dates are stored as DATE (migration 009); other date fields may
+    still be datetimes. Exports must show the date without a time
+    component. The underlying value is untouched — this is presentation
+    formatting only.
     """
     if value is None or value == "":
         return ""
     text = value.isoformat() if hasattr(value, "isoformat") else str(value)
     match = re.match(r"^(\d{4}-\d{2}-\d{2})", text)
     return match.group(1) if match else text
+
+
+def api_date_only(value: Any) -> str | None:
+    """Date-only API representation (YYYY-MM-DD) or None when missing.
+
+    Shared by API serializers so grant dates never leak ISO timestamps,
+    regardless of DATE vs TIMESTAMP storage.
+    """
+    text = _date_only(value)
+    return text or None
 
 
 def _row_from_record(record: Any) -> dict[str, str]:
@@ -57,7 +68,7 @@ def _row_from_record(record: Any) -> dict[str, str]:
         "application_number": record.application_number or "",
         "title": record.title or "",
         "grant_date": _date_only(getattr(record, "grant_date", None)),
-        "filing_date": record.filing_date.isoformat() if getattr(record, "filing_date", None) else "",
+        "filing_date": _date_only(getattr(record, "filing_date", None)),
         "applicant": getattr(record, "applicant", None) or getattr(record, "patentee", None) or "",
         "patentee": getattr(record, "patentee", None) or "",
         "verification_status": record.verification_status or "",

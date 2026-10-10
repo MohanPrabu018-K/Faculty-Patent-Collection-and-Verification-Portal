@@ -43,17 +43,18 @@ export const MISSING_RESET_LINK_MESSAGE =
   'Your password reset link is missing or invalid. Please request a new password reset email.';
 
 /**
- * Map reset/forgot failures to clean user-facing text.
+ * Map login/forgot/reset failures to clean user-facing text.
  *
- * The backend keeps structured JSON internally ({error, message}); the UI
- * must never render that wrapper. Known error codes map to friendly copy;
- * any other backend-provided human message passes through (backend messages
- * never contain tokens); otherwise a generic message is shown.
+ * The backend keeps structured JSON internally ({error, message} or FastAPI
+ * {detail: [...]} validation envelopes); the UI must never render those
+ * wrappers. Known error codes map to friendly copy; any other
+ * backend-provided human message passes through (backend messages never
+ * contain tokens); otherwise a generic message is shown.
  */
 export function friendlyAuthError(err: unknown, fallback: string): string {
   if (err instanceof Error) {
     const text = err.message.trim();
-    if (text.startsWith('{')) {
+    if (text.startsWith('{') || text.startsWith('[')) {
       try {
         const parsed: unknown = JSON.parse(text);
         const message =
@@ -67,7 +68,24 @@ export function friendlyAuthError(err: unknown, fallback: string): string {
           if (/too many attempts/i.test(message)) {
             return 'Too many attempts. Please try again later.';
           }
+          // BUG 1: SMTP-unavailable must surface honestly, never as raw JSON
+          // and never as a fake "email sent" success.
+          if (/password reset email is currently unavailable|email_unavailable/i.test(message)) {
+            return 'Password reset email is currently unavailable. Please contact the administrator.';
+          }
           return message;
+        }
+        // FastAPI request-validation envelope: {detail: [{msg, ...}, ...]}.
+        const detail = parsed && typeof parsed === 'object'
+          ? (parsed as Record<string, unknown>).detail
+          : null;
+        if (Array.isArray(detail) && detail.length > 0) {
+          const first = detail[0] as Record<string, unknown>;
+          const msg = typeof first?.msg === 'string' ? first.msg : null;
+          if (msg && /valid email address/i.test(msg)) {
+            return 'Please enter a valid email address.';
+          }
+          if (msg) return `Invalid request: ${msg}`;
         }
       } catch {
         /* fall through to generic */
@@ -116,7 +134,8 @@ export function LoginPage() {
       } else if (message.includes('Account is deactivated')) {
         setError('Your account has been deactivated. Please contact an administrator.');
       } else {
-        setError(message);
+        // Never render raw backend JSON (e.g. FastAPI validation envelopes).
+        setError(friendlyAuthError(err, 'Login failed. Please try again.'));
       }
     }
   };

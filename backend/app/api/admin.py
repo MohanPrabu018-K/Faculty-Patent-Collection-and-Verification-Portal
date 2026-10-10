@@ -5,13 +5,15 @@ import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query, Request, status
-from sqlalchemy import func, inspect as sa_inspect, or_, select, update, delete
+from sqlalchemy import func, inspect as sa_inspect, or_, select, delete
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_super_admin
 from app.core.database import get_async_session
 from app.core.exceptions import NotFoundError, PortalError
 from app.core.logging import log_audit
+from app.services.export_renderers import api_date_only
 from app.models.base import (
     ASSOCIATION_STATUS_CHOICES,
     IP_TYPE_CHOICES,
@@ -38,14 +40,25 @@ from app.models.base import (
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"], dependencies=[Depends(require_super_admin)])
 
 
+ACTIVE_HOD_EXISTS_MESSAGE = "An active HOD already exists for this department."
+
+
+def _is_active_hod_clash(exc: BaseException) -> bool:
+    """True when an IntegrityError came from the partial unique index
+    uq_active_hod_per_department (concurrent-create race backstop)."""
+    orig = getattr(exc, "orig", None)
+    return "uq_active_hod_per_department" in str(orig if orig is not None else exc)
+
+
 async def _ensure_single_active_hod(
     db: AsyncSession, department_id: str | None, exclude_user_id: str | None = None
 ) -> None:
-    """Enforce one active HOD per department (item 7).
+    """Enforce one active HOD per department (item 7 / BUG 6).
 
-    Raises 409 when another active hod_admin already owns the department.
-    The database partial unique index is the final backstop; this gives the
-    required human-readable message.
+    Raises 409 ACTIVE_HOD_EXISTS when another active hod_admin already owns
+    the department. The database partial unique index is the final backstop
+    (see _is_active_hod_clash); this gives the required human-readable
+    message.
     """
     if not department_id:
         return
@@ -59,8 +72,8 @@ async def _ensure_single_active_hod(
     clash = (await db.execute(query)).scalar_one_or_none()
     if clash is not None:
         raise PortalError(
-            message="An HOD is already assigned to this department. Please update the existing HOD instead of creating a new one.",
-            error_code="DUPLICATE_HOD",
+            message=ACTIVE_HOD_EXISTS_MESSAGE,
+            error_code="ACTIVE_HOD_EXISTS",
             status_code=409,
         )
 
@@ -380,7 +393,19 @@ async def create_faculty(request: Request, current_user: dict = Depends(get_curr
         is_active=body.get("is_active", True),
     )
     db.add(user)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        # Concurrent-create race: both requests passed the app-level check,
+        # the partial unique index rejected one. Report the same clean 409.
+        await db.rollback()
+        if _is_active_hod_clash(exc):
+            raise PortalError(
+                message=ACTIVE_HOD_EXISTS_MESSAGE,
+                error_code="ACTIVE_HOD_EXISTS",
+                status_code=409,
+            ) from exc
+        raise
     await db.refresh(user)
     log_audit(actor=current_user.get("id"), action="FACULTY_CREATED", target_type="user", target_id=user.id, status="success", after={"email": user.email, "faculty_id": user.faculty_id})
     response_payload: dict = {"id": user.id, "email": user.email, "faculty_id": user.faculty_id, "message": "Faculty created"}
@@ -453,7 +478,17 @@ async def update_faculty(faculty_id: str, request: Request, current_user: dict =
             user.role = "hod_admin"
         elif desig and (desig.title or "").strip().upper() == "FACULTY":
             user.role = "faculty"
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        if _is_active_hod_clash(exc):
+            raise PortalError(
+                message=ACTIVE_HOD_EXISTS_MESSAGE,
+                error_code="ACTIVE_HOD_EXISTS",
+                status_code=409,
+            ) from exc
+        raise
     log_audit(actor=current_user.get("id"), action="FACULTY_UPDATED", target_type="user", target_id=user.id, status="success", before=before, after={"full_name": user.full_name, "department_id": user.department_id, "designation_id": user.designation_id, "is_active": user.is_active, "role": user.role})
     return {"id": user.id, "message": "Faculty updated", "before": before}
 
@@ -502,11 +537,26 @@ async def delete_faculty(faculty_id: str, current_user: dict = Depends(get_curre
         ConflictCase.resolved_by == user.id, ConflictCase.assigned_to == user.id)))).scalar_one()
     if cases:
         blockers.append(f"{cases} review case reference(s)")
+    # BUG 5: IpFile.uploaded_by is a non-nullable-user FK without cascade;
+    # deleting the account without counting these would 500 on the FK.
+    files = (await db.execute(select(func.count()).select_from(IpFile).where(IpFile.uploaded_by == user.id))).scalar_one()
+    if files:
+        blockers.append(f"{files} uploaded file(s)")
     if blockers:
         raise PortalError(
             message="Cannot delete faculty with associated workflow data: " + ", ".join(blockers),
             error_code="FACULTY_HAS_DATA",
             status_code=409,
+            details={
+                "blockers": {
+                    "uploaded_records": owned,
+                    "association_requests": assoc,
+                    "contributor_links": contrib,
+                    "master_contributor_links": mcontrib,
+                    "review_case_references": cases,
+                    "uploaded_files": files,
+                }
+            },
         )
 
     await db.execute(sa_delete(Notification).where(Notification.user_id == user.id))
@@ -524,15 +574,38 @@ async def delete_faculty(faculty_id: str, current_user: dict = Depends(get_curre
 
 @router.post("/faculty/{faculty_id}/activate", status_code=status.HTTP_200_OK)
 async def activate_faculty(faculty_id: str, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
-    await db.execute(update(User).where(User.id == faculty_id, User.role.in_(["faculty", "hod_admin"])).values(is_active=True, status="active"))
-    await db.commit()
+    # BUG 6 root-cause fix: activation previously skipped the single-HOD
+    # check, so an HOD created inactive could be activated alongside an
+    # existing active HOD. Activation is now gated identically to creation.
+    user = (await db.execute(select(User).where(User.id == faculty_id, User.role.in_(["faculty", "hod_admin"])))).scalar_one_or_none()
+    if not user:
+        raise NotFoundError("Faculty", faculty_id)
+    if user.role == "hod_admin" and user.department_id:
+        await _ensure_single_active_hod(db, user.department_id, exclude_user_id=user.id)
+    user.is_active = True
+    user.status = "active"
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        if _is_active_hod_clash(exc):
+            raise PortalError(
+                message=ACTIVE_HOD_EXISTS_MESSAGE,
+                error_code="ACTIVE_HOD_EXISTS",
+                status_code=409,
+            ) from exc
+        raise
     log_audit(actor=current_user.get("id"), action="FACULTY_ACTIVATED", target_type="user", target_id=faculty_id, status="success")
     return {"id": faculty_id, "status": "active"}
 
 
 @router.post("/faculty/{faculty_id}/deactivate", status_code=status.HTTP_200_OK)
 async def deactivate_faculty(faculty_id: str, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
-    await db.execute(update(User).where(User.id == faculty_id, User.role.in_(["faculty", "hod_admin"])).values(is_active=False, status="inactive"))
+    user = (await db.execute(select(User).where(User.id == faculty_id, User.role.in_(["faculty", "hod_admin"])))).scalar_one_or_none()
+    if not user:
+        raise NotFoundError("Faculty", faculty_id)
+    user.is_active = False
+    user.status = "inactive"
     await db.commit()
     log_audit(actor=current_user.get("id"), action="FACULTY_DEACTIVATED", target_type="user", target_id=faculty_id, status="success")
     return {"id": faculty_id, "status": "inactive"}
@@ -901,33 +974,94 @@ async def admin_grant_patent(
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_session),
 ):
-    """Grant a verified patent. Only Super Admin can grant. Record must be VERIFIED."""
+    """Grant a patent (simplified business rule: Super Admin's ONLY decision).
+
+    All pre-grant gates are validated server-side, never trusting the
+    frontend: explicit confirmation, verified status, grant-eligible workflow
+    state, complete faculty association, valid uploader, no open
+    duplicate/conflict, completed processing, identifier present. The record
+    row is locked (SELECT FOR UPDATE) so two simultaneous grants cannot
+    double-grant: the loser sees GRANTED and gets GRANT_ALREADY_GRANTED.
+    REJECTED records can never be granted. Audited transactionally.
+    """
+    from app.core.exceptions import PortalError
     from app.services.workflow import WorkflowState, can_transition
 
-    result = await db.execute(select(IpRecord).where(IpRecord.id == record_id))
+    body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+    body = body if isinstance(body, dict) else {}
+    if body.get("confirm") is not True:
+        raise PortalError(
+            message="Grant requires explicit confirmation",
+            error_code="GRANT_CONFIRMATION_REQUIRED",
+            status_code=422,
+        )
+
+    result = await db.execute(
+        select(IpRecord).where(IpRecord.id == record_id).with_for_update()
+    )
     record = result.scalar_one_or_none()
     if not record:
         raise NotFoundError("IP record", record_id)
 
+    if (record.workflow_state or "") == "GRANTED":
+        raise PortalError(
+            message="Patent is already granted",
+            error_code="GRANT_ALREADY_GRANTED",
+            status_code=422,
+        )
+
     if record.verification_status != "VERIFIED":
-        from app.core.exceptions import PortalError
         raise PortalError(
             message="Only verified records can be granted. Current status: " + (record.verification_status or "UNVERIFIED"),
             error_code="GRANT_NOT_ELIGIBLE",
             status_code=422,
         )
 
-    current_state = record.workflow_state or "VERIFIED"
-    if not can_transition(current_state, WorkflowState.GRANTED):
-        from app.core.exceptions import PortalError
+    current_state = record.workflow_state or ""
+    if current_state not in (WorkflowState.FACULTY_ASSOCIATION_COMPLETE.value, WorkflowState.VERIFIED.value) or not can_transition(current_state, WorkflowState.GRANTED):
         raise PortalError(
-            message="Cannot grant from current workflow state: " + current_state,
+            message="Cannot grant from current workflow state: " + (current_state or "UNKNOWN"),
             error_code="GRANT_TRANSITION_INVALID",
             status_code=422,
         )
 
-    body = await request.json() if request.headers.get("content-type") == "application/json" else {}
-    body = body if isinstance(body, dict) else {}
+    from app.api.associations import _open_duplicate_or_conflict
+    from app.api.verification import _pending_internal_approvals
+
+    if await _pending_internal_approvals(db, record):
+        raise PortalError(
+            message="Cannot grant while required faculty approvals are pending",
+            error_code="GRANT_ASSOCIATION_INCOMPLETE",
+            status_code=422,
+        )
+    uploader = (
+        (await db.execute(select(User).where(User.id == record.uploader_id))).scalar_one_or_none()
+        if record.uploader_id else None
+    )
+    if uploader is None or not uploader.is_active:
+        raise PortalError(
+            message="Cannot grant: uploader is missing or deactivated",
+            error_code="GRANT_UPLOADER_INVALID",
+            status_code=422,
+        )
+    if await _open_duplicate_or_conflict(db, record):
+        raise PortalError(
+            message="Cannot grant while an open duplicate or conflict exists",
+            error_code="GRANT_BLOCKED_DUPLICATE_CONFLICT",
+            status_code=422,
+        )
+    if (record.processing_status or "") not in ("COMPLETED", "COMPLETED_WITH_ERRORS", "AWAITING_REVIEW"):
+        raise PortalError(
+            message="Cannot grant: document processing is not complete",
+            error_code="GRANT_PROCESSING_INCOMPLETE",
+            status_code=422,
+        )
+    if not (record.patent_number or record.application_number or record.design_number or record.serial_number):
+        raise PortalError(
+            message="Cannot grant: no official identifier present",
+            error_code="GRANT_IDENTIFIER_MISSING",
+            status_code=422,
+        )
 
     before = {
         "verification_status": record.verification_status,
@@ -1242,7 +1376,7 @@ async def admin_list_master_records(current_user: dict = Depends(get_current_use
             "title": m.title,
             "filing_date": m.filing_date.isoformat() if m.filing_date else None,
             "registration_date": m.registration_date.isoformat() if m.registration_date else None,
-            "grant_date": m.grant_date.isoformat() if m.grant_date else None,
+            "grant_date": api_date_only(m.grant_date),
             "workflow_state": m.workflow_state,
             "official_verification_status": m.official_verification_status,
             "linked_records": linked,

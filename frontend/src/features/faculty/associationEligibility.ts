@@ -1,11 +1,14 @@
 /**
- * Pure eligibility helpers for the uploader-only "Send Association Request"
- * action on the record detail page.
+ * Pure eligibility helpers for association request display on the record
+ * detail page (exact business rule).
  *
- * Association requests stay strictly human-in-the-loop: these helpers only
- * decide whether the *button* may be shown for a contributor. Creation
- * itself always goes through the existing POST /associations/ endpoint
- * (backend enforces uploader authorization + duplicate prevention).
+ * The uploader is automatically accepted and NEVER receives a
+ * self-association action: these helpers only describe per-contributor row
+ * status text ('pending' / 'accepted'). The uploader's single action is the
+ * bulk [Send Association Request], which always goes through POST
+ * /associations/send-all (backend sends only to OTHER internal faculty and
+ * de-duplicates). Creation itself is human-initiated; the backend enforces
+ * uploader authorization + duplicate prevention.
  */
 
 export type ContributorLike = Record<string, unknown>;
@@ -106,8 +109,9 @@ export function associationSendState(
   if (live) {
     return AWAITING_STATUSES.has(requestStatus(live)) ? 'pending' : 'accepted';
   }
-  // Item 4: never offer sending to yourself (system auto-dispatch covers the
-  // named-uploader case); with no live request there is simply no action.
+  // Exact rule: never offer sending to yourself — the uploader is
+  // automatically accepted and the bulk send-all path skips them
+  // server-side as well; with no live request there is simply no action.
   if (opts.currentUserId && userId === opts.currentUserId) return 'ineligible';
   return 'sendable';
 }

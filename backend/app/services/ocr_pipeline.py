@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import re
 import tempfile
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -11,6 +14,40 @@ from typing import Any
 import structlog
 
 logger = structlog.get_logger()
+
+
+# Performance hardening (safe, output-preserving): OCR + QR reprocessing
+# dominates pipeline time (classification and extraction agents each run a
+# full process_document; QR decode additionally runs inside every
+# process_document call). These functions are pure in (file bytes, filename),
+# so per-content memoization returns byte-identical results while skipping
+# repeated rasterization/OCR passes within and across uploads. Bounded LRU +
+# lock: safe under threaded BackgroundTasks workers.
+_CACHE_MAX_ENTRIES = 8
+_process_document_cache: OrderedDict[tuple[str, str], Any] = OrderedDict()
+_process_document_lock = threading.Lock()
+_qr_cache: OrderedDict[tuple[str, str], Any] = OrderedDict()
+_qr_lock = threading.Lock()
+
+
+def _cache_key(file_bytes: bytes, filename: str | None) -> tuple[str, str]:
+    return (hashlib.sha256(file_bytes).hexdigest(), filename or "")
+
+
+def _cache_get(cache: OrderedDict, lock: threading.Lock, key: tuple[str, str]):
+    with lock:
+        if key in cache:
+            cache.move_to_end(key)
+            return cache[key]
+    return None
+
+
+def _cache_put(cache: OrderedDict, lock: threading.Lock, key: tuple[str, str], value: Any) -> None:
+    with lock:
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > _CACHE_MAX_ENTRIES:
+            cache.popitem(last=False)
 
 
 @dataclass
@@ -676,7 +713,31 @@ def _ocr_image_bytes(image_bytes: bytes, page_number: int = 1) -> OCRPageResult:
     )
 
 
+def clear_ocr_caches() -> None:
+    """Empty the process/QR memoization caches (tests, memory pressure)."""
+    with _process_document_lock:
+        _process_document_cache.clear()
+    with _qr_lock:
+        _qr_cache.clear()
+
+
 def process_document(file_bytes: bytes, filename: str | None = None) -> DocumentProcessingResult:
+    """Full document processing with per-content memoization.
+
+    Pure in (file bytes, filename): cache hits return the identical result
+    object while skipping repeated rasterization/OCR/QR passes.
+    """
+    key = _cache_key(file_bytes, filename)
+    hit = _cache_get(_process_document_cache, _process_document_lock, key)
+    if hit is not None:
+        logger.info("process_document_cache_hit", filename=filename)
+        return hit
+    result = _process_document_uncached(file_bytes, filename)
+    _cache_put(_process_document_cache, _process_document_lock, key, result)
+    return result
+
+
+def _process_document_uncached(file_bytes: bytes, filename: str | None = None) -> DocumentProcessingResult:
     suffix = (Path(filename).suffix.lower() if filename else "").lower()
     is_pdf = suffix == ".pdf" or file_bytes.startswith(b"%PDF")
     warnings: list[str] = []
@@ -760,6 +821,18 @@ def process_document(file_bytes: bytes, filename: str | None = None) -> Document
 
 
 def decode_qr_payloads(file_bytes: bytes, filename: str | None = None) -> QRResult:
+    """QR decode with per-content memoization (identical results, no rework)."""
+    key = _cache_key(file_bytes, filename)
+    hit = _cache_get(_qr_cache, _qr_lock, key)
+    if hit is not None:
+        logger.info("qr_cache_hit", filename=filename)
+        return hit
+    result = _decode_qr_payloads_uncached(file_bytes, filename)
+    _cache_put(_qr_cache, _qr_lock, key, result)
+    return result
+
+
+def _decode_qr_payloads_uncached(file_bytes: bytes, filename: str | None = None) -> QRResult:
     warnings: list[str] = []
     evidence: list[dict[str, Any]] = []
     payloads: list[str] = []
