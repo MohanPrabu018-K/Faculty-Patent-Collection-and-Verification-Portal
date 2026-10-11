@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { keepPreviousData, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import {
   SectionCard, StatusBadge, ErrorBlock, EmptyState,
@@ -18,25 +18,12 @@ const IP_TYPE_LABELS: Record<string, string> = {
 export function AdminGrantedPatentsPage() {
   const navigate = useNavigate();
   const { notify } = useToast();
-  const queryClient = useQueryClient();
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebounce(search, 400);
   const [verification, setVerification] = useState('');
   const [exporting, setExporting] = useState(false);
   const [exportFormat, setExportFormat] = useState<'csv' | 'excel' | 'pdf' | 'docx' | 'txt'>('csv');
-  const [grantConfirmId, setGrantConfirmId] = useState<string | null>(null);
-
-  const grantMut = useMutation({
-    mutationFn: (recordId: string) => api.adminGrantPatent(recordId),
-    onSuccess: (_data, recordId) => {
-      notify('success', 'Patent granted successfully');
-      setGrantConfirmId(null);
-      void queryClient.invalidateQueries({ queryKey: ['admin-granted-patents'] });
-      void queryClient.invalidateQueries({ queryKey: ['admin-records'] });
-    },
-    onError: (e) => notify('error', e instanceof Error ? e.message : 'Grant failed'),
-  });
 
   const runExport = async () => {
     setExporting(true);
@@ -114,20 +101,6 @@ export function AdminGrantedPatentsPage() {
         </div>
       ) : null}
 
-      {grantConfirmId && (
-        <div className="modal-overlay" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
-          <div style={{ background: '#fff', borderRadius: 8, padding: 24, maxWidth: 420, width: '90%' }}>
-            <h3 style={{ marginTop: 0 }}>Confirm Grant Patent</h3>
-            <p>Are you sure you want to mark this patent as Granted?</p>
-            <p style={{ fontSize: 13, color: '#6b7280' }}>This action cannot be reversed.</p>
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
-              <button className="btn btn-ghost btn-sm" onClick={() => setGrantConfirmId(null)} disabled={grantMut.isPending}>Cancel</button>
-              <button className="btn btn-primary btn-sm" onClick={() => grantMut.mutate(grantConfirmId)} disabled={grantMut.isPending}>{grantMut.isPending ? 'Granting…' : 'Confirm Grant'}</button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {rows.length === 0 && !isFetching ? (
         <EmptyState message="No grant-eligible IP records match your filters." action={<button className="btn btn-primary" onClick={() => navigate('/admin/patent-upload')}>Add the first IP record</button>} />
       ) : (
@@ -140,7 +113,6 @@ export function AdminGrantedPatentsPage() {
             </thead>
             <tbody>
               {rows.map((r) => {
-                const isVerified = String(r.verification_status || '') === 'VERIFIED' && String(r.workflow_state || '') !== 'GRANTED';
                 const isGranted = String(r.workflow_state || '') === 'GRANTED';
                 return (
                   <tr key={String(r.id)}>
@@ -156,8 +128,6 @@ export function AdminGrantedPatentsPage() {
                     <td>
                       {isGranted ? (
                         <span style={{ color: '#059669', fontWeight: 600, fontSize: 13 }}>Granted</span>
-                      ) : isVerified ? (
-                        <button className="btn btn-sm btn-primary" onClick={() => setGrantConfirmId(String(r.id))}>Grant Patent</button>
                       ) : (
                         <Link className="link" to={`/faculty/records/${r.id}`}>Open</Link>
                       )}

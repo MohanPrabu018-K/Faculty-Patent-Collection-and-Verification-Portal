@@ -336,7 +336,6 @@ export const api = {
   adminMasterRecords: (params = '', signal?: AbortSignal) => request(`/admin/master-ip-records${params}`, { signal }),
   adminRecordDetail: (recordId: string) => request<AdminIpRecord>(`/admin/ip-records/${recordId}`),
   adminUpdateRecord: (recordId: string, body: Record<string, unknown>) => requestWithBody(`/admin/ip-records/${recordId}`, body, { method: 'PATCH' }),
-  adminGrantPatent: (recordId: string) => requestWithBody(`/admin/ip-records/${recordId}/grant`, {}, { method: 'POST' }),
   adminVerifications: (params = '') => request<{ verifications: Array<Record<string, unknown>>; total: number; page: number; per_page: number }>(`/admin/verifications${params}`),
   adminAuditLogs: (params = '', signal?: AbortSignal) => request<AuditLogResponse>(`/audit/${params}`, { signal }),
   adminAuditStats: () => request<Record<string, number>>('/audit/stats'),
@@ -372,7 +371,6 @@ export const api = {
   exportStatus: (jobId: string) => request<Record<string, unknown>>(`/exports/${jobId}`),
   exportDownloadUrl: (jobId: string) => `${API_BASE}/exports/${jobId}/download`,
   institutionalStatus: (recordId: string) => request<{ record_id: string; official_verification_status: string; verification_status: string; workflow_state: string; final_verification: Record<string, unknown> | null; institutional: Record<string, unknown> | null; history: Array<Record<string, unknown>>; pending_approvals?: string[]; hod_association?: { status: string | null; hod_user_id: string | null; hod_name: string | null } }>(`/verification/institutional/${recordId}`),
-  institutionalVerify: (recordId: string, body: { decision: 'verify' | 'reject' | 'clarification'; remarks?: string; evidence_ref?: string }) => requestWithBody<{ record_id: string; decision: string; institutional_status: string; official_verification_status: string; final_verification_status: string; workflow_state: string; missing_conditions: string[]; attempt_id: string }>(`/verification/institutional/${recordId}`, body, { method: 'POST' }),
   pendingAssociationsReport: (params = '', signal?: AbortSignal) => request<{ associations: Array<Record<string, unknown>>; total: number; pending_count: number; by_status: Record<string, number>; page: number; per_page: number }>(`/admin/reports/pending-associations${params}`, { signal }),
   adminUpdateSettings: (body: Record<string, unknown>) => requestWithBody<{ max_upload_mb: number; message: string }>('/admin/settings', body, { method: 'PATCH' }),
 };

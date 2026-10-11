@@ -37,6 +37,25 @@ run_document_pipeline  →  AIOrchestrator.execute()  →  11 deterministic agen
 GET /api/v1/uploads/{id}/status  →  UI polls until terminal status
 ```
 
+### Verification model
+
+Verification status is produced by the **automated pipeline only**. Manual
+patent decisions — grant, verify, accept, reject — have been removed from the
+HOD and Admin/Super Admin dashboards, and the corresponding backend endpoints
+are gone:
+
+| Surface | Status |
+|---------|--------|
+| `POST /api/v1/admin/ip-records/{id}/grant` | removed (404) |
+| `POST /api/v1/verification/institutional/{id}` | disabled (405 `MANUAL_DECISION_DISABLED`) |
+| `PATCH /api/v1/admin/ip-records/{id}` | no longer accepts `verification_status` |
+| `GET /api/v1/verification/institutional/{id}` | kept — read-only history |
+
+Read-only record access, the *Grant IP* / *Granted Patents* listings, HOD
+department documents, duplicate & conflict handling, and faculty contributor
+association accept/reject are all unchanged. Historical granted/verified/rejected
+rows remain readable; no schema migration was required.
+
 ## Configuration
 
 Copy `.env.example` to `.env` and fill in values. OCR.Space block:

@@ -1,18 +1,18 @@
-"""HOD manual official verification (institutional fallback) + related fixes.
+"""Manual institutional verification is disabled; read-only access is preserved.
 
-Covers the FPP human-verification fallback built on the EXISTING
-institutional verification architecture (no new tables/enums):
+The HOD "manual official verification" fallback (grant / verify / accept /
+reject by a human) was removed from the product. This module now proves:
 
-- HOD verify on an eligible record -> final VERIFIED, while the automated
-  official state stays VERIFICATION_REQUIRED (three-way distinction).
-- HOD verify with an open duplicate -> stays VERIFICATION_REQUIRED /
-  NEEDS_REVIEW with honest missing_conditions (final gate not weakened).
-- HOD cannot verify another department; faculty cannot verify at all.
-- GET institutional exposes official / institutional / final separately.
-- processing_status=COMPLETED_WITH_ERRORS filter works (PG enum fix).
-- workflow_state filter works on admin IP records.
-- txt export renders distinct bytes and creates jobs.
-- pending-associations report is enriched and dynamic.
+- the decision POST is rejected (405 MANUAL_DECISION_DISABLED) for HOD,
+  Super Admin, faculty, and a cross-department HOD alike;
+- a rejected decision leaves NO trace: no VerificationAttempt, no AuditLog
+  row, no change to the record's verification_status / workflow_state;
+- GET institutional still works and still exposes the three-way distinction
+  (official / institutional / final) plus history and pending approvals, so
+  historical decisions remain readable;
+- the unrelated read-only admin surfaces in this module still work
+  (processing_status and workflow_state filters, txt export, pending
+  association report).
 """
 import asyncio
 import uuid
@@ -127,97 +127,111 @@ def _drop_record(rid):
     asyncio.run(_drop())
 
 
-def test_hod_verify_eligible_record_reaches_final_verified(client):
+def test_institutional_decision_is_disabled_for_hod(client):
     rid = _make_record("ok")
     try:
         r = client.post(f"/api/v1/verification/institutional/{rid}",
                         json={"decision": "verify", "remarks": "checked portal", "evidence_ref": "register p1"},
                         headers=_h(client, HOD_H))
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert body["institutional_status"] == "INSTITUTIONALLY_VERIFIED"
-        assert body["official_verification_status"] == "VERIFICATION_REQUIRED"
-        assert body["final_verification_status"] == "VERIFIED"
-        assert body["workflow_state"] == "VERIFIED"
-        assert body["missing_conditions"] == []
+        assert r.status_code == 405, r.text
+        assert r.json().get("error") == "MANUAL_DECISION_DISABLED"
 
         async def _check():
             async with get_async_session_context() as db:
                 rec = (await db.execute(select(IpRecord).where(IpRecord.id == rid))).scalar_one()
-                assert rec.verification_status == "VERIFIED"
-                assert rec.workflow_state == "VERIFIED"
-                # Automated official layer preserved, never overwritten.
-                assert rec.official_verification_status == "VERIFICATION_REQUIRED"
-                ev = rec.evidence or {}
-                assert ev["final_verification"]["status"] == "VERIFIED"
-                assert "official IP portal" in ev["final_verification"]["rationale"]
-                inst = (await db.execute(select(VerificationAttempt).where(
-                    VerificationAttempt.ip_record_id == rid,
-                    VerificationAttempt.source == "institutional_hod"))).scalars().all()
-                assert len(inst) == 1 and inst[0].status == "VERIFIED"
-                assert inst[0].evidence["verification_type"] == "INSTITUTIONAL_MANUAL_OFFICIAL_CHECK"
-                assert inst[0].evidence["hod_user_id"] == HOD_UID
-                final = (await db.execute(select(VerificationAttempt).where(
-                    VerificationAttempt.ip_record_id == rid,
-                    VerificationAttempt.source == "final_decision"))).scalars().all()
-                assert len(final) == 1 and final[0].status == "VERIFIED"
+                # No state change whatsoever.
+                assert rec.verification_status == "VERIFICATION_REQUIRED"
+                assert rec.workflow_state == "VERIFICATION_REQUIRED"
+                assert not (rec.evidence or {}).get("final_verification")
+                for src in ("institutional_hod", "final_decision"):
+                    rows = (await db.execute(select(VerificationAttempt).where(
+                        VerificationAttempt.ip_record_id == rid,
+                        VerificationAttempt.source == src))).scalars().all()
+                    assert rows == [], (src, rows)
                 audit = (await db.execute(select(AuditLog).where(
                     AuditLog.target_id == rid,
-                    AuditLog.action == "INSTITUTIONAL_VERIFICATION_VERIFY"))).scalars().all()
-                assert len(audit) >= 1
+                    AuditLog.action.like("INSTITUTIONAL_VERIFICATION%")))).scalars().all()
+                assert audit == [], audit
         asyncio.run(_check())
-
-        g = client.get(f"/api/v1/verification/institutional/{rid}", headers=HOD_H)
-        assert g.status_code == 200, g.text
-        gb = g.json()
-        assert gb["official_verification_status"] == "VERIFICATION_REQUIRED"
-        assert gb["institutional"]["decision"] == "verify"
-        assert gb["final_verification"]["status"] == "VERIFIED"
     finally:
         _drop_record(rid)
 
 
-def test_hod_verify_blocked_by_open_duplicate(client):
-    rid = _make_record("dup")
-    other = _make_record("dup2")
-    try:
-        async def _add_dup():
-            async with get_async_session_context() as db:
-                db.add(DuplicateCase(id=f"mv-dup-{uuid.uuid4().hex[:8]}",
-                                     ip_record_id_1=rid, ip_record_id_2=other,
-                                     detection_method="identifier", confidence=0.9, status="OPEN"))
-                await db.commit()
-        asyncio.run(_add_dup())
-        r = client.post(f"/api/v1/verification/institutional/{rid}",
-                        json={"decision": "verify"}, headers=_h(client, HOD_H))
-        assert r.status_code == 200, r.text
-        body = r.json()
-        # Final gate NOT weakened: duplicate blocks VERIFIED.
-        assert body["final_verification_status"] == "VERIFICATION_REQUIRED"
-        assert body["workflow_state"] == "NEEDS_REVIEW"
-        assert any("duplicate" in m for m in body["missing_conditions"])
-        # Institutional decision itself is still recorded honestly.
-        assert body["institutional_status"] == "INSTITUTIONALLY_VERIFIED"
-    finally:
-        _drop_record(rid)
-        _drop_record(other)
-
-
-def test_hod_cannot_verify_other_department(client):
-    rid = _make_record("dept")
+def test_institutional_decision_is_disabled_for_super_admin(client):
+    rid = _make_record("adm")
     try:
         r = client.post(f"/api/v1/verification/institutional/{rid}",
-                        json={"decision": "verify"}, headers=_h(client, HOD_OTHER_H))
-        assert r.status_code in (401, 403), r.text
+                        json={"decision": "verify"}, headers=_h(client, ADMIN_H))
+        assert r.status_code == 405, r.text
+        assert r.json().get("error") == "MANUAL_DECISION_DISABLED"
     finally:
         _drop_record(rid)
 
 
-def test_faculty_cannot_verify(client):
+def test_institutional_decision_is_disabled_for_faculty(client):
     rid = _make_record("fac")
     try:
         r = client.post(f"/api/v1/verification/institutional/{rid}",
                         json={"decision": "verify"}, headers=_h(client, FAC_H))
+        assert r.status_code == 405, r.text
+    finally:
+        _drop_record(rid)
+
+
+def test_institutional_decision_is_disabled_for_other_department_hod(client):
+    rid = _make_record("dept")
+    try:
+        r = client.post(f"/api/v1/verification/institutional/{rid}",
+                        json={"decision": "verify"}, headers=_h(client, HOD_OTHER_H))
+        assert r.status_code == 405, r.text
+    finally:
+        _drop_record(rid)
+
+
+def test_reject_and_clarification_decisions_are_also_disabled(client):
+    """Every prohibited verb must be blocked, not just `verify`."""
+    rid = _make_record("verbs")
+    try:
+        for decision in ("verify", "reject", "clarification"):
+            r = client.post(f"/api/v1/verification/institutional/{rid}",
+                            json={"decision": decision}, headers=_h(client, HOD_H))
+            assert r.status_code == 405, (decision, r.text)
+    finally:
+        _drop_record(rid)
+
+
+def test_institutional_get_still_exposes_read_only_state(client):
+    """Read-only access and the three-way distinction are preserved."""
+    rid = _make_record("ro")
+    try:
+        g = client.get(f"/api/v1/verification/institutional/{rid}", headers=HOD_H)
+        assert g.status_code == 200, g.text
+        gb = g.json()
+        assert gb["official_verification_status"] == "VERIFICATION_REQUIRED"
+        assert gb["verification_status"] == "VERIFICATION_REQUIRED"
+        assert gb["workflow_state"] == "VERIFICATION_REQUIRED"
+        assert gb["institutional"] is None
+        assert gb["history"] == []
+        assert gb["pending_approvals"] == []
+        assert "hod_association" in gb
+    finally:
+        _drop_record(rid)
+
+
+def test_institutional_get_requires_auth(client):
+    rid = _make_record("auth")
+    try:
+        r = client.get(f"/api/v1/verification/institutional/{rid}")
+        assert r.status_code in (400, 401), r.text
+    finally:
+        _drop_record(rid)
+
+
+def test_hod_cannot_verify_other_department(client):
+    """Department scoping still applies to the read-only GET."""
+    rid = _make_record("deptget")
+    try:
+        r = client.get(f"/api/v1/verification/institutional/{rid}", headers=HOD_OTHER_H)
         assert r.status_code in (401, 403), r.text
     finally:
         _drop_record(rid)

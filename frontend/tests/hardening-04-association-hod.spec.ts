@@ -84,17 +84,18 @@ test.describe('Phase 10 - HOD Verification Hardening', () => {
     expect(await page.locator('body').textContent()).toContain('GRANTED');
     log('10.3', 'PASS', 'GRANTED persists after reload');
   });
-  test('10.4 Non-VERIFIED still has Manual Verify', async ({ page }) => {
+  test('10.4 HOD documents page has no Manual Verify control', async ({ page }) => {
     setPhase('10.4');
     await loginUi(page, U.hod.e, U.hod.p);
     await page.goto(`${BASE}/hod/documents`, { waitUntil: 'networkidle' });
     await page.waitForTimeout(3000);
-    const row = page.locator('tr').filter({ hasText: /MACHINE LEARNING/ });
-    if (await row.count() > 0) {
-      const btn = row.first().locator('button').filter({ hasText: /Manual Verify/ });
-      expect(await btn.count()).toBeGreaterThan(0);
-    }
-    log('10.4', 'PASS', 'Non-VERIFIED has Manual Verify');
+    // The manual verify decision was removed, so no row - VERIFIED or not -
+    // may expose a Manual Verify button.
+    const btn = page.locator('button').filter({ hasText: /Manual Verify|Confirm Verified/i });
+    expect(await btn.count()).toBe(0);
+    // The read-only documents listing itself is preserved.
+    await expect(page.getByRole('heading', { name: 'Department Documents' })).toBeVisible();
+    log('10.4', 'PASS', 'No Manual Verify control on HOD documents');
   });
   test('10.5 Faculty backend verify rejected', async ({ page }) => {
     setPhase('10.5');
@@ -102,7 +103,7 @@ test.describe('Phase 10 - HOD Verification Hardening', () => {
     const res = await page.request.post(`${API}/api/v1/verification/institutional/${RECORD_B}`, {
       headers: { 'X-CSRF-Token': csrf }, data: { decision: 'verify' },
     });
-    expect(res.status()).toBeGreaterThanOrEqual(400);
+    expect([405, 401, 403]).toContain(res.status());
     log('10.5', 'PASS', `Faculty verify rejected: ${res.status()}`);
   });
 });

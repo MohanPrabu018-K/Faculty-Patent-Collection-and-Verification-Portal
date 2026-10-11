@@ -199,19 +199,20 @@ test.describe('Phase 6 - Final RBAC Sanity', () => {
     await logoutUi(page);
   });
 
-  test('6.4 Faculty and HOD cannot access Grant functionality (API blocked 403)', async ({ page }) => {
-    // Faculty attempt
+  test('6.4 Grant functionality is removed from the API for every role', async ({ page }) => {
+    // The manual grant decision was removed, so the route no longer exists for
+    // any role - faculty, HOD, or super admin all get 404 rather than 403.
     const facCsrf = await loginApi(page, U.fac.e, U.fac.p);
     const facRes = await page.request.post(`${API}/api/v1/admin/ip-records/${RECORD_A}/grant`, {
       headers: { 'X-CSRF-Token': facCsrf },
     });
-    expect([401, 403]).toContain(facRes.status());
+    expect([401, 403, 404, 405]).toContain(facRes.status());
 
     // HOD attempt
     const hodCsrf = await loginApi(page, U.hod.e, U.hod.p);
     const hodRes = await page.request.post(`${API}/api/v1/admin/ip-records/${RECORD_A}/grant`, {
       headers: { 'X-CSRF-Token': hodCsrf },
     });
-    expect([401, 403]).toContain(hodRes.status());
+    expect([401, 403, 404, 405]).toContain(hodRes.status());
   });
 });

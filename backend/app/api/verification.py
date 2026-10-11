@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
 
 import structlog
 from fastapi import APIRouter, Depends, Query, Request, status
@@ -15,11 +14,8 @@ from app.core.logging import log_audit
 from app.verification.adapters import VerificationService, get_verification_registry, verify_patent_or_design
 from app.models.base import (
     AssociationRequest,
-    ConflictCase,
-    DuplicateCase,
     IpContributor,
     IpRecord,
-    MasterIpRecord,
     User,
     VerificationAttempt,
 )
@@ -141,8 +137,9 @@ async def retry_verification(attempt_id: str, current_user: dict = Depends(get_c
     return {"attempt_id": new_attempt.id, "retried_from": attempt_id, "status": result.status, "record_id": record.id}
 
 
+# Source label for historical institutional (HOD manual) verification attempts.
+# Retained so previously recorded decisions stay readable through the GET route.
 INSTITUTIONAL_SOURCE = "institutional_hod"
-_DECISION_TO_STATUS = {"verify": "VERIFIED", "reject": "MISMATCH", "clarification": "VERIFICATION_REQUIRED"}
 
 
 async def _pending_internal_approvals(db: AsyncSession, record: IpRecord) -> list[str]:
@@ -333,269 +330,21 @@ async def list_institutional_verifications(record_id: str, current_user: dict = 
     }
 
 
-@router.post("/institutional/{record_id}", status_code=status.HTTP_200_OK)
-async def submit_institutional_verification(record_id: str, request: Request, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
-    """Record a human institutional verification decision (HOD manual check).
+@router.post("/institutional/{record_id}", status_code=status.HTTP_405_METHOD_NOT_ALLOWED, include_in_schema=False)
+async def submit_institutional_verification(record_id: str, current_user: dict = Depends(get_current_user)) -> None:
+    """Manual institutional patent decisions are disabled.
 
-    This is the authorized fallback when automated official verification is
-    unavailable (VERIFICATION_REQUIRED): the HOD manually checks the record
-    against the official IP portal and confirms the details match.
-
-    The automated official state is NEVER overwritten — it is preserved in
-    ``evidence`` and in ``IpRecord.official_verification_status``. A ``verify``
-    decision additionally re-evaluates the existing final-verification
-    conditions (identifier present, processing completed, uploader active,
-    no open duplicates, no open high/medium conflicts, faculty approvals
-    complete). The record reaches final VERIFIED only when every condition
-    passes; otherwise it stays in a needs-review workflow state with the
-    missing conditions recorded honestly.
+    Grant / verify / accept / reject by a HOD or Super Admin were removed from
+    the product. The route is kept as an explicit 405 (rather than deleted) so
+    a direct API call can never silently succeed and clients get a clear
+    signal. Institutional verification is now produced only by the automated
+    pipeline; historical decisions remain readable via the GET route above.
     """
-    role = current_user.get("role", "")
-    if role not in ("hod_admin", "super_admin"):
-        raise AuthorizationError("Only HOD or Super Admin can perform institutional verification")
-    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
-    decision = str(body.get("decision", "")).lower()
-    if decision not in _DECISION_TO_STATUS:
-        raise PortalError(message="decision must be verify, reject or clarification", error_code="VALIDATION_ERROR", status_code=422)
-    record = (await db.execute(select(IpRecord).where(IpRecord.id == record_id))).scalar_one_or_none()
-    if not record:
-        raise NotFoundError("IP record", record_id)
-    # Staged workflow (items 2/10): HOD association acceptance and HOD manual
-    # verification are distinct stages bound to the SAME HOD.
-    from app.api.associations import _live_hod_request
-
-    hod_pending = await _live_hod_request(db, record.id, record.master_ip_id)
-    hod_accepted = await _live_hod_request(db, record.id, record.master_ip_id, accepted_only=True)
-    if decision == "verify":
-        if hod_pending is not None:
-            raise PortalError(
-                message="HOD association acceptance is required before manual verification",
-                error_code="HOD_ASSOCIATION_PENDING",
-                status_code=409,
-                details={"hod_request_id": hod_pending.id},
-            )
-        if hod_accepted is not None and role == "hod_admin":
-            bound = hod_accepted.responder_id or hod_accepted.target_faculty_id or hod_accepted.recipient_id
-            if bound and bound != current_user.get("id"):
-                raise PortalError(
-                    message="Only the HOD associated with this record may perform manual verification",
-                    error_code="AUTHORIZATION_ERROR",
-                    status_code=403,
-                )
-        pending = await _pending_internal_approvals(db, record)
-        if pending:
-            raise PortalError(
-                message=(
-                    "HOD verification is blocked until required internal "
-                    "faculty acceptance is recorded"
-                ),
-                error_code="ASSOCIATION_PENDING",
-                status_code=409,
-                details={"pending_approvals": pending},
-            )
-    if role == "hod_admin":
-        hod_dept = current_user.get("department_id")
-        if not hod_dept:
-            raise AuthorizationError("HOD admin account is missing a department assignment")
-        if record.department_id and str(hod_dept) != str(record.department_id):
-            raise AuthorizationError("HOD can only verify records in own department")
-        dept_id = hod_dept
-    else:
-        dept_id = record.department_id
-    official_preserved = record.official_verification_status or record.verification_status
-    attempt_no = (await db.execute(select(func.count()).select_from(VerificationAttempt).where(VerificationAttempt.ip_record_id == record_id, VerificationAttempt.source == INSTITUTIONAL_SOURCE))).scalar_one() + 1
-    decided_at = datetime.utcnow().isoformat()
-    attempt = VerificationAttempt(
-        id=str(uuid.uuid4()),
-        ip_record_id=record_id,
-        source=INSTITUTIONAL_SOURCE,
-        attempt_number=attempt_no,
-        status=_DECISION_TO_STATUS[decision],
-        result=f"Institutional decision: {decision}",
-        evidence={
-            "decision": decision,
-            "verification_type": "INSTITUTIONAL_MANUAL_OFFICIAL_CHECK",
-            "hod_user_id": current_user.get("id"),
-            "hod_faculty_id": current_user.get("faculty_id"),
-            "department_id": dept_id,
-            "remarks": body.get("remarks"),
-            "evidence_ref": body.get("evidence_ref"),
-            "decided_at": decided_at,
-            "official_state_preserved": official_preserved,
-            "note": "Institutional verification only. Official IP India state remains VERIFICATION_REQUIRED until official source verifies.",
-        },
+    raise PortalError(
+        message=(
+            "Manual institutional verification is disabled. Patent verification "
+            "status is produced by the automated processing pipeline only."
+        ),
+        error_code="MANUAL_DECISION_DISABLED",
+        status_code=status.HTTP_405_METHOD_NOT_ALLOWED,
     )
-    db.add(attempt)
-    # Stamp the automated official state into its own column (first write wins;
-    # human review never overwrites it) so the three verification layers stay
-    # distinguishable even though final state shares verification_status.
-    if not record.official_verification_status:
-        record.official_verification_status = official_preserved
-
-    final_status = record.verification_status
-    missing: list[str] = []
-    if decision == "verify":
-        final_status, missing = await _reevaluate_final_after_institutional(db, record, current_user, decided_at)
-    else:
-        from app.services.workflow import advance_through
-
-        record.workflow_state = advance_through(record.workflow_state, "NEEDS_REVIEW")
-        evidence = dict(record.evidence or {})
-        evidence["institutional_review"] = {
-            "decision": decision,
-            "verification_type": "INSTITUTIONAL_MANUAL_OFFICIAL_CHECK",
-            "decided_by": current_user.get("id"),
-            "decided_at": decided_at,
-            "remarks": body.get("remarks"),
-        }
-        record.evidence = evidence
-        final_status = record.verification_status
-
-    await db.commit()
-    log_audit(actor=current_user.get("id"), action=f"INSTITUTIONAL_VERIFICATION_{decision.upper()}", target_type="ip_record", target_id=record_id, status="success", extra={"decision": decision, "department_id": dept_id, "remarks": body.get("remarks"), "final_verification_status": final_status, "missing_conditions": missing})
-    try:
-        from app.services.notifications import NotificationPriority, NotificationType, get_notification_service
-        await get_notification_service().create_notification(
-            user_id=record.uploader_id,
-            notification_type=NotificationType.VERIFICATION_COMPLETED,
-            title=f"Institutional verification: {decision}",
-            message=f"Your record '{record.title or record_id}' received institutional decision '{decision}' from HOD review.",
-            priority=NotificationPriority.HIGH,
-            related_entity_type="ip_record",
-            related_entity_id=record_id,
-            action_url=f"/faculty/records/{record_id}",
-            action_label="View record",
-            metadata={"decision": decision, "record_id": record_id},
-        )
-    except Exception:
-        logger.warning("institutional_notification_failed", record_id=record_id)
-    return {
-        "record_id": record_id,
-        "decision": decision,
-        "institutional_status": "INSTITUTIONALLY_VERIFIED" if decision == "verify" else decision.upper(),
-        "official_verification_status": official_preserved,
-        "final_verification_status": final_status,
-        "workflow_state": record.workflow_state,
-        "missing_conditions": missing,
-        "attempt_id": attempt.id,
-    }
-
-
-async def _reevaluate_final_after_institutional(db: AsyncSession, record: IpRecord, hod_user: dict, decided_at: str) -> tuple[str, list[str]]:
-    """Apply the existing final-verification gate after an HOD manual check.
-
-    Mirrors the production FinalVerificationAgent conditions without weakening
-    them: every blocking condition keeps the record out of final VERIFIED.
-    Returns (final_status, missing_conditions). Mutates ``record`` in place;
-    the caller commits.
-    """
-    from sqlalchemy import or_
-
-    from app.services.workflow import advance_through
-
-    missing: list[str] = []
-    identifier = record.patent_number or record.application_number or record.design_number or record.serial_number
-    if not identifier:
-        missing.append("official/reference identifier available")
-    if record.processing_status not in ("COMPLETED", "COMPLETED_WITH_ERRORS", "AWAITING_REVIEW"):
-        missing.append("document processing completed")
-
-    uploader = (await db.execute(select(User).where(User.id == record.uploader_id))).scalar_one_or_none()
-    if not uploader or not uploader.is_active:
-        missing.append("faculty identity verified")
-
-    dup_open = (await db.execute(
-        select(func.count()).select_from(DuplicateCase).where(
-            DuplicateCase.status == "OPEN",
-            or_(DuplicateCase.ip_record_id_1 == record.id, DuplicateCase.ip_record_id_2 == record.id),
-        )
-    )).scalar_one()
-    if dup_open:
-        missing.append("duplicate handling completed")
-
-    conflict_open = (await db.execute(
-        select(func.count()).select_from(ConflictCase).where(
-            ConflictCase.ip_record_id == record.id,
-            ConflictCase.status == "OPEN",
-            ConflictCase.severity.in_(("high", "HIGH", "medium", "MEDIUM")),
-        )
-    )).scalar_one()
-    if conflict_open:
-        missing.append("no unresolved conflict")
-
-    # Faculty approval: every internal contributor other than the uploader must
-    # have an ACCEPTED/APPROVED association on this record (or its master).
-    internal_others = (await db.execute(
-        select(IpContributor.user_id).where(
-            IpContributor.ip_record_id == record.id,
-            IpContributor.is_external.is_(False),
-            IpContributor.user_id.is_not(None),
-            IpContributor.user_id != record.uploader_id,
-        )
-    )).scalars().all()
-    pending_approvers = []
-    for uid in set(internal_others):
-        scope = AssociationRequest.ip_record_id == record.id
-        if record.master_ip_id:
-            scope = or_(scope, AssociationRequest.master_ip_id == record.master_ip_id)
-        pair = or_(
-            or_(AssociationRequest.requesting_faculty_id == record.uploader_id, AssociationRequest.requester_id == record.uploader_id)
-            & or_(AssociationRequest.target_faculty_id == uid, AssociationRequest.recipient_id == uid),
-            or_(AssociationRequest.requesting_faculty_id == uid, AssociationRequest.requester_id == uid)
-            & or_(AssociationRequest.target_faculty_id == record.uploader_id, AssociationRequest.recipient_id == record.uploader_id),
-        )
-        accepted = (await db.execute(
-            select(AssociationRequest).where(pair, scope, AssociationRequest.status.in_(("ACCEPTED", "APPROVED"))).limit(1)
-        )).scalar_one_or_none()
-        if not accepted:
-            pending_approvers.append(uid)
-    if pending_approvers:
-        missing.append("required approvals completed")
-
-    hod_id = hod_user.get("id")
-    hod_name = hod_user.get("full_name") or hod_id
-    if not missing:
-        record.verification_status = "VERIFIED"
-        record.workflow_state = advance_through(record.workflow_state, "VERIFIED")
-        rationale = (
-            "HOD manually checked the official IP portal and confirmed the submitted details match "
-            "(INSTITUTIONAL_MANUAL_OFFICIAL_CHECK); all final-verification conditions passed."
-        )
-        final = "VERIFIED"
-    else:
-        record.workflow_state = advance_through(record.workflow_state, "NEEDS_REVIEW")
-        rationale = f"HOD manual check recorded; final verification blocked: {', '.join(missing)}."
-        final = record.verification_status
-
-    evidence = dict(record.evidence or {})
-    evidence["final_verification"] = {
-        "status": final,
-        "rationale": rationale,
-        "confidence": 0.8 if final == "VERIFIED" else 0.4,
-        "decided_by_hod": hod_id,
-        "decided_by_name": hod_name,
-        "decided_at": decided_at,
-        "verification_type": "INSTITUTIONAL_MANUAL_OFFICIAL_CHECK",
-        "missing_conditions": missing,
-    }
-    record.evidence = evidence
-
-    db.add(VerificationAttempt(
-        id=str(uuid.uuid4()),
-        ip_record_id=record.id,
-        source="final_decision",
-        attempt_number=(await db.execute(select(func.count()).select_from(VerificationAttempt).where(VerificationAttempt.ip_record_id == record.id, VerificationAttempt.source == "final_decision"))).scalar_one() + 1,
-        status=_enum_safe_verification_status(final),
-        result=rationale,
-        evidence={"trigger": "institutional_hod", "hod_user_id": hod_id, "missing_conditions": missing},
-    ))
-    if record.master_ip_id and final == "VERIFIED":
-        master = (await db.execute(select(MasterIpRecord).where(MasterIpRecord.id == record.master_ip_id))).scalar_one_or_none()
-        if master is not None:
-            master.verification_decision = {
-                "status": final,
-                "rationale": rationale,
-                "confidence": 0.8,
-                "decided_at": decided_at,
-            }
-    return final, missing

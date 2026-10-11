@@ -248,12 +248,14 @@ class TestStagedDispatch:
 
 
 class TestHodGate:
-    def test_verify_rejected_with_pending_hod(self, client, stage):
+    def test_hod_decision_disabled_while_pending_hod(self, client, stage):
+        """Manual verification was removed, so the pending-HOD gate is moot for
+        the decision itself. The staged association state is still reported."""
         hh = _h(client, _tok(HOD, "hod_admin", DEPT_ID))
         v = client.post(f"/api/v1/verification/institutional/{RECORD_ID}",
                         json={"decision": "verify"}, headers=hh)
-        assert v.status_code == 409, v.text
-        assert v.json()["error"] == "HOD_ASSOCIATION_PENDING"
+        assert v.status_code == 405, v.text
+        assert v.json()["error"] == "MANUAL_DECISION_DISABLED"
         g = client.get(f"/api/v1/verification/institutional/{RECORD_ID}", headers=hh)
         assert g.status_code == 200, g.text
         body = g.json()
@@ -339,25 +341,31 @@ class TestFacultyAcceptanceAndVerify:
         d2 = client.get("/api/v1/faculty/dashboard", headers=bh2)
         assert RECORD_ID in [x["id"] for x in d2.json()["recent_records"]]
 
-    def test_hod_verify_succeeds(self, client, stage):
+    def test_hod_verify_is_disabled_and_leaves_state_untouched(self, client, stage):
+        """Faculty acceptance readies the record, but no manual decision exists.
+
+        The staged association workflow still reaches HOD_VERIFICATION_PENDING;
+        only the human verify/accept/reject step is gone.
+        """
         hh = _h(client, _tok(HOD, "hod_admin", DEPT_ID))
         v = client.post(f"/api/v1/verification/institutional/{RECORD_ID}",
                         json={"decision": "verify", "remarks": "staged e2e"}, headers=hh)
-        assert v.status_code == 200, v.text
-        assert v.json()["final_verification_status"] == "VERIFIED"
+        assert v.status_code == 405, v.text
+        assert v.json()["error"] == "MANUAL_DECISION_DISABLED"
 
         async def _check():
             async with get_async_session_context() as db:
                 rec = (await db.execute(select(IpRecord).where(IpRecord.id == RECORD_ID))).scalar_one()
-                assert rec.verification_status == "VERIFIED"
-                assert rec.workflow_state == "VERIFIED"
+                # Acceptance completed, but nothing auto-grants or auto-verifies.
+                assert rec.workflow_state == "HOD_VERIFICATION_PENDING"
+                assert rec.verification_status != "VERIFIED"
         _run(_check())
 
     def test_same_hod_binding_rejects_other_hod(self, client, stage):
         # Replace scenario: a second HOD exists for the department but is
         # NOT active (the one-active-HOD rule forbids two active ones).
-        # The inactive HOD passes role/dept scoping, so only the same-HOD
-        # binding can reject them — isolating exactly that check.
+        # The inactive HOD passes role/dept scoping; the manual decision is
+        # still unavailable to them.
         hod2 = {"id": f"tg-hod2-{TAG}", "email": f"tghod2.{TAG}@example.test",
                 "faculty_id": f"FAC-TGHOD2-{TAG}", "full_name": f"Dr. Tango2 {TAG}"}
 
@@ -373,8 +381,8 @@ class TestFacultyAcceptanceAndVerify:
             h2 = _h(client, _tok(hod2, "hod_admin", DEPT_ID))
             v = client.post(f"/api/v1/verification/institutional/{RECORD_ID}",
                             json={"decision": "verify"}, headers=h2)
-            # Dept check passes (same dept); binding check must reject.
-            assert v.status_code == 403, v.text
+            assert v.status_code == 405, v.text
+            assert v.json()["error"] == "MANUAL_DECISION_DISABLED"
         finally:
             async def _restore():
                 async with get_async_session_context() as db:
@@ -386,17 +394,16 @@ class TestFacultyAcceptanceAndVerify:
 
 
 class TestGrantAndProfiles:
-    def test_grant_and_visibility(self, client, stage):
+    def test_grant_removed_and_visibility_preserved(self, client, stage):
+        """The grant decision is gone; record/profile visibility is unchanged."""
         ah = _h(client, _tok(ADMIN, "super_admin"))
         g = client.post(f"/api/v1/admin/ip-records/{RECORD_ID}/grant", json={}, headers=ah)
-        assert g.status_code == 200, g.text
-        assert g.json()["workflow_state"] == "GRANTED"
+        assert g.status_code == 404, g.text
 
         async def _check():
             async with get_async_session_context() as db:
                 rec = (await db.execute(select(IpRecord).where(IpRecord.id == RECORD_ID))).scalar_one()
-                assert rec.workflow_state == "GRANTED"
-                assert rec.verification_status == "VERIFIED"
+                assert rec.workflow_state != "GRANTED"
         _run(_check())
 
         for u in (FACA, FACB):
@@ -406,4 +413,4 @@ class TestGrantAndProfiles:
             assert p.json()["counts"]["total_documents"] >= 1
             m = client.get("/api/v1/faculty/my-records?per_page=50", headers=uh)
             ids = [x["id"] for x in m.json()["records"]]
-            assert RECORD_ID in ids, f"{u['id']} missing granted record"
+            assert RECORD_ID in ids, f"{u['id']} missing record"

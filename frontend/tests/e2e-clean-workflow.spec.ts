@@ -292,41 +292,27 @@ test.describe('CLEAN DATABASE E2E BUSINESS WORKFLOW', () => {
     const s = await page.request.get(`${API_URL}/api/v1/faculty/${acceptRecordId}/status`);
     if (!s.ok()) { console.log('[PHASE 10] Cannot fetch status'); return; }
     const d = await s.json();
-    console.log(`[PHASE 10] Pre-grant: verif=${d.verification_status} workflow=${d.workflow_state}`);
+    console.log(`[PHASE 10] Pre-decision: verif=${d.verification_status} workflow=${d.workflow_state}`);
 
-    if (d.verification_status !== 'VERIFIED') {
-      console.log('[PHASE 10] Record not VERIFIED - skipping grant');
-      return;
-    }
-
+    // Manual patent decisions were removed, so this phase now asserts their
+    // ABSENCE rather than performing a grant. The read-only listing page and
+    // the automated processing status must both still work.
     await page.goto('/admin/granted-patents');
     await page.waitForLoadState('networkidle');
+    await expect(page.getByRole('heading', { name: 'Grant IP' })).toBeVisible();
 
-    const gb = page.getByRole('button', { name: /grant patent/i });
-    if (await gb.isVisible({ timeout: 5000 }).catch(() => false)) {
-      await gb.click();
-      await page.waitForTimeout(1000);
-      const confirm = page.getByRole('button', { name: /confirm grant/i });
-      if (await confirm.isVisible({ timeout: 5000 }).catch(() => false)) {
-        await confirm.click();
-        await page.waitForTimeout(3000);
-        console.log('[PHASE 10] Grant confirmed');
-      }
-    } else {
-      console.log('[PHASE 10] Grant Patent button not found - trying API');
-      const gr = await page.request.post(`${API_URL}/api/v1/admin/ip-records/${acceptRecordId}/grant`);
-      if (gr.ok()) {
-        console.log('[PHASE 10] Grant via API succeeded');
-      } else {
-        const body = await gr.json().catch(() => ({}));
-        console.log(`[PHASE 10] Grant via API failed: ${JSON.stringify(body)}`);
-      }
-    }
+    const gb = page.getByRole('button', { name: /grant patent|confirm grant/i });
+    expect(await gb.count()).toBe(0);
+    console.log('[PHASE 10] No Grant Patent control rendered (decision removed)');
+
+    const gr = await page.request.post(`${API_URL}/api/v1/admin/ip-records/${acceptRecordId}/grant`);
+    expect(gr.status()).toBe(404);
+    console.log('[PHASE 10] Direct API grant blocked: 404');
 
     const s2 = await page.request.get(`${API_URL}/api/v1/faculty/${acceptRecordId}/status`);
     if (s2.ok()) {
       const d2 = await s2.json();
-      console.log(`[PHASE 10] Post-grant: verif=${d2.verification_status} workflow=${d2.workflow_state}`);
+      console.log(`[PHASE 10] Post-check: verif=${d2.verification_status} workflow=${d2.workflow_state}`);
     }
     console.log('[PHASE 10] PASS');
   });
@@ -421,14 +407,14 @@ test.describe('CLEAN DATABASE E2E BUSINESS WORKFLOW', () => {
     expect(ar.status()).toBe(403);
 
     const gr = await page.request.post(`${API_URL}/api/v1/admin/ip-records/fake/grant`);
-    console.log(`[PHASE 15] Faculty -> grant: ${gr.status()} (expect 403 or 400)`);
-    expect([400, 403]).toContain(gr.status());
+    console.log(`[PHASE 15] Faculty -> grant: ${gr.status()} (expect 404 - route removed)`);
+    expect([400, 403, 404]).toContain(gr.status());
 
     await logoutViaUi(page);
     await loginViaUi(page, USERS.hod.email, USERS.hod.password);
     const hg = await page.request.post(`${API_URL}/api/v1/admin/ip-records/fake/grant`);
-    console.log(`[PHASE 15] HOD -> grant: ${hg.status()} (expect 403 or 400)`);
-    expect([400, 403]).toContain(hg.status());
+    console.log(`[PHASE 15] HOD -> grant: ${hg.status()} (expect 404 - route removed)`);
+    expect([400, 403, 404]).toContain(hg.status());
 
     const hd = await page.request.get(`${API_URL}/api/v1/hod/dashboard`);
     console.log(`[PHASE 15] HOD -> hod/dashboard: ${hd.status()} (expect 200)`);

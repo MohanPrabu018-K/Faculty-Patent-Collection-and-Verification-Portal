@@ -194,7 +194,9 @@ test.describe('Phase 5 - Role Action Boundary Hardening', () => {
       timeout: 60000,
     });
     const code = res.status();
-    expect(code === 409 || code === 422 || code === 200, `Expected 409/422/200 for re-grant, got ${code}`).toBeTruthy();
+    // The grant decision was removed outright, so re-granting is not a 409/422
+    // business-rule rejection any more: the route itself is gone (404).
+    expect([404, 405, 409, 422], `Expected the grant route to be absent, got ${code}`).toContain(code);
     log('5.8', 'PASS', `Re-grant on GRANTED record handled: ${code}`);
   });
 });

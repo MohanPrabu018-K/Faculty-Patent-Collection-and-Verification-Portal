@@ -36,14 +36,50 @@ test.describe('Phase 11 - Super Admin Grant Hardening', () => {
     expect(page.url()).toContain(RECORD_A);
     log('11.3', 'PASS', 'GRANTED persists across navigation');
   });
-  test('11.4 Backend rejects grant on non-VERIFIED', async ({ page }) => {
+  test('11.4 Backend has no grant endpoint (direct API bypass blocked)', async ({ page }) => {
     setPhase('11.4');
     const csrf = await loginApi(page, U.admin.e, U.admin.p);
+    // The manual grant decision was removed, so the route no longer exists for
+    // ANY record and ANY role - not merely rejected for non-VERIFIED records.
     const res = await page.request.post(`${API}/api/v1/admin/ip-records/${RECORD_B}/grant`, {
       headers: { 'X-CSRF-Token': csrf }, data: { grant_date: '2026-09-20' },
     });
-    expect(res.status()).toBeGreaterThanOrEqual(400);
-    log('11.4', 'PASS', `Non-VERIFIED grant rejected: ${res.status()}`);
+    expect(res.status()).toBe(404);
+    const resVerified = await page.request.post(`${API}/api/v1/admin/ip-records/${RECORD_A}/grant`, {
+      headers: { 'X-CSRF-Token': csrf }, data: {},
+    });
+    expect(resVerified.status()).toBe(404);
+    log('11.4', 'PASS', `Grant endpoint removed: ${res.status()} / ${resVerified.status()}`);
+  });
+  test('11.4b No Grant Patent button in the Grant IP admin page', async ({ page }) => {
+    setPhase('11.4b');
+    await loginUi(page, U.admin.e, U.admin.p);
+    await page.goto(`${BASE}/admin/granted-patents`, { waitUntil: 'networkidle' });
+    await page.waitForTimeout(1500);
+    const grantBtn = page.locator('button').filter({ hasText: /grant patent|confirm grant/i });
+    expect(await grantBtn.count()).toBe(0);
+    // The page itself is preserved (read-only listing + filters).
+    await expect(page.getByRole('heading', { name: 'Grant IP' })).toBeVisible();
+    log('11.4b', 'PASS', 'No Grant Patent control; Grant IP page still listed');
+  });
+  test('11.4c No Manual Verify button in the HOD documents page', async ({ page }) => {
+    setPhase('11.4c');
+    await loginUi(page, U.hod.e, U.hod.p);
+    await page.goto(`${BASE}/hod/documents`, { waitUntil: 'networkidle' });
+    await page.waitForTimeout(1500);
+    const manualVerify = page.locator('button').filter({ hasText: /manual verify|confirm verified/i });
+    expect(await manualVerify.count()).toBe(0);
+    await expect(page.getByRole('heading', { name: 'Department Documents' })).toBeVisible();
+    log('11.4c', 'PASS', 'No Manual Verify control; HOD documents page still listed');
+  });
+  test('11.4d HOD institutional verify endpoint rejects the decision', async ({ page }) => {
+    setPhase('11.4d');
+    const csrf = await loginApi(page, U.hod.e, U.hod.p);
+    const res = await page.request.post(`${API}/api/v1/verification/institutional/${RECORD_A}`, {
+      headers: { 'X-CSRF-Token': csrf }, data: { decision: 'verify' },
+    });
+    expect(res.status()).toBe(405);
+    log('11.4d', 'PASS', `Institutional verify disabled: ${res.status()}`);
   });
   test('11.5 No Revoke button for GRANTED', async ({ page }) => {
     test.slow();

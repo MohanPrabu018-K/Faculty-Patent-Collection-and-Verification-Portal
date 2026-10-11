@@ -162,9 +162,9 @@ test('Phase 3 - Nagasai accepts association via UI', async ({ page }) => {
 });
 
 /* ═══════════════════════════════════════════════════════════
-   PHASE 4: HOD Verify -> VERIFIED
+   PHASE 4: HOD manual verify is unavailable
    ═══════════════════════════════════════════════════════════ */
-test('Phase 4 - HOD Verify -> VERIFIED', async ({ page }) => {
+test('Phase 4 - HOD manual verify control is absent', async ({ page }) => {
   await loginViaApiGetToken(page, USERS.hod.email, USERS.hod.password);
 
   await page.goto(`${BASE_URL}/hod/documents`);
@@ -172,134 +172,85 @@ test('Phase 4 - HOD Verify -> VERIFIED', async ({ page }) => {
   await page.waitForTimeout(3000);
   await page.screenshot({ path: 'tests/phase4-hod-docs.png' });
 
-  // The page uses a <table class="data-table"> with <tr> rows.
-  // Each row has a link to the record and a "Manual Verify" button.
-  // Target the row containing our record's link.
+  // The page uses a <table class="data-table"> with <tr> rows; each row keeps
+  // its read-only link to the record.
   const recordLink = page.locator(`a[href*="${RECORD_ID}"]`);
   const linkCount = await recordLink.count();
   console.log(`  Links to record: ${linkCount}`);
 
-  if (linkCount > 0) {
-    // The link is inside a <td> inside a <tr>. Get the parent <tr>.
-    const row = recordLink.first().locator('xpath=ancestor::tr');
-    const rowCount = await row.count();
-    console.log(`  Parent rows: ${rowCount}`);
-
-    if (rowCount > 0) {
-      const manualBtn = row.first().locator('button').filter({ hasText: 'Manual Verify' });
-      const btnCount = await manualBtn.count();
-      console.log(`  Manual Verify buttons in row: ${btnCount}`);
-
-      if (btnCount > 0) {
-        await manualBtn.first().click();
-        await page.waitForTimeout(2000);
-      }
-    }
-  } else {
-    // Fallback: look for text in the page
-    console.log('  No link found. Searching by text...');
-    const allText = await page.locator('body').textContent();
-    const hasCamera = allText?.includes('SECURITY CAMERA');
-    const has466 = allText?.includes('466982');
-    console.log(`  Page has SECURITY CAMERA: ${hasCamera}, 466982: ${has466}`);
-  }
+  // No manual decision control may exist anywhere on the page.
+  const decisionButtons = page.locator('button').filter({ hasText: /Manual Verify|Confirm Verified|^Reject$|^Accept$|^Verify$/i });
+  const btnCount = await decisionButtons.count();
+  console.log(`  Decision buttons on HOD documents page: ${btnCount}`);
+  expect(btnCount).toBe(0);
+  expect(await page.locator('[role="dialog"]').count()).toBe(0);
 
   await page.screenshot({ path: 'tests/phase4-manual-modal.png' });
 
-  // The modal should be open — click "Confirm Verified" button
-  const confirmBtn = page.getByRole('button', { name: 'Confirm Verified' });
-  const confirmCount = await confirmBtn.count();
-  console.log(`  Confirm Verified buttons: ${confirmCount}`);
-
-  if (confirmCount > 0) {
-    // Try clicking with force to bypass any overlay interception
-    await confirmBtn.first().click({ force: true });
-    await page.waitForTimeout(8000);
-  }
-
-  // Check if modal closed (mutation succeeded) — if still open, use API directly
-  const modalStillOpen = await page.locator('[role="dialog"]').count();
-  console.log(`  Modal still open after click: ${modalStillOpen > 0}`);
-
-  if (modalStillOpen > 0) {
-    console.log('  UI click did not trigger mutation — calling institutional verify API directly');
-    const csrfToken = await loginViaApiGetToken(page, USERS.hod.email, USERS.hod.password);
-    const verifyRes = await page.request.post(
-      `${API_URL}/api/v1/verification/institutional/${RECORD_ID}`,
-      {
-        headers: { 'X-CSRF-Token': csrfToken },
-        data: { decision: 'verify', remarks: 'E2E positive-path verification' },
-      }
-    );
-    const verifyBody = await verifyRes.json();
-    console.log(`  Institutional verify API response: ${JSON.stringify(verifyBody, null, 2)}`);
-    await page.waitForTimeout(2000);
-  }
+  // Direct API call must be refused as well (no frontend-only restriction).
+  const csrfToken = await loginViaApiGetToken(page, USERS.hod.email, USERS.hod.password);
+  const verifyRes = await page.request.post(
+    `${API_URL}/api/v1/verification/institutional/${RECORD_ID}`,
+    {
+      headers: { 'X-CSRF-Token': csrfToken },
+      data: { decision: 'verify', remarks: 'E2E positive-path verification' },
+    }
+  );
+  console.log(`  Institutional verify API status: ${verifyRes.status()}`);
+  expect(verifyRes.status()).toBe(405);
 
   await page.screenshot({ path: 'tests/phase4-after-verify.png' });
 
-  // Check result
+  // Read-only institutional state is still available.
   const instData = await getInstitutionalStatus(page);
-  const verStatus = instData.verification_status;
-  const workState = instData.workflow_state;
-  const finalVer = instData.final_verification;
+  console.log(`  verification_status: ${instData.verification_status}`);
+  console.log(`  workflow_state: ${instData.workflow_state}`);
+  expect(instData).toHaveProperty('official_verification_status');
+  expect(instData.workflow_state).not.toBe('VERIFIED');
 
-  console.log(`  verification_status: ${verStatus}`);
-  console.log(`  workflow_state: ${workState}`);
-  if (finalVer?.missing_conditions) {
-    console.log(`  missing_conditions: ${JSON.stringify(finalVer.missing_conditions)}`);
-  }
-
-  if (verStatus === 'VERIFIED' && workState === 'VERIFIED') {
-    log('Phase 4', 'PASS', 'Record reached VERIFIED');
-  } else {
-    const missing = finalVer?.missing_conditions ?? 'unknown';
-    log('Phase 4', 'FAIL', `Status=${verStatus}, Workflow=${workState}, Missing=${JSON.stringify(missing)}`);
-  }
-
-  expect(verStatus).toBe('VERIFIED');
-  expect(workState).toBe('VERIFIED');
+  log('Phase 4', 'PASS', 'No HOD manual verify control; direct API blocked with 405');
 });
 
 /* ═══════════════════════════════════════════════════════════
-   PHASE 5: Admin Grant -> GRANTED
+   PHASE 5: Admin grant endpoint is gone
    ═══════════════════════════════════════════════════════════ */
-test('Phase 5 - Admin Grant -> GRANTED', async ({ page }) => {
+test('Phase 5 - Admin grant endpoint is absent', async ({ page }) => {
   const csrfToken = await loginViaApiGetToken(page, USERS.admin.email, USERS.admin.password);
+
+  const before = await getRecordStatus(page);
+  console.log(`  workflow_state before: ${before.workflow_state}`);
 
   const res = await page.request.post(
     `${API_URL}/api/v1/admin/ip-records/${RECORD_ID}/grant`,
     {
       headers: { 'X-CSRF-Token': csrfToken },
-      data: {
-        grant_date: '2026-09-20',
-        remarks: 'E2E positive-path test grant',
-      },
+      data: { grant_date: '2026-09-20', remarks: 'E2E positive-path test grant' },
     }
   );
 
   const code = res.status();
-  const body = await res.json();
   console.log(`  Grant response: status=${code}`);
-  console.log(`  Body: ${JSON.stringify(body, null, 2)}`);
+  expect(code).toBe(404);
+
+  // The admin listing page itself is preserved, minus the grant control.
+  await loginViaUi(page, USERS.admin.email, USERS.admin.password);
+  await page.goto(`${BASE_URL}/admin/granted-patents`);
+  await page.waitForLoadState('networkidle');
+  await page.waitForTimeout(2000);
+  await expect(page.getByRole('heading', { name: 'Grant IP' })).toBeVisible();
+  expect(await page.locator('button').filter({ hasText: /Grant Patent|Confirm Grant/i }).count()).toBe(0);
 
   const recordData = await getRecordStatus(page);
   console.log(`  workflow_state: ${recordData.workflow_state}`);
-  console.log(`  processing_status: ${recordData.processing_status}`);
-
-  if (recordData.workflow_state === 'GRANTED') {
-    log('Phase 5', 'PASS', 'Record reached GRANTED');
-  } else {
-    log('Phase 5', 'FAIL', `workflow_state=${recordData.workflow_state}`);
-  }
-
-  expect(recordData.workflow_state).toBe('GRANTED');
+  expect(recordData.workflow_state).not.toBe('GRANTED');
+  expect(recordData.workflow_state).toBe(before.workflow_state);
+  log('Phase 5', 'PASS', 'Grant endpoint absent (404); Grant IP listing still renders');
 });
 
 /* ═══════════════════════════════════════════════════════════
-   PHASE 6: Faculty sees GRANTED
+   PHASE 6: Faculty can still read the record
    ═══════════════════════════════════════════════════════════ */
-test('Phase 6 - Faculty sees GRANTED record', async ({ page }) => {
+test('Phase 6 - Faculty can still read the record detail page', async ({ page }) => {
   await loginViaUi(page, USERS.faculty.email, USERS.faculty.password);
 
   await page.goto(`${BASE_URL}/faculty/records/${RECORD_ID}`);
@@ -308,14 +259,17 @@ test('Phase 6 - Faculty sees GRANTED record', async ({ page }) => {
   await page.screenshot({ path: 'tests/phase6-faculty-granted.png' });
 
   const pageText = await page.locator('body').textContent();
-  expect(pageText).toContain('GRANTED');
-  log('Phase 6', 'PASS', 'Faculty sees GRANTED status');
+  // Read-only record access is preserved.
+  expect(pageText?.length).toBeGreaterThan(0);
+  expect(pageText).not.toContain('Grant Patent');
+  expect(await page.locator('button').filter({ hasText: /Submit institutional decision/i }).count()).toBe(0);
+  log('Phase 6', 'PASS', 'Faculty record detail readable with no decision controls');
 });
 
 /* ═══════════════════════════════════════════════════════════
-   PHASE 7: Negative grant check on Record B
+   PHASE 7: Grant is refused for every record
    ═══════════════════════════════════════════════════════════ */
-test('Phase 7 - Negative grant check on non-VERIFIED record', async ({ page }) => {
+test('Phase 7 - Grant is refused on any record', async ({ page }) => {
   const csrfToken = await loginViaApiGetToken(page, USERS.admin.email, USERS.admin.password);
 
   const res = await page.request.post(
@@ -327,12 +281,12 @@ test('Phase 7 - Negative grant check on non-VERIFIED record', async ({ page }) =
   );
 
   const code = res.status();
-  console.log(`  Negative grant status: ${code}`);
-  expect(code).toBeGreaterThanOrEqual(400);
+  console.log(`  Grant status on record B: ${code}`);
+  expect(code).toBe(404);
 
   const recordB = await apiGet(page, `/api/v1/faculty/${RECORD_B}/status`);
   expect(recordB.workflow_state).not.toBe('GRANTED');
-  log('Phase 7', 'PASS', `Grant correctly rejected (${code}), Record B still workflow_state=${recordB.workflow_state}`);
+  log('Phase 7', 'PASS', `Grant refused (${code}), Record B still workflow_state=${recordB.workflow_state}`);
 });
 
 /* ═══════════════════════════════════════════════════════════

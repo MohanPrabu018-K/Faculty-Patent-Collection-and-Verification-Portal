@@ -266,7 +266,15 @@ def _add_internal_contributor(record_id, user_id, name="B12 Internal"):
     asyncio.run(_go())
 
 
-class TestHodVerifyGate:
+class TestManualDecisionDisabled:
+    """Manual patent decisions (verify / accept / reject) were removed.
+
+    The faculty association workflow these tests used to gate is UNCHANGED and
+    still fully functional; only the human decision step is gone. Each case
+    below proves the decision POST is refused while the surrounding legitimate
+    behaviour still works.
+    """
+
     def _setup(self, client, tag):
         sender = _mkuser(f"{tag}s")
         other = _mkuser(f"{tag}o")
@@ -276,7 +284,7 @@ class TestHodVerifyGate:
         _create_record(rid, sender["id"])
         return sender, other, rid
 
-    def test_verify_rejected_while_internal_approval_pending(self, client):
+    def test_verify_disabled_while_internal_approval_pending(self, client):
         sender, other, rid = self._setup(client, "p")
         try:
             _add_internal_contributor(rid, other["id"])
@@ -288,8 +296,8 @@ class TestHodVerifyGate:
 
             v = client.post(f"/api/v1/verification/institutional/{rid}",
                             json={"decision": "verify"}, headers=_hod_headers(client))
-            assert v.status_code == 409, v.text
-            assert v.json()["error"] == "ASSOCIATION_PENDING"
+            assert v.status_code == 405, v.text
+            assert v.json()["error"] == "MANUAL_DECISION_DISABLED"
 
             # Nothing was recorded: no institutional attempt exists.
             async def _check():
@@ -301,7 +309,7 @@ class TestHodVerifyGate:
                     assert rows == []
             asyncio.run(_check())
 
-            # Eligibility endpoint exposes the outstanding approver.
+            # Eligibility endpoint still exposes the outstanding approver.
             g = client.get(f"/api/v1/verification/institutional/{rid}",
                            headers=_hod_headers(client))
             assert g.status_code == 200, g.text
@@ -309,7 +317,7 @@ class TestHodVerifyGate:
         finally:
             _cleanup([sender["id"], other["id"]], [rid])
 
-    def test_verify_allowed_after_accept_and_persists_verified(self, client):
+    def test_association_acceptance_works_but_verify_stays_disabled(self, client):
         sender, other, rid = self._setup(client, "a")
         try:
             _add_internal_contributor(rid, other["id"])
@@ -322,29 +330,25 @@ class TestHodVerifyGate:
             a = client.post(f"/api/v1/associations/{r.json()['id']}/respond?action=accepted",
                             json={}, headers=rh)
             assert a.status_code == 200, a.text
+            assert a.json()["status"] == "ACCEPTED"
 
             v = client.post(f"/api/v1/verification/institutional/{rid}",
                             json={"decision": "verify", "remarks": "checked"},
                             headers=_hod_headers(client))
-            assert v.status_code == 200, v.text
-            body = v.json()
-            assert body["final_verification_status"] == "VERIFIED"
-            assert body["workflow_state"] == "VERIFIED"
-            assert body["missing_conditions"] == []
-            # Bug 6: automated official verification stays untouched / not required.
-            assert body["official_verification_status"] == "VERIFICATION_REQUIRED"
+            assert v.status_code == 405, v.text
+            assert v.json()["error"] == "MANUAL_DECISION_DISABLED"
 
+            # Acceptance alone does not verify the record.
             async def _check():
                 async with get_async_session_context() as db:
                     rec = (await db.execute(select(IpRecord).where(IpRecord.id == rid))).scalar_one()
-                    assert rec.verification_status == "VERIFIED"
-                    assert rec.workflow_state == "VERIFIED"
-                    assert rec.official_verification_status == "VERIFICATION_REQUIRED"
+                    assert rec.verification_status != "VERIFIED"
+                    assert rec.workflow_state != "VERIFIED"
             asyncio.run(_check())
         finally:
             _cleanup([sender["id"], other["id"]], [rid])
 
-    def test_verify_allowed_external_only(self, client):
+    def test_verify_disabled_external_only(self, client):
         sender, other, rid = self._setup(client, "e")
         try:
             async def _ext():
@@ -359,22 +363,20 @@ class TestHodVerifyGate:
             asyncio.run(_ext())
             v = client.post(f"/api/v1/verification/institutional/{rid}",
                             json={"decision": "verify"}, headers=_hod_headers(client))
-            assert v.status_code == 200, v.text
-            assert v.json()["final_verification_status"] == "VERIFIED"
+            assert v.status_code == 405, v.text
         finally:
             _cleanup([sender["id"], other["id"]], [rid])
 
-    def test_verify_allowed_no_internal_links(self, client):
+    def test_verify_disabled_no_internal_links(self, client):
         sender, other, rid = self._setup(client, "n")
         try:
             v = client.post(f"/api/v1/verification/institutional/{rid}",
                             json={"decision": "verify"}, headers=_hod_headers(client))
-            assert v.status_code == 200, v.text
-            assert v.json()["final_verification_status"] == "VERIFIED"
+            assert v.status_code == 405, v.text
         finally:
             _cleanup([sender["id"], other["id"]], [rid])
 
-    def test_reject_still_recordable_while_pending(self, client):
+    def test_reject_disabled_while_pending(self, client):
         sender, other, rid = self._setup(client, "r")
         try:
             _add_internal_contributor(rid, other["id"])
@@ -386,15 +388,17 @@ class TestHodVerifyGate:
             v = client.post(f"/api/v1/verification/institutional/{rid}",
                             json={"decision": "reject", "remarks": "mismatch"},
                             headers=_hod_headers(client))
-            assert v.status_code == 200, v.text
-            assert v.json()["decision"] == "reject"
+            assert v.status_code == 405, v.text
+            assert v.json()["error"] == "MANUAL_DECISION_DISABLED"
         finally:
             _cleanup([sender["id"], other["id"]], [rid])
 
 
 # ---------------------------------------------------------------- Bug 7 ---
-class TestHodManualVerifyAndGrantVisibility:
-    def test_verify_grant_profile_visibility(self, client):
+class TestDecisionRemovedProfileVisibility:
+    """Grant + institutional verify are gone; profile/record visibility is not."""
+
+    def test_grant_and_verify_removed_but_visibility_preserved(self, client):
         sender = _mkuser("g7s")
         other = _mkuser("g7o")
         for u in (sender, other):
@@ -415,21 +419,24 @@ class TestHodManualVerifyAndGrantVisibility:
 
             v = client.post(f"/api/v1/verification/institutional/{rid}",
                             json={"decision": "verify"}, headers=_hod_headers(client))
-            assert v.status_code == 200, v.text
-            assert v.json()["final_verification_status"] == "VERIFIED"
+            assert v.status_code == 405, v.text
 
             g = client.post(f"/api/v1/admin/ip-records/{rid}/grant", json={},
                             headers=_admin_headers(client))
-            assert g.status_code == 200, g.text
-            assert g.json()["workflow_state"] == "GRANTED"
+            assert g.status_code == 404, g.text
 
-            # Faculty profile + records surface the granted patent for the
+            async def _check():
+                async with get_async_session_context() as db:
+                    rec = (await db.execute(select(IpRecord).where(IpRecord.id == rid))).scalar_one()
+                    assert rec.workflow_state != "GRANTED"
+            asyncio.run(_check())
+
+            # Faculty profile + records still surface the record for the
             # accepted contributor (backend rows are the source of truth).
             p = client.get("/api/v1/faculty/profile", headers=rh)
             assert p.status_code == 200, p.text
-            assert p.json()["counts"]["verified"] >= 1
-            m = client.get("/api/v1/faculty/my-records?verification_status=VERIFIED",
-                           headers=rh)
+            assert p.json()["counts"]["total_documents"] >= 1
+            m = client.get("/api/v1/faculty/my-records?per_page=50", headers=rh)
             assert m.status_code == 200, m.text
             assert rid in [x["id"] for x in m.json()["records"]]
         finally:

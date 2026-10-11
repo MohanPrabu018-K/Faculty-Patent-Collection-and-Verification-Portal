@@ -265,7 +265,7 @@ export function RecordDetailPage() {
         ]} />
       </SectionCard>
 
-      <InstitutionalVerificationCard recordId={String(recordId || '')} canVerify={user?.role === 'hod_admin' || user?.role === 'super_admin'} />
+      <InstitutionalVerificationCard recordId={String(recordId || '')} />
 
       <SectionCard title="Workflow & Master Record" subtitle="Where this submission stands, and the master record it belongs to.">
         <SectionList items={[
@@ -381,70 +381,31 @@ export function RecordDetailPage() {
   );
 }
 
-function InstitutionalVerificationCard({ recordId, canVerify }: { recordId: string; canVerify: boolean }) {
-  const queryClient = useQueryClient();
-  const [decision, setDecision] = useState<'verify' | 'reject' | 'clarification'>('verify');
-  const [remarks, setRemarks] = useState('');
-  const [evidenceRef, setEvidenceRef] = useState('');
-  const [confirmed, setConfirmed] = useState(false);
-  const [result, setResult] = useState<{ final_verification_status: string; workflow_state: string; official_verification_status: string; missing_conditions: string[] } | null>(null);
+/**
+ * Read-only institutional verification history.
+ *
+ * Manual institutional decisions (verify / accept / reject) were removed from
+ * the HOD and Super Admin surfaces, so this card only *reports* what the
+ * automated pipeline and any historical HOD decisions produced. It never
+ * offers a decision control.
+ */
+function InstitutionalVerificationCard({ recordId }: { recordId: string }) {
   const { data, isLoading, error } = useQuery({ queryKey: ['institutional', recordId], queryFn: () => api.institutionalStatus(recordId), enabled: Boolean(recordId) });
-  const submit = useMutation({
-    mutationFn: () => api.institutionalVerify(recordId, { decision, remarks: remarks || undefined, evidence_ref: evidenceRef || undefined }),
-    onSuccess: async (res) => {
-      setRemarks(''); setEvidenceRef(''); setConfirmed(false);
-      setResult({ final_verification_status: res.final_verification_status, workflow_state: res.workflow_state, official_verification_status: res.official_verification_status, missing_conditions: res.missing_conditions ?? [] });
-      await queryClient.invalidateQueries({ queryKey: ['institutional', recordId] });
-      await queryClient.invalidateQueries({ queryKey: ['faculty-record', recordId] });
-    },
-  });
   const inst = (data?.institutional ?? null) as Record<string, unknown> | null;
   const final = (data?.final_verification ?? null) as Record<string, unknown> | null;
-  const needsManualCheck = String(data?.official_verification_status || 'VERIFICATION_REQUIRED') === 'VERIFICATION_REQUIRED' && (!inst || inst.decision !== 'verify');
   return (
-    <SectionCard title="Institutional Verification (HOD)" subtitle="Human department review — distinct from official IP India verification. Official state is never overwritten.">
+    <SectionCard title="Institutional Verification (HOD)" subtitle="Read-only record of automated verification and any past HOD decisions. Official state is never overwritten.">
       {isLoading ? <div className="muted">Loading institutional state…</div> : error ? <div className="alert alert-error">{String(error)}</div> : (
         <div className="stack">
           <SectionList items={[
             { label: 'Official verification (automated)', value: <StatusBadge value={String(data?.official_verification_status || 'VERIFICATION_REQUIRED')} /> },
-            { label: 'Institutional verification (HOD manual check)', value: inst ? <StatusBadge value={String((inst.decision as string) === 'verify' ? 'INSTITUTIONALLY_VERIFIED' : String(inst.decision).toUpperCase())} /> : 'Pending HOD review' },
+            { label: 'Institutional verification (HOD manual check)', value: inst ? <StatusBadge value={String((inst.decision as string) === 'verify' ? 'INSTITUTIONALLY_VERIFIED' : String(inst.decision).toUpperCase())} /> : 'No institutional decision recorded' },
             { label: 'Final verification', value: <StatusBadge value={String((final?.status as string) || data?.verification_status || 'VERIFICATION_REQUIRED')} /> },
             ...(inst ? [{ label: 'Decided by (HOD)', value: display((inst.hod_faculty_id as string) || (inst.hod_user_id as string)) }, { label: 'Remarks', value: display(inst.remarks) }, { label: 'Evidence ref', value: display(inst.evidence_ref) }, { label: 'Decided at', value: display(inst.created_at) }] : []),
             ...(final?.rationale ? [{ label: 'Final rationale', value: display(final.rationale) }] : []),
             ...(Array.isArray(final?.missing_conditions) && (final.missing_conditions as unknown[]).length ? [{ label: 'Blocked by', value: (final.missing_conditions as unknown[]).map(String).join('; ') }] : []),
           ]} />
-          {needsManualCheck && canVerify ? (
-            <div className="alert" style={{ background: '#fff7e8', border: '1px solid #f0d9a8' }}>
-              Manual official verification required: check this record against the official IP portal, then record your decision below.
-            </div>
-          ) : null}
-          {canVerify ? (
-            <div className="stack">
-              <div className="toolbar">
-                <select className="toolbar-input" value={decision} onChange={(e) => { setDecision(e.target.value as any); setConfirmed(false); setResult(null); }} aria-label="Decision">
-                  <option value="verify">Verify / Accept</option>
-                  <option value="reject">Reject</option>
-                  <option value="clarification">Needs clarification</option>
-                </select>
-              </div>
-              <label className="field"><span>Remarks (optional)</span><input className="toolbar-input" value={remarks} onChange={(e) => setRemarks(e.target.value)} placeholder="Review notes" /></label>
-              <label className="field"><span>Evidence / reference (optional)</span><input className="toolbar-input" value={evidenceRef} onChange={(e) => setEvidenceRef(e.target.value)} placeholder="Certificate page, register entry…" /></label>
-              {decision === 'verify' ? (
-                <label className="pill-row" style={{ gap: 8, alignItems: 'flex-start' }}>
-                  <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} aria-label="Manual official verification confirmation" style={{ marginTop: 4 }} />
-                  <span>I have checked this IP record against the official IP portal and confirm that the submitted details match.</span>
-                </label>
-              ) : null}
-              {submit.isError ? <div className="alert alert-error">{String(submit.error)}</div> : null}
-              {result ? (
-                <div className="alert alert-success">
-                  Decision recorded. Official: {result.official_verification_status} (unchanged) · Final: {result.final_verification_status} · Workflow: {result.workflow_state}
-                  {result.missing_conditions.length ? ` · Blocked by: ${result.missing_conditions.join('; ')}` : ''}
-                </div>
-              ) : null}
-              <button className="btn btn-primary" disabled={submit.isPending || (decision === 'verify' && !confirmed)} onClick={() => submit.mutate()}>{submit.isPending ? 'Saving…' : 'Submit institutional decision'}</button>
-            </div>
-          ) : <p className="muted">Only HOD (own department) or Super Admin can submit institutional verification.</p>}
+          <p className="muted">Verification status is set by the automated processing pipeline. Manual verify, accept and reject decisions are no longer available.</p>
         </div>
       )}
     </SectionCard>

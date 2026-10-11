@@ -10,7 +10,6 @@ import { AdminGrantedPatentsPage } from './AdminGrantedPatentsPage';
 const { apiStubs, notifyMock } = vi.hoisted(() => ({
   apiStubs: {
     adminRecords: vi.fn(),
-    adminGrantPatent: vi.fn(),
     createExport: vi.fn(),
   },
   notifyMock: vi.fn(),
@@ -47,7 +46,6 @@ function renderPage() {
 beforeEach(() => {
   cleanup();
   apiStubs.adminRecords.mockReset();
-  apiStubs.adminGrantPatent.mockReset();
   apiStubs.createExport.mockReset();
   notifyMock.mockReset();
   apiStubs.adminRecords.mockResolvedValue({ records: [], total: 0, page: 1, per_page: 20 });
@@ -74,5 +72,50 @@ describe('AdminGrantedPatentsPage verification filter', () => {
     const lastParams = String(apiStubs.adminRecords.mock.calls.at(-1)?.[0] ?? '');
     expect(lastParams).toContain('verification_status=VERIFIED');
     expect(lastParams).not.toContain('workflow_state=');
+  });
+});
+
+/**
+ * The manual grant decision was removed from the admin surface. The page itself
+ * (a historical record listing) is preserved: read-only rows, filters and
+ * export remain, but no Grant Patent control exists.
+ */
+describe('AdminGrantedPatentsPage — grant action removed', () => {
+  function verifiedRow() {
+    return {
+      id: 'rec-9',
+      ip_type: 'PATENT',
+      patent_number: 'IN999',
+      title: 'Verified Widget',
+      verification_status: 'VERIFIED',
+      workflow_state: 'VERIFIED',
+      processing_status: 'COMPLETED',
+    };
+  }
+
+  it('renders no Grant Patent or Confirm Grant control for a verified record', async () => {
+    apiStubs.adminRecords.mockResolvedValue({ records: [verifiedRow()], total: 1, page: 1, per_page: 20 });
+    renderPage();
+    await screen.findByText('Verified Widget');
+    expect(screen.queryByRole('button', { name: /grant patent/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /confirm grant/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /granting/i })).toBeNull();
+  });
+
+  it('keeps the record readable via its Open link', async () => {
+    apiStubs.adminRecords.mockResolvedValue({ records: [verifiedRow()], total: 1, page: 1, per_page: 20 });
+    renderPage();
+    await screen.findByText('Verified Widget');
+    expect(screen.getByRole('link', { name: 'Open' })).toHaveAttribute('href', '/faculty/records/rec-9');
+  });
+
+  it('keeps the historical GRANTED marker as a read-only badge', async () => {
+    apiStubs.adminRecords.mockResolvedValue({
+      records: [{ ...verifiedRow(), workflow_state: 'GRANTED' }], total: 1, page: 1, per_page: 20,
+    });
+    renderPage();
+    await screen.findByText('Verified Widget');
+    expect(screen.getAllByText(/Granted/).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: /grant/i })).toBeNull();
   });
 });

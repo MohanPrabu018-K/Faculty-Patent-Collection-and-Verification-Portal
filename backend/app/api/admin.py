@@ -872,13 +872,21 @@ async def admin_get_ip_record(record_id: str, current_user: dict = Depends(get_c
 
 @router.patch("/ip-records/{record_id}", status_code=status.HTTP_200_OK)
 async def admin_update_ip_record(record_id: str, request: Request, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+    """Administrative record maintenance (metadata, department, archival).
+
+    ``verification_status`` is deliberately NOT writable here: manual patent
+    decisions (grant / verify / accept / reject) were removed from the admin
+    surface, and letting this endpoint stamp a verification status would be a
+    direct API bypass of that restriction. Verification status is written only
+    by the automated processing pipeline.
+    """
     body = await request.json()
     result = await db.execute(select(IpRecord).where(IpRecord.id == record_id))
     record = result.scalar_one_or_none()
     if not record:
         raise NotFoundError("IP record", record_id)
     before = {"title": record.title, "verification_status": record.verification_status, "processing_status": record.processing_status, "department_id": record.department_id, "designation_id": record.designation_id, "is_archived": record.is_archived}
-    for field in ("title", "verification_status", "processing_status", "department_id", "designation_id", "is_archived"):
+    for field in ("title", "processing_status", "department_id", "designation_id", "is_archived"):
         if field in body and body[field] is not None:
             setattr(record, field, body[field])
     await db.commit()
@@ -892,68 +900,6 @@ async def admin_update_ip_record(record_id: str, request: Request, current_user:
         after={"is_archived": record.is_archived},
     )
     return {"id": record.id, "message": "IP record updated", "is_archived": record.is_archived}
-
-
-@router.post("/ip-records/{record_id}/grant", status_code=status.HTTP_200_OK)
-async def admin_grant_patent(
-    record_id: str,
-    request: Request,
-    current_user: dict = Depends(get_current_user),
-    db: AsyncSession = Depends(get_async_session),
-):
-    """Grant a verified patent. Only Super Admin can grant. Record must be VERIFIED."""
-    from app.services.workflow import WorkflowState, can_transition
-
-    result = await db.execute(select(IpRecord).where(IpRecord.id == record_id))
-    record = result.scalar_one_or_none()
-    if not record:
-        raise NotFoundError("IP record", record_id)
-
-    if record.verification_status != "VERIFIED":
-        from app.core.exceptions import PortalError
-        raise PortalError(
-            message="Only verified records can be granted. Current status: " + (record.verification_status or "UNVERIFIED"),
-            error_code="GRANT_NOT_ELIGIBLE",
-            status_code=422,
-        )
-
-    current_state = record.workflow_state or "VERIFIED"
-    if not can_transition(current_state, WorkflowState.GRANTED):
-        from app.core.exceptions import PortalError
-        raise PortalError(
-            message="Cannot grant from current workflow state: " + current_state,
-            error_code="GRANT_TRANSITION_INVALID",
-            status_code=422,
-        )
-
-    body = await request.json() if request.headers.get("content-type") == "application/json" else {}
-    body = body if isinstance(body, dict) else {}
-
-    before = {
-        "verification_status": record.verification_status,
-        "workflow_state": record.workflow_state,
-    }
-
-    record.workflow_state = WorkflowState.GRANTED.value
-    record.evidence = {**(record.evidence or {}), "granted_at": datetime.utcnow().isoformat(), "granted_by": current_user.get("id")}
-    await db.commit()
-
-    log_audit(
-        actor=current_user.get("id"),
-        action="PATENT_GRANTED",
-        target_type="ip_record",
-        target_id=record.id,
-        status="success",
-        before=before,
-        after={"workflow_state": record.workflow_state, "verification_status": record.verification_status},
-    )
-
-    return {
-        "id": record.id,
-        "workflow_state": record.workflow_state,
-        "verification_status": record.verification_status,
-        "message": "Patent granted successfully",
-    }
 
 
 @router.get("/duplicates", status_code=status.HTTP_200_OK)
