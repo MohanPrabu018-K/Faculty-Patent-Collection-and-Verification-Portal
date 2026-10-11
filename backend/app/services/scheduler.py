@@ -80,8 +80,13 @@ async def lifespan_scheduler(app) -> AsyncGenerator[None, None]:
         scheduler_settings.expiry_check_interval_hours,
     )
     
-    _scheduler.start()
-    logger.info("Scheduler started")
+    # Idempotent start: the scheduler is a process-wide singleton, so repeated
+    # application lifespans in one process (e.g. the test-suite, which opens a
+    # TestClient per module) must not call start() twice on the same instance,
+    # which raises apscheduler SchedulerAlreadyRunningError.
+    if not _scheduler.running:
+        _scheduler.start()
+        logger.info("Scheduler started")
     
     try:
         yield
@@ -89,7 +94,8 @@ async def lifespan_scheduler(app) -> AsyncGenerator[None, None]:
         logger.info("Shutting down scheduler")
         if _scheduler is not None:
             try:
-                _scheduler.shutdown(wait=True)
+                if _scheduler.running:
+                    _scheduler.shutdown(wait=True)
             except Exception:
                 logger.warning("Scheduler shutdown failed", exc_info=True)
             _scheduler = None

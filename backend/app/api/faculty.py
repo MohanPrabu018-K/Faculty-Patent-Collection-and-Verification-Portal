@@ -1394,6 +1394,22 @@ async def request_association(
             status_code=422,
         )
 
+    # Authoritative rule (B/D): only the record's uploader (or a super admin)
+    # may initiate association requests, addressed to OTHER internal faculty
+    # only. HOD accounts are never association recipients (read-only HODs).
+    if user_id != ip_record.uploader_id and user_role != "super_admin":
+        raise PortalError(
+            message="Only the uploader may send association requests",
+            error_code="AUTHORIZATION_ERROR",
+            status_code=403,
+        )
+    if other_user.role == "hod_admin":
+        raise PortalError(
+            message="HOD accounts cannot receive association requests",
+            error_code="VALIDATION_ERROR",
+            status_code=422,
+        )
+
     # Staged workflow: faculty-stage requests stay blocked while the HOD
     # association for the record is still pending. Requests addressed to
     # an HOD are HOD-stage and are never blocked by this rule.

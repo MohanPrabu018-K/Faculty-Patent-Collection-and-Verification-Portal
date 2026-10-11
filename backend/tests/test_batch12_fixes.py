@@ -266,7 +266,7 @@ def _add_internal_contributor(record_id, user_id, name="B12 Internal"):
     asyncio.run(_go())
 
 
-class TestHodVerifyGate:
+class TestInstitutionalVerifyGate:
     def _setup(self, client, tag):
         sender = _mkuser(f"{tag}s")
         other = _mkuser(f"{tag}o")
@@ -287,7 +287,7 @@ class TestHodVerifyGate:
             assert r.status_code == 201, r.text
 
             v = client.post(f"/api/v1/verification/institutional/{rid}",
-                            json={"decision": "verify"}, headers=_hod_headers(client))
+                            json={"decision": "verify"}, headers=_admin_headers(client))
             assert v.status_code == 409, v.text
             assert v.json()["error"] == "ASSOCIATION_PENDING"
 
@@ -325,7 +325,7 @@ class TestHodVerifyGate:
 
             v = client.post(f"/api/v1/verification/institutional/{rid}",
                             json={"decision": "verify", "remarks": "checked"},
-                            headers=_hod_headers(client))
+                            headers=_admin_headers(client))
             assert v.status_code == 200, v.text
             body = v.json()
             assert body["final_verification_status"] == "VERIFIED"
@@ -358,7 +358,7 @@ class TestHodVerifyGate:
                     await db.commit()
             asyncio.run(_ext())
             v = client.post(f"/api/v1/verification/institutional/{rid}",
-                            json={"decision": "verify"}, headers=_hod_headers(client))
+                            json={"decision": "verify"}, headers=_admin_headers(client))
             assert v.status_code == 200, v.text
             assert v.json()["final_verification_status"] == "VERIFIED"
         finally:
@@ -368,7 +368,7 @@ class TestHodVerifyGate:
         sender, other, rid = self._setup(client, "n")
         try:
             v = client.post(f"/api/v1/verification/institutional/{rid}",
-                            json={"decision": "verify"}, headers=_hod_headers(client))
+                            json={"decision": "verify"}, headers=_admin_headers(client))
             assert v.status_code == 200, v.text
             assert v.json()["final_verification_status"] == "VERIFIED"
         finally:
@@ -385,7 +385,7 @@ class TestHodVerifyGate:
             assert r.status_code == 201, r.text
             v = client.post(f"/api/v1/verification/institutional/{rid}",
                             json={"decision": "reject", "remarks": "mismatch"},
-                            headers=_hod_headers(client))
+                            headers=_admin_headers(client))
             assert v.status_code == 200, v.text
             assert v.json()["decision"] == "reject"
         finally:
@@ -393,7 +393,7 @@ class TestHodVerifyGate:
 
 
 # ---------------------------------------------------------------- Bug 7 ---
-class TestHodManualVerifyAndGrantVisibility:
+class TestInstitutionalVerifyAndGrantVisibility:
     def test_verify_grant_profile_visibility(self, client):
         sender = _mkuser("g7s")
         other = _mkuser("g7o")
@@ -414,7 +414,7 @@ class TestHodManualVerifyAndGrantVisibility:
             assert a.status_code == 200, a.text
 
             v = client.post(f"/api/v1/verification/institutional/{rid}",
-                            json={"decision": "verify"}, headers=_hod_headers(client))
+                            json={"decision": "verify"}, headers=_admin_headers(client))
             assert v.status_code == 200, v.text
             assert v.json()["final_verification_status"] == "VERIFIED"
 
@@ -504,7 +504,11 @@ class TestDisplayNamesEnriched:
         r1 = f"b12-rec-d45a-{uuid.uuid4().hex[:6]}"
         r2 = f"b12-rec-d45b-{uuid.uuid4().hex[:6]}"
         for rid in (r1, r2):
-            _create_record(rid, u["id"], title=f"B12 doc {rid[:8]}")
+            # HOD documents visibility (rule D) requires the record to be past
+            # the faculty-association stage; the display-name assertions below
+            # need the rows visible, so place them post-association.
+            _create_record(rid, u["id"], title=f"B12 doc {rid[:8]}",
+                           workflow_state="FACULTY_ASSOCIATION_COMPLETE")
         try:
             async def _seed():
                 async with get_async_session_context() as db:
@@ -731,3 +735,67 @@ class TestUploadConfigAndSizeError:
             client.patch("/api/v1/admin/settings", json={"max_upload_mb": original_mb},
                          headers=admin_h)
             _cleanup([faculty["id"]], [])
+
+
+# ------------------- Rule D: HOD read-only duplicate/conflict resolve ------
+class TestHodReadOnlyResolutionDenied:
+    """Rule D: HODs are strictly read-only for duplicate/conflict resolution.
+
+    The HOD may still *list* departmental cases, but backend authorization must
+    reject the mutation even when the caller crafts the request by hand (hidden
+    UI controls are not an authorization boundary). The Super Admin retains the
+    capability, proving the endpoint itself is functional.
+    """
+
+    def test_hod_resolve_denied_super_admin_allowed(self, client):
+        u = _mkuser("rdhod")
+        _create_user(u)
+        r1 = f"b12-rd-ro1-{uuid.uuid4().hex[:6]}"
+        r2 = f"b12-rd-ro2-{uuid.uuid4().hex[:6]}"
+        for rid in (r1, r2):
+            _create_record(rid, u["id"], title=f"B12 ro {rid[:8]}")
+        dup_id = f"b12-rd-dup-{uuid.uuid4().hex[:8]}"
+        conf_id = f"b12-rd-cf-{uuid.uuid4().hex[:8]}"
+        try:
+            async def _seed():
+                async with get_async_session_context() as db:
+                    db.add(DuplicateCase(id=dup_id, ip_record_id_1=r1, ip_record_id_2=r2,
+                                         detection_method="identifier", confidence=0.9, status="OPEN"))
+                    db.add(ConflictCase(id=conf_id, ip_record_id=r1,
+                                        conflict_type="test", description="b12 ro", status="OPEN"))
+                    await db.commit()
+            asyncio.run(_seed())
+
+            hod = _hod_headers(client)
+            # Read-only listing remains available to the HOD ...
+            assert client.get("/api/v1/duplicates", headers=hod).status_code == 200
+            assert client.get("/api/v1/conflicts", headers=hod).status_code == 200
+
+            # ... but neither write endpoint may be invoked by an HOD.
+            dh = client.post(f"/api/v1/duplicates/{dup_id}/resolve?keep_record_id={r1}",
+                             json={"action": "resolve"}, headers=hod)
+            assert dh.status_code == 403, dh.text
+            ch = client.post(f"/api/v1/conflicts/{conf_id}/resolve?resolution=resolved",
+                             json={"action": "resolve"}, headers=hod)
+            assert ch.status_code == 403, ch.text
+
+            # The refused HOD attempts must not have mutated any state.
+            async def _assert_open():
+                async with get_async_session_context() as db:
+                    d = (await db.execute(select(DuplicateCase).where(DuplicateCase.id == dup_id))).scalar_one()
+                    c = (await db.execute(select(ConflictCase).where(ConflictCase.id == conf_id))).scalar_one()
+                    assert d.status == "OPEN", d.status
+                    assert c.status == "OPEN", c.status
+            asyncio.run(_assert_open())
+
+            admin = _admin_headers(client)
+            da = client.post(f"/api/v1/duplicates/{dup_id}/resolve?keep_record_id={r1}",
+                             json={"action": "resolve"}, headers=admin)
+            assert da.status_code == 200, da.text
+            assert da.json()["status"] == "RESOLVED"
+            ca = client.post(f"/api/v1/conflicts/{conf_id}/resolve?resolution=resolved",
+                             json={"action": "resolve"}, headers=admin)
+            assert ca.status_code == 200, ca.text
+            assert ca.json()["status"] == "RESOLVED"
+        finally:
+            _cleanup([u["id"]], [r1, r2])

@@ -105,6 +105,42 @@ def _admin():
     _run(_wipe_users([ADMIN["id"]], []))
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _hod_designation():
+    """Ensure the reference designation the HOD checks key off exists.
+
+    A freshly migrated DB has no reference data, and the admin endpoints
+    decide "is this a HOD?" from ``Designation.title.upper() == "HOD"``
+    (``app/api/admin.py``). Create that designation idempotently and remove it
+    afterwards only if this fixture created it, so real seed data is untouched.
+    """
+    created = {}
+
+    async def _ensure():
+        async with get_async_session_context() as db:
+            row = (await db.execute(select(Designation).where(Designation.title.ilike("HOD")))).scalars().first()
+            if row is None:
+                did = f"gv-desig-hod-{TAG}"
+                db.add(Designation(id=did, title="HOD", name="Head of Department",
+                                   status="active", is_active=True))
+                await db.commit()
+                created["id"] = did
+
+    async def _drop():
+        async with get_async_session_context() as db:
+            row = (await db.execute(select(Designation).where(Designation.id == created["id"]))).scalar_one_or_none()
+            if row is not None:
+                await db.delete(row)
+                await db.commit()
+
+    _run(_ensure())
+    try:
+        yield
+    finally:
+        if created.get("id"):
+            _run(_drop())
+
+
 def _admin_h(client):
     return _h(client, _tok(ADMIN["id"], ADMIN["email"], "super_admin"))
 

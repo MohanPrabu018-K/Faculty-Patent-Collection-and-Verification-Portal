@@ -411,11 +411,12 @@ async def list_institutional_verifications(record_id: str, current_user: dict = 
 
 @router.post("/institutional/{record_id}", status_code=status.HTTP_200_OK)
 async def submit_institutional_verification(record_id: str, request: Request, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
-    """Record a human institutional verification decision (HOD manual check).
+    """Record a human institutional verification decision (Super Admin only).
 
     This is the authorized fallback when automated official verification is
-    unavailable (VERIFICATION_REQUIRED): the HOD manually checks the record
-    against the official IP portal and confirms the details match.
+    unavailable (VERIFICATION_REQUIRED): a Super Admin manually checks the
+    record against the official IP portal and confirms the details match.
+    HODs are strictly read-only (rule D) and may not perform this action.
 
     The automated official state is NEVER overwritten — it is preserved in
     ``evidence`` and in ``IpRecord.official_verification_status``. A ``verify``
@@ -427,8 +428,10 @@ async def submit_institutional_verification(record_id: str, request: Request, cu
     missing conditions recorded honestly.
     """
     role = current_user.get("role", "")
-    if role not in ("hod_admin", "super_admin"):
-        raise AuthorizationError("Only HOD or Super Admin can perform institutional verification")
+    # Rule D: HODs are strictly read-only. Manual institutional verification is
+    # an administrative fallback performed by the Super Admin only.
+    if role != "super_admin":
+        raise AuthorizationError("Only the Super Admin can perform institutional verification")
     # BUG 5: deactivated accounts cannot perform verification actions, even
     # with an in-flight token (login already blocks them at issuance).
     actor = (await db.execute(select(User).where(User.id == current_user.get("id")))).scalar_one_or_none()
@@ -508,15 +511,7 @@ async def submit_institutional_verification(record_id: str, request: Request, cu
                 status_code=409,
                 details=await _approval_summary(db, record),
             )
-    if role == "hod_admin":
-        hod_dept = current_user.get("department_id")
-        if not hod_dept:
-            raise AuthorizationError("HOD admin account is missing a department assignment")
-        if record.department_id and str(hod_dept) != str(record.department_id):
-            raise AuthorizationError("HOD can only verify records in own department")
-        dept_id = hod_dept
-    else:
-        dept_id = record.department_id
+    dept_id = record.department_id
     official_preserved = record.official_verification_status or record.verification_status
     attempt_no = (await db.execute(select(func.count()).select_from(VerificationAttempt).where(VerificationAttempt.ip_record_id == record_id, VerificationAttempt.source == INSTITUTIONAL_SOURCE))).scalar_one() + 1
     decided_at = datetime.utcnow().isoformat()

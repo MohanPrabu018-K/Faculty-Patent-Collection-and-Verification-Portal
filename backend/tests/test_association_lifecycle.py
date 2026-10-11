@@ -56,24 +56,33 @@ def _headers(client, token):
 
 @pytest.fixture()
 def pair():
-    """Throwaway sender + recipient faculty users."""
+    """Throwaway sender + recipient faculty users, plus an outside faculty and
+    an HOD used by the authorization / read-only regression tests."""
     tag = uuid.uuid4().hex[:8]
     sender = {"id": str(uuid.uuid4()), "email": f"sender.{tag}@gmail.com", "faculty_id": f"FAC-SND-{tag}"}
     recip = {"id": str(uuid.uuid4()), "email": f"recip.{tag}@gmail.com", "faculty_id": f"FAC-RCP-{tag}"}
+    outsider = {"id": str(uuid.uuid4()), "email": f"out.{tag}@gmail.com", "faculty_id": f"FAC-OUT-{tag}"}
+    hod = {"id": str(uuid.uuid4()), "email": f"hod.{tag}@gmail.com", "faculty_id": f"FAC-HOD-{tag}"}
 
     async def _create():
         async with get_async_session_context() as db:
-            for u in (sender, recip):
+            for u in (sender, recip, outsider):
                 db.add(User(
                     id=u["id"], email=u["email"], full_name=f"Probe {u['faculty_id']}",
                     password_hash=hash_password("secret123"), role="faculty",
                     faculty_id=u["faculty_id"], is_active=True, status="active",
                 ))
+            db.add(User(
+                id=hod["id"], email=hod["email"], full_name=f"Probe {hod['faculty_id']}",
+                password_hash=hash_password("secret123"), role="hod_admin",
+                faculty_id=hod["faculty_id"],
+                is_active=True, status="active",
+            ))
             await db.commit()
 
     async def _delete():
         async with get_async_session_context() as db:
-            ids = [sender["id"], recip["id"]]
+            ids = [sender["id"], recip["id"], outsider["id"], hod["id"]]
             for a in (await db.execute(
                 select(AuditLog).where(
                     (AuditLog.actor_id.in_(ids))
@@ -101,7 +110,7 @@ def pair():
 
     asyncio.run(_create())
     try:
-        yield {"sender": sender, "recip": recip}
+        yield {"sender": sender, "recip": recip, "outsider": outsider, "hod": hod}
     finally:
         asyncio.run(_delete())
 
@@ -232,3 +241,69 @@ def test_recipient_accept_persists_across_relogin(client, pair, probe_record):
     assert relogin.status_code == 200, relogin.text
     row2 = next(a for a in relogin.json()["associations"] if a["id"] == assoc_id)
     assert row2["status"] == "ACCEPTED"
+
+
+# --- Authorization hardening (rule B/D): uploader-only + read-only HODs ------
+
+
+def test_non_uploader_cannot_create(client, pair, probe_record):
+    """A faculty member who is NOT the record uploader cannot create an
+    association request (authoritative rule B/D)."""
+    r = client.post(
+        f"/api/v1/associations/?recipient_faculty_id={pair['recip']['faculty_id']}",
+        headers=_headers(client, _tok(pair["outsider"]["id"])),
+        json={"record_id": probe_record, "reason": "non-uploader probe"},
+    )
+    assert r.status_code == 403, r.text
+
+
+def test_non_uploader_cannot_create_via_secondary_endpoint(client, pair, probe_record):
+    """The legacy faculty associate endpoint enforces the same uploader-only
+    rule. Non-uploader faculty are denied (404 - the record is scoped to the
+    uploader in the query; no existence leak), other roles 403."""
+    r = client.post(
+        f"/api/v1/faculty/{probe_record}/associate/{pair['recip']['faculty_id']}",
+        headers=_headers(client, _tok(pair["outsider"]["id"])),
+        json={},
+    )
+    assert r.status_code in (403, 404), r.text
+
+
+def test_hod_cannot_be_association_recipient(client, pair, probe_record):
+    """HOD accounts are never association recipients: the uploader's request
+    addressed to an HOD is rejected (rule D, no HOD approval requests)."""
+    r = client.post(
+        f"/api/v1/associations/?recipient_faculty_id={pair['hod']['faculty_id']}",
+        headers=_sender_headers(client, pair),
+        json={"record_id": probe_record, "reason": "hod recipient probe"},
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_hod_cannot_respond(client, pair, probe_record):
+    """A seeded HOD-addressed request proves the respond endpoint itself
+    rejects HOD decisions server-side (rule D, no HOD accept/reject)."""
+    assoc_id = str(uuid.uuid4())
+
+    async def _seed():
+        async with get_async_session_context() as db:
+            db.add(AssociationRequest(
+                id=assoc_id, ip_record_id=probe_record,
+                requesting_faculty_id=pair["sender"]["id"],
+                target_faculty_id=pair["hod"]["id"],
+                requester_id=pair["sender"]["id"],
+                recipient_id=pair["hod"]["id"],
+                status="PENDING",
+            ))
+            await db.commit()
+
+    asyncio.run(_seed())
+    r = client.post(
+        f"/api/v1/associations/{assoc_id}/respond?action=accepted",
+        headers=_headers(client, _tok(
+            pair["hod"]["id"], role="hod_admin", dept="dept-probe",
+            fac=pair["hod"]["faculty_id"],
+        )),
+        json={},
+    )
+    assert r.status_code == 403, r.text

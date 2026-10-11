@@ -1,10 +1,10 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import {
   SectionCard, StatCard, StatusBadge, ErrorBlock, EmptyState,
-  Toolbar, TableWrap, Pagination, Modal, formatDateTime, formatDate, formatDateOnly, display, docName, personName,
+  Toolbar, TableWrap, Pagination, formatDateTime, formatDate, formatDateOnly, display, docName, personName,
 } from '../../components/ui';
 import { useToast } from '../../stores/toast';
 import { useDebounce } from '../../hooks/useDebounce';
@@ -201,39 +201,7 @@ export function HodDocumentsPage() {
 /* -------------------------------- Duplicates ------------------------------- */
 
 export function HodDuplicatesPage() {
-  const client = useQueryClient();
-  const { notify } = useToast();
-  const [confirmCase, setConfirmCase] = useState<Record<string, unknown> | null>(null);
-  const [confirmReject, setConfirmReject] = useState<Record<string, unknown> | null>(null);
   const { data, isLoading, error } = useQuery({ queryKey: ['hod-duplicates'], queryFn: () => api.hodDuplicates() });
-
-  const resolve = useMutation({
-    mutationFn: ({ id, keep }: { id: string; keep: string }) => api.resolveDuplicate(id, keep, 'resolve'),
-    onSuccess: async () => {
-      notify('success', 'Duplicate case resolved');
-      setConfirmCase(null);
-      await Promise.all([
-        client.invalidateQueries({ queryKey: ['hod-duplicates'] }),
-        client.invalidateQueries({ queryKey: ['hod-dashboard'] }),
-        client.invalidateQueries({ queryKey: ['hod-documents'] }),
-      ]);
-    },
-    onError: (e) => notify('error', e instanceof Error ? e.message : 'Failed to resolve'),
-  });
-
-  const reject = useMutation({
-    mutationFn: ({ id }: { id: string }) => api.resolveDuplicate(id, '', 'dismiss'),
-    onSuccess: async () => {
-      notify('success', 'Duplicate case rejected');
-      setConfirmReject(null);
-      await Promise.all([
-        client.invalidateQueries({ queryKey: ['hod-duplicates'] }),
-        client.invalidateQueries({ queryKey: ['hod-dashboard'] }),
-        client.invalidateQueries({ queryKey: ['hod-documents'] }),
-      ]);
-    },
-    onError: (e) => notify('error', e instanceof Error ? e.message : 'Failed to reject'),
-  });
 
   if (isLoading && !data) return <div className="loading-inline" style={{ padding: '24px 0' }}><span className="spinner" /><span>Loading duplicates…</span></div>;
   if (error) return <ErrorBlock error={error} />;
@@ -241,14 +209,14 @@ export function HodDuplicatesPage() {
   const rows = data?.duplicates ?? [];
 
   return (
-    <SectionCard title="Department Duplicates" subtitle={`${data?.count ?? 0} duplicate cases touching your department.`}>
+    <SectionCard title="Department Duplicates" subtitle={`${data?.count ?? 0} duplicate cases touching your department. Read-only.`}>
       {rows.length === 0 ? (
         <EmptyState message="No duplicate cases in your department." />
       ) : (
         <TableWrap>
           <table className="data-table">
             <thead>
-              <tr><th>Record</th><th>Duplicate of</th><th>Confidence</th><th>Method</th><th>Detected by</th><th>Detected</th><th>Status</th><th>Action</th></tr>
+              <tr><th>Record</th><th>Duplicate of</th><th>Confidence</th><th>Method</th><th>Detected by</th><th>Detected</th><th>Status</th><th>Resolution</th></tr>
             </thead>
             <tbody>
               {rows.map((d) => (
@@ -262,61 +230,12 @@ export function HodDuplicatesPage() {
                   <td>{display(d.detected_by)}</td>
                   <td>{formatDate(d.detected_at)}</td>
                   <td><StatusBadge value={String(d.status || 'OPEN')} /></td>
-                  <td>
-                    {String(d.status) === 'OPEN'
-                      ? (
-                        <div className="btn-row">
-                          <button className="btn btn-sm btn-primary" disabled={resolve.isPending} onClick={() => setConfirmCase(d)}>Resolve</button>
-                          <button className="btn btn-sm btn-danger" disabled={reject.isPending} onClick={() => setConfirmReject(d)}>Reject</button>
-                        </div>
-                      )
-                      : <span className="muted">{display(d.resolution_notes) || '—'}</span>}
-                  </td>
+                  <td><span className="muted">{display(d.resolution_notes) || '—'}</span></td>
                 </tr>
               ))}
             </tbody>
           </table>
         </TableWrap>
-      )}
-      {confirmCase && (
-        <Modal
-          title="Resolve duplicate case"
-          onClose={() => setConfirmCase(null)}
-          footer={
-            <>
-              <button className="btn btn-secondary" onClick={() => setConfirmCase(null)}>Cancel</button>
-              <button
-                className="btn btn-primary"
-                disabled={resolve.isPending}
-                onClick={() => resolve.mutate({ id: String(confirmCase.id), keep: String(confirmCase.ip_record_id_1) })}
-              >
-                Resolve — keep {String(confirmCase.ip_record_id_1).slice(0, 8)}…
-              </button>
-            </>
-          }
-        >
-          <p>Mark this duplicate case resolved, keeping record <strong>{String(confirmCase.ip_record_id_1).slice(0, 8)}…</strong> as the canonical one.</p>
-        </Modal>
-      )}
-      {confirmReject && (
-        <Modal
-          title="Reject duplicate case"
-          onClose={() => setConfirmReject(null)}
-          footer={
-            <>
-              <button className="btn btn-secondary" onClick={() => setConfirmReject(null)}>Cancel</button>
-              <button
-                className="btn btn-danger"
-                disabled={reject.isPending}
-                onClick={() => reject.mutate({ id: String(confirmReject.id) })}
-              >
-                Reject duplicate
-              </button>
-            </>
-          }
-        >
-          <p>Reject this duplicate case. Both records will remain but the duplicate flag will be dismissed.</p>
-        </Modal>
       )}
     </SectionCard>
   );
@@ -325,23 +244,7 @@ export function HodDuplicatesPage() {
 /* -------------------------------- Conflicts -------------------------------- */
 
 export function HodConflictsPage() {
-  const client = useQueryClient();
-  const { notify } = useToast();
-  const [confirmId, setConfirmId] = useState<string | null>(null);
   const { data, isLoading, error } = useQuery({ queryKey: ['hod-conflicts'], queryFn: () => api.hodConflicts() });
-
-  const resolve = useMutation({
-    mutationFn: (id: string) => api.resolveConflict(id, 'resolve'),
-    onSuccess: async () => {
-      notify('success', 'Conflict resolved');
-      setConfirmId(null);
-      await Promise.all([
-        client.invalidateQueries({ queryKey: ['hod-conflicts'] }),
-        client.invalidateQueries({ queryKey: ['hod-dashboard'] }),
-      ]);
-    },
-    onError: (e) => notify('error', e instanceof Error ? e.message : 'Failed to resolve'),
-  });
 
   if (isLoading && !data) return <div className="loading-inline" style={{ padding: '24px 0' }}><span className="spinner" /><span>Loading conflicts…</span></div>;
   if (error) return <ErrorBlock error={error} />;
@@ -349,14 +252,14 @@ export function HodConflictsPage() {
   const rows = data?.conflicts ?? [];
 
   return (
-    <SectionCard title="Department Conflicts" subtitle={`${data?.count ?? 0} conflict cases in your department.`}>
+    <SectionCard title="Department Conflicts" subtitle={`${data?.count ?? 0} conflict cases in your department. Read-only.`}>
       {rows.length === 0 ? (
         <EmptyState message="No conflict cases in your department." />
       ) : (
         <TableWrap>
           <table className="data-table">
             <thead>
-              <tr><th>Record</th><th>Type</th><th>Field</th><th>Severity</th><th>Description</th><th>Status</th><th>Action</th></tr>
+              <tr><th>Record</th><th>Type</th><th>Field</th><th>Severity</th><th>Description</th><th>Status</th><th>Resolution</th></tr>
             </thead>
             <tbody>
               {rows.map((c) => (
@@ -367,30 +270,12 @@ export function HodConflictsPage() {
                   <td><StatusBadge value={String(c.severity || 'MEDIUM')} /></td>
                   <td>{display(c.description)}</td>
                   <td><StatusBadge value={String(c.status || 'OPEN')} /></td>
-                  <td>
-                    {String(c.status) === 'OPEN'
-                      ? <button className="btn btn-sm btn-primary" disabled={resolve.isPending} onClick={() => setConfirmId(String(c.id))}>Resolve</button>
-                      : <span className="muted">{display(c.resolution_notes) || '—'}</span>}
-                  </td>
+                  <td><span className="muted">{display(c.resolution_notes) || '—'}</span></td>
                 </tr>
               ))}
             </tbody>
           </table>
         </TableWrap>
-      )}
-      {confirmId && (
-        <Modal
-          title="Resolve conflict"
-          onClose={() => setConfirmId(null)}
-          footer={
-            <>
-              <button className="btn btn-secondary" onClick={() => setConfirmId(null)}>Cancel</button>
-              <button className="btn btn-primary" disabled={resolve.isPending} onClick={() => resolve.mutate(confirmId)}>Mark resolved</button>
-            </>
-          }
-        >
-          <p>Mark this conflict case as resolved for your department.</p>
-        </Modal>
       )}
     </SectionCard>
   );

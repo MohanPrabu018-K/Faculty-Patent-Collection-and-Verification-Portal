@@ -89,6 +89,7 @@ def _temp_record(verification_status: str, workflow_state: str):
                 patent_number=f"TEST-GRANT-{uuid.uuid4().hex[:8]}",
                 title="Hermetic grant regression probe",
                 verification_status=verification_status,
+                processing_status="COMPLETED",
                 workflow_state=workflow_state,
                 uploader_id=uploader_id,
             ))

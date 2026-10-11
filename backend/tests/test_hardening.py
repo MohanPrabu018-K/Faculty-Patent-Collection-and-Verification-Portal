@@ -40,7 +40,7 @@ from app.core.config import app_settings, upload_settings
 from app.core.database import get_async_session_context
 from app.core.security import generate_jwt_token
 from app.main import app
-from app.models.base import IpContributor, IpFile, IpRecord, User
+from app.models.base import IpContributor, IpFile, IpRecord, ProcessingJob, User
 from app.services.notifications import NotificationType, get_notification_service
 
 
@@ -649,13 +649,48 @@ async def test_all_core_notification_types_visible_via_api(client):
 # --- X2: per-record agent job trail -----------------------------------------
 
 def test_processing_job_agent_trail_per_record(client):
-    best = 0
-    for page in (1, 2):
-        recs = client.get(f"/api/v1/admin/ip-records?per_page=20&page={page}", headers=ADMIN).json().get("records", [])
-        if not recs:
-            break
-        for r in recs:
-            st = client.get(f"/api/v1/uploads/{r['id']}/status", headers=ADMIN)
-            if st.status_code == 200:
-                best = max(best, len(st.json().get("jobs") or []))
-    assert best >= 11, f"expected an 11+ agent step trail per pipeline record, found max {best}"
+    """X2: every processed record exposes one ProcessingJob row per pipeline
+    agent step through ``GET /uploads/{id}/status``.
+
+    Deterministic: seed a dedicated record with the real agent ``job_type``
+    values (see ``app/workers/orchestrator_task.py``) and assert the full 11+
+    step trail is returned, then clean it up. The previous form scanned
+    arbitrary pre-existing rows and only passed on a database that already
+    contained processed records (the fresh-DB failure).
+    """
+    agent_job_types = [
+        "classify", "qr", "extract", "understand", "verify", "identity",
+        "duplicate", "conflict", "association", "quality", "final_verification",
+    ]
+
+    async def _seed():
+        async with get_async_session_context() as db:
+            fac = (await db.execute(select(User).where(User.faculty_id == "FACA001"))).scalar_one_or_none()
+            assert fac is not None, "hardening fixture FACA001 missing"
+            rid = f"tmp-trail-{uuid.uuid4().hex[:10]}"
+            db.add(IpRecord(
+                id=rid, ip_type="PATENT", title="Hardening Agent Trail Probe",
+                patent_number=f"TRAIL-{uuid.uuid4().hex[:8]}", uploader_id=fac.id,
+                department_id=fac.department_id, processing_status="COMPLETED",
+                verification_status="UNVERIFIED",
+            ))
+            for jt in agent_job_types:
+                db.add(ProcessingJob(ip_record_id=rid, job_type=jt, status="SUCCESS"))
+            await db.commit()
+            return rid
+
+    async def _remove(rid):
+        async with get_async_session_context() as db:
+            await db.execute(delete(ProcessingJob).where(ProcessingJob.ip_record_id == rid))
+            await db.execute(delete(IpRecord).where(IpRecord.id == rid))
+            await db.commit()
+
+    rid = asyncio.run(_seed())
+    try:
+        st = client.get(f"/api/v1/uploads/{rid}/status", headers=ADMIN)
+        assert st.status_code == 200, st.text
+        jobs = st.json().get("jobs") or []
+        assert len(jobs) >= 11, f"expected an 11+ agent step trail per record, found {len(jobs)}"
+        assert {j["job_type"] for j in jobs} >= set(agent_job_types), st.text
+    finally:
+        asyncio.run(_remove(rid))

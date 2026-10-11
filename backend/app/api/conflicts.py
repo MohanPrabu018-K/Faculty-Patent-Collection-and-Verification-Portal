@@ -73,20 +73,9 @@ async def resolve_conflict(request: Request, conflict_id: str, resolution: str =
         raise NotFoundError("Conflict case", conflict_id)
 
     role = current_user.get("role", "")
-    if role == "super_admin":
-        pass
-    elif role == "hod_admin":
-        department_id = current_user.get("department_id")
-        if not department_id:
-            raise AuthorizationError("HOD admin account is missing a department assignment")
-        owned = (
-            await db.execute(
-                select(IpRecord.id).where(IpRecord.id == conflict.ip_record_id, IpRecord.department_id == department_id)
-            )
-        ).first()
-        if not owned:
-            raise AuthorizationError("Conflict case is outside your department")
-    else:
+    # Rule D: HODs are strictly read-only. Only the Super Admin may resolve or
+    # dismiss a conflict case; HODs retain read-only listing only.
+    if role != "super_admin":
         raise AuthorizationError("Not authorized to resolve conflict cases")
 
     action = str(body.get("action", "resolve")).lower()

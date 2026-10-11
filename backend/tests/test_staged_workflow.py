@@ -153,14 +153,16 @@ async def _wipe(ids, rids, dept_ids):
 @pytest.fixture(scope="module")
 def stage(client):
     uids = [HOD_CSE["id"], HOD_EEE["id"], HOD_AIDS["id"], HOD_XXX["id"],
-            FACA["id"], FACB["id"], FACC["id"], FACD["id"], FACE["id"]]
+            FACA["id"], FACB["id"], FACC["id"], FACD["id"], FACE["id"], ADMIN["id"]]
     depts = [DEPT_CSE, DEPT_EEE, DEPT_AIDS, DEPT_XXX]
     dept_of = {HOD_CSE["id"]: DEPT_CSE, HOD_EEE["id"]: DEPT_EEE, HOD_AIDS["id"]: DEPT_AIDS,
                HOD_XXX["id"]: DEPT_XXX, FACA["id"]: DEPT_CSE, FACB["id"]: DEPT_CSE,
-               FACC["id"]: DEPT_EEE, FACD["id"]: DEPT_EEE, FACE["id"]: DEPT_AIDS}
+               FACC["id"]: DEPT_EEE, FACD["id"]: DEPT_EEE, FACE["id"]: DEPT_AIDS,
+               ADMIN["id"]: DEPT_CSE}
     roles = {HOD_CSE["id"]: "hod_admin", HOD_EEE["id"]: "hod_admin",
-             HOD_AIDS["id"]: "hod_admin", HOD_XXX["id"]: "hod_admin"}
-    users = {u["id"]: u for u in (HOD_CSE, HOD_EEE, HOD_AIDS, HOD_XXX, FACA, FACB, FACC, FACD, FACE)}
+             HOD_AIDS["id"]: "hod_admin", HOD_XXX["id"]: "hod_admin",
+             ADMIN["id"]: "super_admin"}
+    users = {u["id"]: u for u in (HOD_CSE, HOD_EEE, HOD_AIDS, HOD_XXX, FACA, FACB, FACC, FACD, FACE, ADMIN)}
 
     async def _setup():
         async with get_async_session_context() as db:
@@ -364,10 +366,10 @@ class TestFacultyGate:
                 assert rec.workflow_state == "FACULTY_ASSOCIATION_PENDING"
         _run(_check())
 
-    def test_hod_verify_blocked_with_exact_counts(self, client, stage):
-        hh = _hod_headers(client, HOD_CSE, DEPT_CSE)
+    def test_admin_verify_blocked_with_exact_counts(self, client, stage):
+        ah = _h(client, _tok(ADMIN, "super_admin"))
         v = client.post(f"/api/v1/verification/institutional/{RECORD_ID}",
-                        json={"decision": "verify"}, headers=hh)
+                        json={"decision": "verify"}, headers=ah)
         assert v.status_code == 409, v.text
         body = v.json()
         assert body["error"] == "ASSOCIATION_PENDING"

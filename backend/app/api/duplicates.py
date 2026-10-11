@@ -68,26 +68,11 @@ async def list_duplicate_cases(current_user: dict = Depends(get_current_user), s
     }
 
 
-async def _assert_can_act_on_case(case: DuplicateCase, current_user: dict, db: AsyncSession) -> None:
-    """Only a super admin, or an HOD whose department owns one of the two records
-    in the case, may resolve/dismiss it. Faculty are never permitted."""
+async def _assert_can_act_on_case(case: DuplicateCase, current_user: dict) -> None:
+    """Rule D: HODs are strictly read-only. Only a Super Admin may
+    resolve/dismiss a duplicate case; HODs retain read-only listing only."""
     role = current_user.get("role", "")
     if role == "super_admin":
-        return
-    if role == "hod_admin":
-        department_id = current_user.get("department_id")
-        if not department_id:
-            raise AuthorizationError("HOD admin account is missing a department assignment")
-        owned = (
-            await db.execute(
-                select(IpRecord.id).where(
-                    IpRecord.id.in_([case.ip_record_id_1, case.ip_record_id_2]),
-                    IpRecord.department_id == department_id,
-                )
-            )
-        ).first()
-        if not owned:
-            raise AuthorizationError("Duplicate case is outside your department")
         return
     raise AuthorizationError("Not authorized to resolve duplicate cases")
 
@@ -98,7 +83,7 @@ async def resolve_duplicate_case(request: Request, case_id: str, keep_record_id:
     case = (await db.execute(select(DuplicateCase).where(DuplicateCase.id == case_id))).scalar_one_or_none()
     if not case:
         raise NotFoundError("Duplicate case", case_id)
-    await _assert_can_act_on_case(case, current_user, db)
+    await _assert_can_act_on_case(case, current_user)
     action = str(body.get("action", "resolve")).lower()
     case.status = "DISMISSED" if action == "dismiss" else "RESOLVED"
     case.kept_record_id = keep_record_id if action != "dismiss" else None

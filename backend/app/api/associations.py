@@ -517,6 +517,25 @@ async def send_association_request(request: Request, recipient_faculty_id: str, 
 
     record = await _resolve_associated_record(db, record_id)
 
+    # Authoritative rule (B/D): only the record's uploader (or a super admin)
+    # may initiate association requests, and requests may address OTHER
+    # internal faculty only. HOD accounts are NEVER association recipients -
+    # HODs are read-only (no HOD approval requests, no HOD accept/reject).
+    if record is None:
+        raise NotFoundError("IP record", record_id)
+    if requester_id != record.uploader_id and current_user.get("role") != "super_admin":
+        raise PortalError(
+            message="Only the uploader may send association requests",
+            error_code="AUTHORIZATION_ERROR",
+            status_code=403,
+        )
+    if recipient.role == "hod_admin":
+        raise PortalError(
+            message="HOD accounts cannot receive association requests",
+            error_code="VALIDATION_ERROR",
+            status_code=422,
+        )
+
     resolved_record_id = record.id if record else record_id
     # Staged workflow: faculty-stage requests stay blocked while the HOD
     # association for the record is still pending. Requests addressed to an
@@ -703,6 +722,11 @@ async def respond_association_request(request: Request, request_id: str, action:
     responder = (await db.execute(select(User).where(User.id == responder_id))).scalar_one_or_none()
     if responder is None or not responder.is_active:
         raise PortalError(message="Deactivated accounts cannot respond to association requests", error_code="AUTHORIZATION_ERROR", status_code=403)
+    # HODs are strictly read-only: they never accept/reject association
+    # requests (rule D). This mirrors the frontend, which already hides the
+    # decision action for HOD accounts.
+    if responder.role == "hod_admin":
+        raise PortalError(message="HOD accounts cannot respond to association requests", error_code="AUTHORIZATION_ERROR", status_code=403)
 
     if request_obj.status not in ("PENDING", "CLARIFICATION_REQUESTED"):
         raise PortalError(message=f"Request already {request_obj.status}", error_code="VALIDATION_ERROR", status_code=409)

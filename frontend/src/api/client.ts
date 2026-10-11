@@ -358,10 +358,6 @@ export const api = {
   hodReports: () => request<Record<string, unknown>>('/hod/reports'),
   hodAudit: (params = '', signal?: AbortSignal) => request<{ audit_entries: Array<Record<string, unknown>>; total: number; page: number; per_page: number; total_pages: number }>(`/hod/audit${params}`, { signal }),
   hodReminders: (body: { kind?: string }) => requestWithBody('/hod/reminders', body, { method: 'POST' }),
-  resolveDuplicate: (caseId: string, keepRecordId: string, action: 'resolve' | 'dismiss' = 'resolve', notes?: string) =>
-    requestWithBody(`/duplicates/${caseId}/resolve?keep_record_id=${encodeURIComponent(keepRecordId)}`, { action, notes }, { method: 'POST' }),
-  resolveConflict: (conflictId: string, action: 'resolve' | 'dismiss' = 'resolve', notes?: string) =>
-    requestWithBody(`/conflicts/${conflictId}/resolve?resolution=${action}`, { action, notes }, { method: 'POST' }),
   excelImportPreview: (formData: FormData) => multipartRequest<ExcelPreviewResponse>('/admin/excel-import/preview', formData),
   excelImportRun: (formData: FormData) => multipartRequest<ExcelImportResult>('/admin/excel-import/import', formData),
   analyticsOverview: () => request<AnalyticsOverview>('/analytics/overview'),

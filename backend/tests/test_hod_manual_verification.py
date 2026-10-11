@@ -132,7 +132,7 @@ def test_hod_verify_eligible_record_reaches_final_verified(client):
     try:
         r = client.post(f"/api/v1/verification/institutional/{rid}",
                         json={"decision": "verify", "remarks": "checked portal", "evidence_ref": "register p1"},
-                        headers=_h(client, HOD_H))
+                        headers=_h(client, ADMIN_H))
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["institutional_status"] == "INSTITUTIONALLY_VERIFIED"
@@ -156,7 +156,7 @@ def test_hod_verify_eligible_record_reaches_final_verified(client):
                     VerificationAttempt.source == "institutional_hod"))).scalars().all()
                 assert len(inst) == 1 and inst[0].status == "VERIFIED"
                 assert inst[0].evidence["verification_type"] == "INSTITUTIONAL_MANUAL_OFFICIAL_CHECK"
-                assert inst[0].evidence["hod_user_id"] == HOD_UID
+                assert inst[0].evidence["hod_user_id"] == ADMIN_UID
                 final = (await db.execute(select(VerificationAttempt).where(
                     VerificationAttempt.ip_record_id == rid,
                     VerificationAttempt.source == "final_decision"))).scalars().all()
@@ -189,7 +189,7 @@ def test_hod_verify_blocked_by_open_duplicate(client):
                 await db.commit()
         asyncio.run(_add_dup())
         r = client.post(f"/api/v1/verification/institutional/{rid}",
-                        json={"decision": "verify"}, headers=_h(client, HOD_H))
+                        json={"decision": "verify"}, headers=_h(client, ADMIN_H))
         assert r.status_code == 200, r.text
         body = r.json()
         # Final gate NOT weakened: duplicate blocks VERIFIED.
@@ -219,6 +219,21 @@ def test_faculty_cannot_verify(client):
         r = client.post(f"/api/v1/verification/institutional/{rid}",
                         json={"decision": "verify"}, headers=_h(client, FAC_H))
         assert r.status_code in (401, 403), r.text
+    finally:
+        _drop_record(rid)
+
+
+def test_hod_cannot_verify_readonly(client):
+    """Rule D: HODs are strictly read-only - even the HOD of the record's own
+    department may not perform institutional verification (Super Admin only)."""
+    rid = _make_record("hodro")
+    try:
+        r = client.post(f"/api/v1/verification/institutional/{rid}",
+                        json={"decision": "verify"}, headers=_h(client, HOD_H))
+        assert r.status_code in (401, 403), r.text
+        # The read-only GET remains available to the HOD.
+        g = client.get(f"/api/v1/verification/institutional/{rid}", headers=HOD_H)
+        assert g.status_code == 200, g.text
     finally:
         _drop_record(rid)
 
