@@ -228,9 +228,12 @@ async def login(
             "login_failed_wrong_password",
             email=body.email,
         )
-        raise AuthenticationError(
-            "Incorrect password. Please try again."
-        )
+        # D-005: must be byte-identical to the unknown-account message above.
+        # Distinguishing them let an unauthenticated caller enumerate valid
+        # accounts by observing which response they got, and the per-IP login
+        # rate limit (10/min) still leaves enumeration practical. The
+        # distinct log event above preserves the signal for defenders.
+        raise AuthenticationError("Invalid email or password")
 
     if not user.is_active:
         raise AuthenticationError(

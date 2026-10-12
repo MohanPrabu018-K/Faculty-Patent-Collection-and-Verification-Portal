@@ -127,9 +127,10 @@ export function LoginPage() {
       navigate(allowedFrom(from, me.role) ?? homeForRole(me.role), { replace: true });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Login failed';
-      if (message.includes('Incorrect password')) {
-        setError('Incorrect password. Please try again.');
-      } else if (message.includes('Invalid email or password')) {
+      if (message.includes('Invalid email or password')) {
+        // The backend deliberately returns this identical message whether the
+        // account is unknown or the password was wrong, so that login cannot
+        // be used to enumerate registered accounts (D-005).
         setError('Invalid email or password. Please try again.');
       } else if (message.includes('Account is deactivated')) {
         setError('Your account has been deactivated. Please contact an administrator.');
