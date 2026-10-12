@@ -72,7 +72,7 @@ class TestSchedulerStartupShutdown:
 
     @pytest.mark.asyncio
     async def test_lifespan_registers_jobs(self):
-        """Test that lifespan registers both jobs."""
+        """Test that lifespan registers the reminder, expiry and recovery jobs."""
         import app.services.scheduler as scheduler_module
         scheduler_module._scheduler = None
 
@@ -82,7 +82,10 @@ class TestSchedulerStartupShutdown:
             job_ids = {job.id for job in jobs}
             assert "check_and_send_reminders" in job_ids
             assert "check_and_expire_requests" in job_ids
-            assert len(jobs) == 2
+            # Stranded-pipeline recovery must be registered, otherwise a worker
+            # recycle silently strands uploads at QUEUED forever.
+            assert "recover_stuck_pipelines" in job_ids
+            assert len(jobs) == 3
         scheduler_module._scheduler = None
 
     @pytest.mark.asyncio
@@ -284,7 +287,8 @@ class TestSchedulerConcurrency:
 
             # Jobs should not be duplicated
             jobs = scheduler1.get_jobs()
-            assert len(jobs) == 2
+            assert len(jobs) == 3
+            assert len({job.id for job in jobs}) == 3
         scheduler_module._scheduler = None
 
     @pytest.mark.asyncio

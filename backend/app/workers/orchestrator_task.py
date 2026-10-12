@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -258,10 +258,17 @@ def _update_ip_record_from_agents(ip_record, result):
                         # layer, so clearing another record's identifier here
                         # would destroy evidence instead of resolving anything.
                         setattr(ip_record, key, value)
-                for key in ("filing_date", "grant_date", "published_date"):
-                    # BUG 7: grant_date is a DATE column (migration 009) —
+                for key in ("filing_date", "grant_date", "published_date", "registration_date"):
+                    # BUG 7: grant_date is a DATE column (migration 009) -
                     # persist the calendar date, never a timestamp. A bare
                     # year or unparseable value is skipped, never persisted.
+                    #
+                    # registration_date matters for design registrations: the
+                    # certificate's "Design No. / Date" pair is the date the
+                    # design was registered, and the extraction service emits
+                    # it as registration_date. Omitting it here dropped the
+                    # only date a design certificate carries, leaving every
+                    # design record with null dates despite a successful OCR.
                     value = _coerce_record_datetime(_collapse_value(extracted_data.get(key)))
                     if value is not None:
                         if key == "grant_date":
@@ -325,7 +332,7 @@ def _update_processing_job_status(ip_record_id: str, status: str, error: str | N
     try:
         job = session.execute(select(ProcessingJob).where(ProcessingJob.ip_record_id == ip_record_id, ProcessingJob.job_type == "orchestrator")).scalar_one_or_none()
         if not job:
-            job = ProcessingJob(ip_record_id=ip_record_id, job_type="orchestrator", status=status)
+            job = ProcessingJob(id=str(uuid.uuid4()), ip_record_id=ip_record_id, job_type="orchestrator", status=status)
             session.add(job)
         job.status = status
         job.error_message = error
@@ -351,7 +358,7 @@ def _update_orchestrator_job_status(ip_record_id: str, result):
     try:
         job = session.execute(select(ProcessingJob).where(ProcessingJob.ip_record_id == ip_record_id, ProcessingJob.job_type == "orchestrator")).scalar_one_or_none()
         if not job:
-            job = ProcessingJob(ip_record_id=ip_record_id, job_type="orchestrator", status=status)
+            job = ProcessingJob(id=str(uuid.uuid4()), ip_record_id=ip_record_id, job_type="orchestrator", status=status)
             session.add(job)
         job.status = status
         job.error_message = error_msg
@@ -942,6 +949,98 @@ def _derive_workflow_state(ip_record, result) -> str:
             )
 
     return advance_through(current, target)
+
+
+def requeue_stuck_pipelines(stuck_after_seconds: int = 300, max_records: int = 25) -> dict[str, Any]:
+    """Re-drive orchestrator jobs stranded in a non-terminal status.
+
+    Uploads schedule the 11-agent pipeline with FastAPI ``BackgroundTasks``,
+    which is in-process and non-durable. If the worker recycles mid-run (dep,
+    crash, or the Render free plan's idle spin-down) the job row is left at
+    QUEUED/PROCESSING forever: nothing re-reads it, so the record never
+    reaches AWAITING_REVIEW and its metadata stays null. The document itself is
+    already persisted, so the correct repair is to re-run the pipeline from the
+    stored file -- not to fail or drop the record.
+
+    Returns a summary dict; raises nothing. Safe to call repeatedly: only jobs
+    older than ``stuck_after_seconds`` are considered, so a job that is merely
+    still running is never raced.
+    """
+    from pathlib import Path
+
+    from app.core.config import upload_settings
+    from app.models.base import IpFile
+
+    terminal = {"SUCCESS", "COMPLETED_WITH_ERRORS", "AWAITING_REVIEW", "FAILED"}
+    session = get_session()
+    requeued: list[str] = []
+    skipped_missing_file: list[str] = []
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=stuck_after_seconds)
+        rows = (
+            session.execute(
+                select(ProcessingJob)
+                .where(
+                    ProcessingJob.job_type == "orchestrator",
+                    ProcessingJob.status.notin_(terminal),
+                    ProcessingJob.created_at < cutoff,
+                )
+                .order_by(ProcessingJob.created_at.asc())
+                .limit(max_records)
+            )
+            .scalars()
+            .all()
+        )
+
+        storage_root = Path(upload_settings.local_storage_root).resolve()
+
+        for job in rows:
+            record_id = job.ip_record_id
+            file_row = (
+                session.execute(
+                    select(IpFile)
+                    .where(IpFile.ip_record_id == record_id)
+                    .order_by(IpFile.created_at.asc())
+                )
+                .scalars()
+                .first()
+            )
+            if not file_row or not file_row.storage_key:
+                skipped_missing_file.append(record_id)
+                continue
+
+            # Resolve inside the storage root and refuse traversal, mirroring
+            # the download path in app/api/ip_records.py.
+            candidate = (storage_root / file_row.storage_key).resolve()
+            if not str(candidate).startswith(str(storage_root)) or not candidate.exists():
+                skipped_missing_file.append(record_id)
+                continue
+
+            job.retry_count = (job.retry_count or 0) + 1
+            job.status = "QUEUED"
+            job.error_message = None
+            job.completed_at = None
+            session.commit()
+            requeued.append(record_id)
+            logger.info(
+                "pipeline_requeued",
+                ip_record_id=record_id,
+                retry_count=job.retry_count,
+                file=str(candidate),
+            )
+            run_document_pipeline(str(candidate), record_id)
+
+        return {
+            "stuck_found": len(rows),
+            "requeued": requeued,
+            "skipped_missing_file": skipped_missing_file,
+        }
+    except Exception as exc:
+        session.rollback()
+        logger.error("requeue_stuck_pipelines_failed", error=str(exc))
+        raise
+    finally:
+        session.close()
 
 
 

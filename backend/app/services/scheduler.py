@@ -73,11 +73,29 @@ async def lifespan_scheduler(app) -> AsyncGenerator[None, None]:
         max_instances=1,
         coalesce=True,
     )
-    
+
+    # Durable-ish recovery for the upload pipeline. Uploads schedule the
+    # 11-agent orchestrator via FastAPI BackgroundTasks, which lives only in
+    # this process; a recycle (deploy, crash, or the free plan's idle
+    # spin-down) strands the job at QUEUED/PROCESSING with no way to resume.
+    # This re-drives those stranded jobs from the stored document so a
+    # recycled worker cannot silently swallow an upload.
+    _scheduler.add_job(
+        _run_pipeline_recovery_job,
+        trigger=IntervalTrigger(minutes=scheduler_settings.pipeline_recovery_interval_minutes),
+        id="recover_stuck_pipelines",
+        name="Requeue stranded document pipelines",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
     logger.info(
-        "Starting scheduler: reminder_interval_hours=%s, expiry_check_interval_hours=%s",
+        "Starting scheduler: reminder_interval_hours=%s, expiry_check_interval_hours=%s, "
+        "pipeline_recovery_interval_minutes=%s",
         scheduler_settings.reminder_interval_hours,
         scheduler_settings.expiry_check_interval_hours,
+        scheduler_settings.pipeline_recovery_interval_minutes,
     )
     
     # Idempotent start: the scheduler is a process-wide singleton, so repeated
@@ -124,3 +142,33 @@ async def _run_expiry_job() -> None:
     except Exception as e:
         logger.error("Expiry job failed: %s", e)
         raise
+
+
+async def _run_pipeline_recovery_job() -> None:
+    """Re-drive orchestrator jobs stranded by a worker recycle.
+
+    ``run_document_pipeline`` is synchronous and blocking (it calls
+    ``asyncio.run`` internally), so it must be offloaded to a worker thread to
+    keep this scheduler's event loop responsive.
+    """
+    import asyncio as _asyncio
+
+    from app.core.config import scheduler_settings
+    from app.workers.orchestrator_task import requeue_stuck_pipelines
+
+    try:
+        summary = await _asyncio.to_thread(
+            requeue_stuck_pipelines,
+            stuck_after_seconds=scheduler_settings.pipeline_stuck_after_seconds,
+        )
+    except Exception as e:
+        logger.error("Pipeline recovery job failed: %s", e)
+        raise
+
+    if summary.get("requeued") or summary.get("skipped_missing_file"):
+        logger.info(
+            "Pipeline recovery requeued stranded jobs",
+            stuck_found=summary.get("stuck_found"),
+            requeued=len(summary.get("requeued") or []),
+            skipped_missing_file=len(summary.get("skipped_missing_file") or []),
+        )

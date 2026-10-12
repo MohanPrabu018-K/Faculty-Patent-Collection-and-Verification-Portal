@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_super_admin
 from app.core.database import get_async_session
 from app.core.exceptions import AuthorizationError, NotFoundError, PortalError
 from app.core.logging import log_audit
@@ -27,6 +27,54 @@ from app.models.base import (
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/v1/verification", tags=["verification"])
+
+
+@router.post("/pipeline/requeue-stalled", status_code=status.HTTP_200_OK)
+async def requeue_stalled_pipelines(
+    current_user: dict = Depends(require_super_admin),
+):
+    """Re-drive orchestrator jobs stranded at QUEUED/PROCESSING.
+
+    The upload path schedules the 11-agent pipeline with FastAPI
+    BackgroundTasks, which lives only in the worker process that accepted the
+    upload. A deploy, crash, or the free plan's idle spin-down therefore strands
+    the job at a non-terminal status forever, leaving the record with no
+    extracted metadata. The document itself is already persisted, so the safe
+    repair is to re-run the pipeline from the stored file -- never to mark the
+    record processed, failed, or verified by hand.
+
+    Super Admin only, because it triggers document processing (and therefore
+    OCR cost) for arbitrary queued records.
+    """
+    import asyncio as _asyncio
+
+    from app.core.config import scheduler_settings
+    from app.workers.orchestrator_task import requeue_stuck_pipelines
+
+    summary = await _asyncio.to_thread(
+        requeue_stuck_pipelines,
+        stuck_after_seconds=scheduler_settings.pipeline_stuck_after_seconds,
+    )
+
+    log_audit(
+        actor=current_user.get("id"),
+        action="PIPELINE_REQUEUE_STALLED",
+        target_type="processing_job",
+        target_id="orchestrator",
+        status="success",
+        extra={
+            "stuck_found": summary.get("stuck_found", 0),
+            "requeued": len(summary.get("requeued") or []),
+            "skipped_missing_file": len(summary.get("skipped_missing_file") or []),
+        },
+    )
+
+    return {
+        "message": "Stalled pipelines requeued",
+        "stuck_found": summary.get("stuck_found", 0),
+        "requeued": summary.get("requeued", []),
+        "skipped_missing_file": summary.get("skipped_missing_file", []),
+    }
 
 
 @router.get("/sources", status_code=status.HTTP_200_OK)

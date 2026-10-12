@@ -80,6 +80,93 @@ async def test_orchestrator_persists_ocr_ip_type_and_design_number(monkeypatch):
     assert ip_record.design_number == "459641-001"
 
 
+def test_design_registration_date_is_persisted(monkeypatch):
+    """Regression for D-004: design certificates only carry a registration date.
+
+    A design registration certificate states its date as "Design No. / Date".
+    The extraction service emits that as ``registration_date``, but the
+    persistence loop previously mapped only filing/grant/published, so every
+    design record was stored with null dates despite a successful OCR. The
+    registration date must reach the ``registration_date`` column.
+    """
+    from datetime import datetime
+
+    ip_record = IpRecord(id="rec-d004", ip_type="DESIGN_REGISTRATION", uploader_id="user-1")
+    result = SimpleNamespace(
+        agent_outputs=[
+            {
+                "agent_name": "OCRExtractionAgent",
+                "confidence": 0.9,
+                "extracted_data": {
+                    "ip_type": "DESIGN_REGISTRATION",
+                    "design_number": [{"value": "459641-001", "source": "ocr_text"}],
+                    "registration_date": [
+                        {"value": datetime(2025, 5, 21), "source": "ocr_text", "confidence": 0.9}
+                    ],
+                },
+            }
+        ]
+    )
+    monkeypatch.setattr(orchestrator_task, "get_session", lambda: _FakeSession())
+
+    orchestrator_task._update_ip_record_from_agents(ip_record, result)
+
+    assert ip_record.registration_date is not None
+    assert ip_record.registration_date.date().isoformat() == "2025-05-21"
+    # The design certificate's date is the registration date, NOT a grant date.
+    assert ip_record.grant_date is None
+
+
+def test_malformed_registration_date_is_skipped_not_crashed(monkeypatch):
+    """A bare year or unparseable value must be skipped, never abort the commit."""
+    ip_record = IpRecord(id="rec-d004b", ip_type="DESIGN_REGISTRATION", uploader_id="user-1")
+    result = SimpleNamespace(
+        agent_outputs=[
+            {
+                "agent_name": "OCRExtractionAgent",
+                "confidence": 0.9,
+                "extracted_data": {
+                    "registration_date": [{"value": "NA", "source": "ocr_text"}],
+                    "design_number": [{"value": "410787-001", "source": "ocr_text"}],
+                },
+            }
+        ]
+    )
+    monkeypatch.setattr(orchestrator_task, "get_session", lambda: _FakeSession())
+
+    orchestrator_task._update_ip_record_from_agents(ip_record, result)
+
+    assert ip_record.registration_date is None
+    # The rest of the record is still persisted.
+    assert ip_record.design_number == "410787-001"
+
+
+def test_patent_filing_and_grant_dates_still_persist(monkeypatch):
+    """D-004 must not regress the patent path: filing stays, grant stays a date."""
+    from datetime import date, datetime
+
+    ip_record = IpRecord(id="rec-d004c", ip_type="PATENT", uploader_id="user-1")
+    result = SimpleNamespace(
+        agent_outputs=[
+            {
+                "agent_name": "OCRExtractionAgent",
+                "confidence": 0.9,
+                "extracted_data": {
+                    "filing_date": [{"value": datetime(2024, 12, 27), "source": "ocr_text"}],
+                    "grant_date": [{"value": date(2025, 6, 1), "source": "ocr_text"}],
+                },
+            }
+        ]
+    )
+    monkeypatch.setattr(orchestrator_task, "get_session", lambda: _FakeSession())
+
+    orchestrator_task._update_ip_record_from_agents(ip_record, result)
+
+    assert ip_record.filing_date == datetime(2024, 12, 27)
+    # grant_date is a DATE column (migration 009), never a timestamp.
+    assert ip_record.grant_date == date(2025, 6, 1)
+
+
 def test_enum_safe_verification_status_maps_agent_vocab():
     # Values already in the DB enum pass through unchanged.
     assert orchestrator_task._enum_safe_verification_status("VERIFIED") == "VERIFIED"

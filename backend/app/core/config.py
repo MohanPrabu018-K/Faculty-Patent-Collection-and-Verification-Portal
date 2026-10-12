@@ -326,8 +326,22 @@ class SchedulerSettings(BaseSettingsBase):
     expiry_check_interval_hours: int = Field(default=24, alias="SCHEDULER_EXPIRY_CHECK_INTERVAL_HOURS")
     reminder_before_expiry_days: int = Field(default=3, alias="SCHEDULER_REMINDER_BEFORE_EXPIRY_DAYS")
     default_expiry_days: int = Field(default=14, alias="SCHEDULER_DEFAULT_EXPIRY_DAYS")
+    # How often to look for orchestrator jobs stranded at QUEUED/PROCESSING by a
+    # worker recycle. FastAPI BackgroundTasks are in-process, so a deploy or the
+    # free plan's idle spin-down strands them permanently without this sweep.
+    pipeline_recovery_interval_minutes: int = Field(default=5, alias="SCHEDULER_PIPELINE_RECOVERY_INTERVAL_MINUTES")
+    # Only jobs idle at least this long are considered, so a pipeline that is
+    # merely still running is never raced or double-driven.
+    pipeline_stuck_after_seconds: int = Field(default=300, alias="SCHEDULER_PIPELINE_STUCK_AFTER_SECONDS")
 
-    @field_validator("reminder_interval_hours", "expiry_check_interval_hours", "reminder_before_expiry_days", "default_expiry_days")
+    @field_validator(
+        "reminder_interval_hours",
+        "expiry_check_interval_hours",
+        "reminder_before_expiry_days",
+        "default_expiry_days",
+        "pipeline_recovery_interval_minutes",
+        "pipeline_stuck_after_seconds",
+    )
     @classmethod
     def _validate_positive_ints(cls, value: int) -> int:
         if value <= 0:
