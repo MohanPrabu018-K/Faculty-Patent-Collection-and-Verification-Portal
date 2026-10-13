@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import fs from 'fs';
 
-export const BASE = 'http://localhost:5173';
+export const BASE = process.env.FRONTEND_URL || 'http://localhost:221';
 export const API = 'http://127.0.0.1:8000';
 export const RECORD_A = '7be9f118-ba87-462a-8d72-c98b688c6aa4';
 export const RECORD_B = '76e50dba-6195-47b1-83a5-dde08b527854';
@@ -102,11 +102,14 @@ export async function loginUi(page: Page, email: string, password: string) {
 }
 
 export async function logoutUi(page: Page) {
-  const btn = page.getByRole('button', { name: 'Logout' });
-  if (await btn.count() > 0) {
+  const btn = page.getByRole('button', { name: /Logout/i });
+  try {
+    await btn.waitFor({ state: 'visible', timeout: 10000 });
     await btn.click();
-    await page.waitForURL((u) => u.pathname.includes('/login'), { timeout: 15000 }).catch(() => {});
+    await page.waitForURL((u) => u.pathname.includes('/login'), { timeout: 15000 });
     await page.waitForLoadState('load');
+  } catch {
+    // If already logged out or navigated, pass gracefully
   }
 }
 

@@ -65,3 +65,7 @@ storage/
 /backend/verify_p0_final.py
 /backend/setup_contributor.py
 /fix_association.py
+mail api.txt
+*.txt
+!requirements*.txt
+

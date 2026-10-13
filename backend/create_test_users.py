@@ -14,6 +14,7 @@ USERS = [
     ("test-faculty-001", "test@faculty.edu", "Test Faculty", "faculty", "FAC001", "TestPass123!"),
     ("test-faculty-002", "faculty2@faculty.edu", "Faculty Two", "faculty", "FAC002", "TestPass456!"),
     ("test-admin-001", "admin@faculty.edu", "Admin User", "super_admin", None, "AdminPass123!"),
+    ("mv-hod-001", "mv-hod@faculty.edu", "Department HOD", "hod_admin", "MVHOD", "TestPass123!"),
 ]
 
 # Target the same database the application is configured for (DATABASE_URL in the

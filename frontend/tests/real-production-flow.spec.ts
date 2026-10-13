@@ -305,7 +305,7 @@ test('A. Faculty real-world journey: profile, dashboard, real upload → real OC
   expect(assoc.record_id).toBe(State.recordId);
 
   // ---- Rule 11: Faculty B receives the notification and ACCEPTS via UI -----
-  const ctxB = await browser.newContext({ baseURL: 'http://localhost:5173', viewport: { width: 1440, height: 900 } });
+  const ctxB = await browser.newContext({ baseURL: process.env.FRONTEND_URL || 'http://localhost:221', viewport: { width: 1440, height: 900 } });
   const pb = await ctxB.newPage();
   armNetworkHunters(pb);
   await loginViaUi(pb, USERS.facultyB.email, USERS.facultyB.password);

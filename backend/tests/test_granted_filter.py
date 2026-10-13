@@ -87,7 +87,7 @@ def _h(client, auth):
     return headers
 
 
-def test_granted_workflow_filter_returns_granted_records(client):
+def test_granted_workflow_filter_returns_granted_records(client, granted_record):
     r = client.get("/api/v1/admin/ip-records?workflow_state=GRANTED", headers=_h(client, ADMIN))
     assert r.status_code == 200, r.text
     body = r.json()

@@ -80,8 +80,9 @@ async def lifespan_scheduler(app) -> AsyncGenerator[None, None]:
         scheduler_settings.expiry_check_interval_hours,
     )
     
-    _scheduler.start()
-    logger.info("Scheduler started")
+    if not _scheduler.running:
+        _scheduler.start()
+        logger.info("Scheduler started")
     
     try:
         yield

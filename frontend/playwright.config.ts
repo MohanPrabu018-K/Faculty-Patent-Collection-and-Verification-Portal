@@ -1,6 +1,6 @@
 import { defineConfig, devices } from '@playwright/test';
 
-const BASE_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+const BASE_URL = process.env.FRONTEND_URL || 'http://localhost:221';
 const API_URL = process.env.API_URL || 'http://localhost:8000';
 
 export default defineConfig({

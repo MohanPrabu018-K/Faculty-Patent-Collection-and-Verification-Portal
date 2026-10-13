@@ -1,3 +1,4 @@
+import httpx
 import secrets
 import smtplib
 import structlog
@@ -32,9 +33,9 @@ router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 
 def _send_reset_email(to_email: str, token: str, user_name: str) -> bool:
-    """Send password reset email via SMTP. Returns True if sent, False otherwise."""
-    if not smtp_settings.smtp_enabled or not smtp_settings.smtp_host:
-        logger.info("smtp_disabled", reason="SMTP not configured")
+    """Send password reset email via Brevo API or SMTP. Returns True if sent, False otherwise."""
+    if not smtp_settings.smtp_enabled:
+        logger.info("smtp_disabled", reason="Email delivery is disabled")
         return False
 
     reset_link = f"{smtp_settings.frontend_reset_url}/reset?token={token}"
@@ -55,6 +56,42 @@ def _send_reset_email(to_email: str, token: str, user_name: str) -> bool:
     </body>
     </html>
     """
+
+    # 1. Brevo REST API (preferred when BREVO_API_KEY is configured and no explicit SMTP host is set)
+    if smtp_settings.brevo_api_key and not smtp_settings.smtp_host:
+        try:
+            payload = {
+                "sender": {
+                    "name": smtp_settings.smtp_from_name,
+                    "email": smtp_settings.smtp_from_email,
+                },
+                "to": [{"email": to_email, "name": user_name}],
+                "subject": "Reset Your Password - Faculty Patent Portal",
+                "htmlContent": html_body,
+            }
+            resp = httpx.post(
+                "https://api.brevo.com/v3/smtp/email",
+                headers={
+                    "api-key": smtp_settings.brevo_api_key,
+                    "content-type": "application/json",
+                },
+                json=payload,
+                timeout=smtp_settings.smtp_timeout_seconds,
+            )
+            if resp.is_success:
+                logger.info("password_reset_email_sent_brevo", to_email=to_email)
+                return True
+            else:
+                logger.error("password_reset_email_brevo_error", to_email=to_email, status_code=resp.status_code, body=resp.text)
+                return False
+        except Exception as exc:
+            logger.error("password_reset_email_brevo_exception", to_email=to_email, error=str(exc))
+            return False
+
+    # 2. Standard SMTP fallback
+    if not smtp_settings.smtp_enabled or not smtp_settings.smtp_host:
+        logger.info("smtp_disabled", reason="Neither Brevo nor SMTP configured")
+        return False
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = "Reset Your Password - Faculty Patent Portal"

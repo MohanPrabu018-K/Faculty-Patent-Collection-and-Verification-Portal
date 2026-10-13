@@ -1,7 +1,7 @@
 import { expect, type Page } from '@playwright/test';
 
 export const API_URL = process.env.API_URL || 'http://localhost:8000';
-export const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+export const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:221';
 
 export const USERS = {
   facultyA: { email: 'test@faculty.edu', password: 'TestPass123!', fullName: 'Test Faculty', role: 'faculty', facultyId: 'FAC001' },

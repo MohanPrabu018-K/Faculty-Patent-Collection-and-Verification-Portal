@@ -317,6 +317,7 @@ class SmtpSettings(BaseSettingsBase):
     smtp_timeout_seconds: int = Field(default=15, alias="SMTP_TIMEOUT_SECONDS")
     reset_token_expiry_hours: int = Field(default=1, alias="RESET_TOKEN_EXPIRY_HOURS")
     frontend_reset_url: str = Field(default="http://localhost:5173", alias="FRONTEND_RESET_URL")
+    brevo_api_key: str = Field(default="", alias="BREVO_API_KEY")
 
 
 class SchedulerSettings(BaseSettingsBase):

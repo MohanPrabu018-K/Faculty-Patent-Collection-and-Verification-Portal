@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 
-const BASE_URL = 'http://localhost:5173';
+const BASE_URL = process.env.FRONTEND_URL || 'http://localhost:221';
 const API_URL = 'http://127.0.0.1:8000';
 const RECORD_ID = '7be9f118-ba87-462a-8d72-c98b688c6aa4';
 const RECORD_B = '76e50dba-6195-47b1-83a5-dde08b527854';
