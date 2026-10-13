@@ -1,7 +1,9 @@
 import { defineConfig, devices } from '@playwright/test';
+import { guardedDevWebServer, resolveLegacyEnv } from './src/testing/legacyGuard';
 
-const BASE_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
-const API_URL = process.env.API_URL || 'http://localhost:8000';
+// Fail-closed loopback guard: throws at config-load time on any non-loopback /
+// production target. The legacy suite is loopback-only (no allow-list).
+const { baseUrl: BASE_URL, apiUrl: API_URL } = resolveLegacyEnv();
 
 export default defineConfig({
   testDir: './tests',
@@ -24,12 +26,11 @@ export default defineConfig({
     actionTimeout: 15_000,
     navigationTimeout: 30_000,
   },
-  webServer: {
-    command: 'npm run dev',
-    url: BASE_URL,
+  webServer: guardedDevWebServer(BASE_URL, {
+    apiUrl: API_URL,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
-  },
+  }),
   projects: [
     {
       name: 'setup',

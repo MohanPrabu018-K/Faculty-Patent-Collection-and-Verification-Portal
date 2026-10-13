@@ -6,10 +6,16 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 from app.api.deps import check_rate_limit, get_current_user
-from app.core.config import app_settings, rate_limit_settings, smtp_settings
+from app.core.config import app_settings, brevo_settings, rate_limit_settings, smtp_settings
 from app.core.database import get_async_session
 from app.core.exceptions import AuthenticationError, RateLimitError
 from app.core.logging import log_audit
+from app.services.transactional_email import (
+    active_email_provider,
+    is_email_configured,
+    render_reset_email,
+    send_reset_via_brevo,
+)
 from app.core.security import (
     decode_jwt_token,
     generate_csrf_token,
@@ -32,32 +38,20 @@ router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 
 def _send_reset_email(to_email: str, token: str, user_name: str) -> bool:
-    """Send password reset email via SMTP. Returns True if sent, False otherwise."""
+    """Send password reset email via SMTP. Returns True if sent, False otherwise.
+
+    Kept as the SMTP fallback transport. When Brevo is configured the caller
+    prefers :func:`send_reset_via_brevo`; this function is unchanged so the
+    existing SMTP contract (and its tests) keeps working.
+    """
     if not smtp_settings.smtp_enabled or not smtp_settings.smtp_host:
         logger.info("smtp_disabled", reason="SMTP not configured")
         return False
 
-    reset_link = f"{smtp_settings.frontend_reset_url}/reset?token={token}"
-    html_body = f"""
-    <html>
-    <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #1a56db;">Password Reset Request</h2>
-        <p>Hello {user_name},</p>
-        <p>You requested a password reset for your Faculty Patent Portal account.</p>
-        <p>Click the link below to reset your password. This link expires in {smtp_settings.reset_token_expiry_hours} hour(s).</p>
-        <p style="text-align: center; margin: 30px 0;">
-            <a href="{reset_link}" style="background: #1a56db; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px;">Reset Password</a>
-        </p>
-        <p style="color: #6b7280; font-size: 13px;">If the button doesn't work, copy this link: {reset_link}</p>
-        <p style="color: #6b7280; font-size: 13px;">If you didn't request this, you can safely ignore this email.</p>
-        <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 20px 0;">
-        <p style="color: #9ca3af; font-size: 12px;">Faculty Patent Collection Portal</p>
-    </body>
-    </html>
-    """
+    subject, _text_body, html_body, reset_link = render_reset_email(user_name, token)
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = "Reset Your Password - Faculty Patent Portal"
+    msg["Subject"] = subject
     msg["From"] = f"{smtp_settings.smtp_from_name} <{smtp_settings.smtp_from_email}>"
     msg["To"] = to_email
     msg.attach(MIMEText(html_body, "html"))
@@ -445,14 +439,16 @@ async def forgot_password(
             },
         )
 
-    # BUG 1 (production hardening): never fake email success. When SMTP is
-    # not configured no email can be dispatched, so return an honest
-    # service-unavailable message INSTEAD of the generic "link has been sent"
-    # text. This branch runs before the user lookup and is identical for
-    # registered and unregistered emails, so account-enumeration privacy is
-    # preserved. No reset token is minted when delivery is impossible.
-    if not smtp_settings.smtp_enabled or not smtp_settings.smtp_host:
-        logger.info("password_reset_unavailable", reason="SMTP not configured")
+    # BUG 1 (production hardening): never fake email success. When NO email
+    # provider is configured (neither Brevo nor SMTP) no email can be
+    # dispatched, so return an honest service-unavailable message INSTEAD of
+    # the generic "link has been sent" text. This branch runs before the user
+    # lookup and is identical for registered and unregistered emails, so
+    # account-enumeration privacy is preserved. No reset token is minted when
+    # delivery is impossible.
+    provider = active_email_provider()
+    if provider is None:
+        logger.info("password_reset_unavailable", reason="no email provider configured")
         return JSONResponse(
             status_code=503,
             content={
@@ -487,11 +483,24 @@ async def forgot_password(
         db.add(security_event)
         await db.commit()
 
-        email_sent = _send_reset_email(
-            to_email=user.email,
-            token=token,
-            user_name=user.full_name or user.email,
-        )
+        email_sent = False
+        if provider == "brevo":
+            # Brevo transactional email (no SMTP credentials needed). A
+            # provider-side failure still returns the generic message (a
+            # per-user failure code would leak account existence); the minted
+            # token stays valid so the user can retry.
+            brevo_result = await send_reset_via_brevo(
+                to_email=user.email,
+                token=token,
+                user_name=user.full_name or user.email,
+            )
+            email_sent = brevo_result.accepted
+        else:
+            email_sent = _send_reset_email(
+                to_email=user.email,
+                token=token,
+                user_name=user.full_name or user.email,
+            )
 
         if email_sent:
             log_audit(
@@ -509,7 +518,7 @@ async def forgot_password(
                 target_type="user",
                 target_id=user.id,
                 status="error",
-                extra={"email": user.email, "smtp_configured": smtp_settings.smtp_enabled},
+                extra={"email": user.email, "email_provider": provider, "smtp_configured": smtp_settings.smtp_enabled},
             )
 
         logger.info(

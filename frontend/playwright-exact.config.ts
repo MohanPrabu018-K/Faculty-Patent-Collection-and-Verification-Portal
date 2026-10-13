@@ -1,7 +1,11 @@
 // Dedicated config for the exact-business-workflow specs (no stale setup).
 import { defineConfig, devices } from '@playwright/test';
+import { assertOptionalLoopback, guardedDevWebServer, resolveLegacyEnv } from './src/testing/legacyGuard';
 
-const BASE_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+// Fail-closed loopback guard: throws at config-load time on any non-loopback /
+// production target. The exact specs read E2E_API_URL directly — validate it too.
+const { baseUrl: BASE_URL, apiUrl: API_URL } = resolveLegacyEnv();
+assertOptionalLoopback('E2E_API_URL', process.env.E2E_API_URL);
 
 export default defineConfig({
   testDir: './tests',
@@ -21,12 +25,11 @@ export default defineConfig({
     actionTimeout: 30_000,
     navigationTimeout: 60_000,
   },
-  webServer: {
-    command: 'npm run dev',
-    url: BASE_URL,
+  webServer: guardedDevWebServer(BASE_URL, {
+    apiUrl: API_URL,
     reuseExistingServer: true,
     timeout: 180_000,
-  },
+  }),
   projects: [
     {
       name: 'exact-flow',

@@ -1,16 +1,38 @@
 """Real-world HTTP upload verification for Certificate 459641-001.pdf.
 
-Uses the already-running backend at http://localhost:8000 via the normal API
-flow (login -> CSRF -> multipart upload -> BackgroundTasks -> poll to terminal
-state). No code changes; read-only against source.
+Uses an ALREADY-RUNNING backend via the normal API flow (login -> CSRF ->
+multipart upload -> BackgroundTasks -> poll to terminal state). No code changes;
+read-only against source.
+
+SAFETY (fail closed — required before this may touch a network socket):
+
+* ``STAGING_CONFIRM=1`` must be set: this script performs a REAL upload and
+  only ever targets an explicitly confirmed non-production stack.
+* ``STAGING_API_URL`` must be set to the running backend's base URL. Loopback is
+  always allowed; the known production hosts (and ``.pages.dev`` /
+  ``.onrender.com`` namespaces) are refused; any other remote host must be
+  listed in ``STAGING_ALLOWED_HOSTS``. There is no default target.
+* The running backend itself must be connected to a disposable database — that
+  is the operator's responsibility; this script only guarantees the address it
+  talks to is confirmed + non-production.
+
+Example (PowerShell, from repo root):
+
+    $env:STAGING_CONFIRM="1"
+    $env:STAGING_API_URL="http://127.0.0.1:8000"
+    python scripts/verify_real_upload_459641.py
 """
 from __future__ import annotations
 
+import sys
 import time
+from pathlib import Path
 
 import httpx
 
-BASE = "http://localhost:8000"
+sys.path.insert(0, str(Path(__file__).resolve().parent / "staging"))
+import guard  # noqa: E402
+
 EMAIL = "test@faculty.edu"
 PASSWORD = "TestPass123!"
 PDF = r"C:\Users\mohan\Downloads\New folder (2)\Certificate 459641-001.pdf"
@@ -18,7 +40,8 @@ TERMINAL = {"COMPLETED", "COMPLETED_WITH_ERRORS", "AWAITING_REVIEW", "FAILED"}
 
 
 def main() -> int:
-    with httpx.Client(base_url=BASE, timeout=60) as c:
+    base_url = guard.resolve_staging_api_url()
+    with httpx.Client(base_url=base_url, timeout=60) as c:
         # 1. Real login
         r = c.post("/api/v1/auth/login", json={"email": EMAIL, "password": PASSWORD})
         print("LOGIN", r.status_code)

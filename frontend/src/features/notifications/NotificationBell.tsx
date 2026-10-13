@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Bell } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, type NotificationRow } from '../../api/client';
+import { useAuth } from '../../stores/auth';
 import { formatDateTime } from '../../components/ui';
 
 export function NotificationBell() {
@@ -10,10 +11,15 @@ export function NotificationBell() {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const navigate = useNavigate();
   const client = useQueryClient();
+  const { user } = useAuth();
 
   const unread = useQuery({
     queryKey: ['notifications-unread'],
     queryFn: ({ signal }) => api.notificationsUnreadCount(signal),
+    // Never fire credentialed fetches without a signed-in user: an
+    // unauthenticated mount (session expiry, auth race) would 401 and spam
+    // the console on every poll.
+    enabled: Boolean(user),
     refetchInterval: () => (document.hidden ? false : 30_000),
     refetchOnWindowFocus: false,
   });

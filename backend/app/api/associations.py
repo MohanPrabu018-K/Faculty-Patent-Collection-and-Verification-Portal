@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 import structlog
 from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -108,6 +109,13 @@ async def _live_hod_request(
         if (req.target_faculty_id or req.recipient_id) in hods:
             return req
     return None
+
+
+def _is_live_pair_conflict(exc: BaseException) -> bool:
+    """True when a failed INSERT hit the live-pair backstop index
+    (``uq_assoc_live_pair_per_record``). Any other integrity error is a
+    genuine bug and must propagate instead of becoming a 409."""
+    return "uq_assoc_live_pair_per_record" in str(getattr(exc, "orig", exc))
 
 
 async def _has_live_pair_request(
@@ -228,19 +236,33 @@ async def _dispatch_faculty_review_requests(
             if user.id not in covered:
                 covered.append(user.id)
             continue
-        db.add(
-            AssociationRequest(
-                id=str(uuid.uuid4()),
-                ip_record_id=record.id,
-                master_ip_id=record.master_ip_id,
-                requesting_faculty_id=requester_id,
-                target_faculty_id=user.id,
-                requester_id=requester_id,
-                recipient_id=user.id,
-                reason="Faculty association: named in the patent; explicit acceptance required",
-                status="PENDING",
-            )
-        )
+        # A9 backstop: the insert runs in a SAVEPOINT with an immediate
+        # flush, so a concurrent duplicate for this reviewer rolls back only
+        # this row (reported as already-covered) instead of failing the
+        # whole batch at commit time. The notification is sent only after
+        # the row survives, so a rolled-back request never notifies.
+        try:
+            async with db.begin_nested():
+                db.add(
+                    AssociationRequest(
+                        id=str(uuid.uuid4()),
+                        ip_record_id=record.id,
+                        master_ip_id=record.master_ip_id,
+                        requesting_faculty_id=requester_id,
+                        target_faculty_id=user.id,
+                        requester_id=requester_id,
+                        recipient_id=user.id,
+                        reason="Faculty association: named in the patent; explicit acceptance required",
+                        status="PENDING",
+                    )
+                )
+                await db.flush()
+        except IntegrityError as exc:
+            if not _is_live_pair_conflict(exc):
+                raise
+            if user.id not in covered:
+                covered.append(user.id)
+            continue
         await _notify(
             user.id,
             NotificationType.ASSOCIATION_REQUEST,
@@ -588,7 +610,22 @@ async def send_association_request(request: Request, recipient_faculty_id: str, 
         status="PENDING",
     )
     db.add(association)
-    await db.commit()
+    # A9 backstop: a concurrent identical request may have committed between
+    # the app-level duplicate check and this commit. The partial unique
+    # index rejects it; translate that into the same deterministic 409 the
+    # app-level check returns (never a 500). Any other integrity error is a
+    # genuine bug and propagates.
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        if not _is_live_pair_conflict(exc):
+            raise
+        raise PortalError(
+            message="Association request already exists for this record and faculty (concurrent request)",
+            error_code="VALIDATION_ERROR",
+            status_code=409,
+        ) from exc
 
     log_audit(
         actor=requester_id,

@@ -92,11 +92,11 @@ export function AdminSettingsPage() {
       <SectionCard title="Email delivery" subtitle="Password-reset delivery operability (no secrets shown).">
         <div className="stack">
           <StatusRow
-            label="SMTP delivery"
+            label={`Email delivery${mail.provider ? ` (${display(mail.provider)})` : ''}`}
             status={String(mail.status || 'DISABLED')}
             note={String(mail.status) === 'CONFIGURED'
               ? `Reset emails can be sent. Links expire after ${display(mail.reset_token_expiry_hours)} hour(s).`
-              : 'Not configured: password-reset emails cannot be delivered until SMTP settings are provided on the server.'}
+              : 'Not configured: password-reset emails cannot be delivered until an email provider (Brevo or SMTP) is configured on the server.'}
           />
         </div>
       </SectionCard>

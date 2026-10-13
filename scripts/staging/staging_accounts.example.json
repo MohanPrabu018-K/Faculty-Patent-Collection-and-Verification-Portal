@@ -1,0 +1,33 @@
+{
+  "$comment": [
+    "Template for staging/test identities. Copy to scripts/staging/staging_accounts.json",
+    "(gitignored) or let provision_staging.py generate it. All values here are",
+    "SYNTHETIC placeholders: emails use the reserved .invalid TLD (RFC 2606) and",
+    "faculty IDs are prefixed STG- so they can never collide with real institution IDs.",
+    "If the institution supplies real, approved IDs, replace the faculty_id values AND",
+    "set identity_source to 'INSTITUTION_APPROVED' before provisioning."
+  ],
+  "identity_source": "SYNTHETIC_PLACEHOLDER",
+  "departments": {
+    "A": "Staging Computing",
+    "B": "Staging Electronics",
+    "C": "Staging Mechanical"
+  },
+  "accounts": [
+    { "key": "faculty01", "role": "faculty",    "email": "stg.faculty01@staging.example.com", "full_name": "Staging Faculty 01", "faculty_id": "STG-FAC-01", "department": "A", "password": null },
+    { "key": "faculty02", "role": "faculty",    "email": "stg.faculty02@staging.example.com", "full_name": "Staging Faculty 02", "faculty_id": "STG-FAC-02", "department": "A", "password": null },
+    { "key": "faculty03", "role": "faculty",    "email": "stg.faculty03@staging.example.com", "full_name": "Staging Faculty 03", "faculty_id": "STG-FAC-03", "department": "A", "password": null },
+    { "key": "faculty04", "role": "faculty",    "email": "stg.faculty04@staging.example.com", "full_name": "Staging Faculty 04", "faculty_id": "STG-FAC-04", "department": "A", "password": null },
+    { "key": "faculty05", "role": "faculty",    "email": "stg.faculty05@staging.example.com", "full_name": "Staging Faculty 05", "faculty_id": "STG-FAC-05", "department": "B", "password": null },
+    { "key": "faculty06", "role": "faculty",    "email": "stg.faculty06@staging.example.com", "full_name": "Staging Faculty 06", "faculty_id": "STG-FAC-06", "department": "B", "password": null },
+    { "key": "faculty07", "role": "faculty",    "email": "stg.faculty07@staging.example.com", "full_name": "Staging Faculty 07", "faculty_id": "STG-FAC-07", "department": "B", "password": null },
+    { "key": "faculty08", "role": "faculty",    "email": "stg.faculty08@staging.example.com", "full_name": "Staging Faculty 08", "faculty_id": "STG-FAC-08", "department": "C", "password": null },
+    { "key": "faculty09", "role": "faculty",    "email": "stg.faculty09@staging.example.com", "full_name": "Staging Faculty 09", "faculty_id": "STG-FAC-09", "department": "C", "password": null },
+    { "key": "faculty10", "role": "faculty",    "email": "stg.faculty10@staging.example.com", "full_name": "Staging Faculty 10", "faculty_id": "STG-FAC-10", "department": "C", "password": null },
+    { "key": "facultyDeactivated", "role": "faculty", "email": "stg.faculty.deactivated@staging.example.com", "full_name": "Staging Faculty Deactivated", "faculty_id": "STG-FAC-DEACTIVATED", "department": "A", "password": null, "is_active": false },
+    { "key": "hodA", "role": "hod_admin", "email": "stg.hod.a@staging.example.com", "full_name": "Staging HOD A", "faculty_id": "STG-HOD-01", "department": "A", "password": null },
+    { "key": "hodB", "role": "hod_admin", "email": "stg.hod.b@staging.example.com", "full_name": "Staging HOD B", "faculty_id": "STG-HOD-02", "department": "B", "password": null },
+    { "key": "hodC", "role": "hod_admin", "email": "stg.hod.c@staging.example.com", "full_name": "Staging HOD C", "faculty_id": "STG-HOD-03", "department": "C", "password": null },
+    { "key": "superAdmin", "role": "super_admin", "email": "stg.superadmin@staging.example.com", "full_name": "Staging Super Admin", "faculty_id": null, "department": null, "password": null }
+  ]
+}

@@ -567,6 +567,11 @@ async def my_ip_records(
                     if r.filing_date
                     else None
                 ),
+                "registration_date": (
+                    r.registration_date.isoformat()
+                    if r.registration_date
+                    else None
+                ),
                 "grant_date": api_date_only(r.grant_date),
                 "published_date": (
                     r.published_date.isoformat()
@@ -651,9 +656,9 @@ async def get_record_status(
                 status_code=403,
             )
 
-        query = query.where(
-            IpRecord.department_id == dept
-        )
+        # B12: no record-department SQL filter here. Multi-department patents
+        # are governed by the shared HOD visibility rule enforced below, so a
+        # record listed in GET /hod/documents is also readable here.
 
     result = await db.execute(query)
     row = result.first()
@@ -668,6 +673,23 @@ async def get_record_status(
     ip_record = row[0]
     faculty_id = row[1]
     faculty_name = row[2]
+
+    if user_role == "hod_admin":
+        # B12: enforce the exact HOD visibility rule shared with
+        # GET /hod/documents (past-faculty-stage records whose represented
+        # departments — uploader/contributor/record departments — include the
+        # HOD's department). Records still in faculty association stay
+        # invisible. The 404 contract is byte-identical to before, so account
+        # or record existence cannot be probed through status differences.
+        from app.api.hod import _hod_visible_record_ids
+
+        visible = await _hod_visible_record_ids(db, user_id, dept)
+        if not visible or ip_record.id not in visible:
+            raise PortalError(
+                message="Record not found",
+                error_code="NOT_FOUND",
+                status_code=404,
+            )
 
     designation_name = None
 
@@ -851,6 +873,11 @@ async def get_record_status(
         "filing_date": (
             ip_record.filing_date.isoformat()
             if ip_record.filing_date
+            else None
+        ),
+        "registration_date": (
+            ip_record.registration_date.isoformat()
+            if ip_record.registration_date
             else None
         ),
         "grant_date": api_date_only(ip_record.grant_date),
@@ -1426,8 +1453,43 @@ async def request_association(
                 status_code=409,
             )
 
-    # Create association request
+    # Create association request (secondary path mirrors the primary
+    # POST /associations/ contract exactly):
+    #  - self-association is rejected (400, same message/code as primary),
+    #  - a live request for the same record+pair is rejected (409, same
+    #    message/code as primary) instead of inserting a duplicate row.
+    if other_user.id == user_id:
+        raise PortalError(
+            message="Self-association is not allowed",
+            error_code="VALIDATION_ERROR",
+            status_code=400,
+        )
     from app.models.base import AssociationRequest
+
+    duplicate = (
+        await db.execute(
+            select(AssociationRequest).where(
+                AssociationRequest.ip_record_id == record_id,
+                or_(
+                    AssociationRequest.requesting_faculty_id == user_id,
+                    AssociationRequest.requester_id == user_id,
+                ),
+                or_(
+                    AssociationRequest.target_faculty_id == other_user.id,
+                    AssociationRequest.recipient_id == other_user.id,
+                ),
+                AssociationRequest.status.in_(
+                    ["PENDING", "CLARIFICATION_REQUESTED", "ADMIN_REVIEW", "ACCEPTED", "APPROVED"]
+                ),
+            )
+        )
+    ).scalar_one_or_none()
+    if duplicate:
+        raise PortalError(
+            message=f"Association request already {duplicate.status} for this record and faculty",
+            error_code="VALIDATION_ERROR",
+            status_code=409,
+        )
 
     association = AssociationRequest(
         id=str(uuid.uuid4()),
@@ -1442,7 +1504,42 @@ async def request_association(
     )
 
     db.add(association)
-    await db.commit()
+    # A9 backstop: same race contract as the primary endpoint. On a live-pair
+    # conflict the message mirrors this endpoint's app-level duplicate 409
+    # (including the live status); any other integrity error propagates.
+    from sqlalchemy.exc import IntegrityError
+
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        from app.api.associations import _is_live_pair_conflict
+
+        if not _is_live_pair_conflict(exc):
+            raise
+        live_status = (
+            await db.execute(
+                select(AssociationRequest.status).where(
+                    AssociationRequest.ip_record_id == record_id,
+                    or_(
+                        AssociationRequest.requesting_faculty_id == user_id,
+                        AssociationRequest.requester_id == user_id,
+                    ),
+                    or_(
+                        AssociationRequest.target_faculty_id == other_user.id,
+                        AssociationRequest.recipient_id == other_user.id,
+                    ),
+                    AssociationRequest.status.in_(
+                        ["PENDING", "CLARIFICATION_REQUESTED", "ADMIN_REVIEW", "ACCEPTED", "APPROVED"]
+                    ),
+                ).limit(1)
+            )
+        ).scalar_one_or_none() or "PENDING"
+        raise PortalError(
+            message=f"Association request already {live_status} for this record and faculty",
+            error_code="VALIDATION_ERROR",
+            status_code=409,
+        ) from exc
 
     from app.core.logging import log_audit
 

@@ -304,6 +304,20 @@ class RateLimitSettings(BaseSettingsBase):
         return value
 
 
+class BrevoSettings(BaseSettingsBase):
+    """Brevo transactional-email configuration (password reset, etc.).
+
+    Uses the STANDARD Brevo REST API key against the transactional SMTP
+    endpoint. SMTP_* credentials are NOT required when this provider is
+    configured. An empty ``brevo_api_key`` (or empty sender) means the
+    provider is unavailable.
+    """
+    brevo_api_key: str = Field(default="", alias="BREVO_API_KEY")
+    brevo_sender_email: str = Field(default="", alias="BREVO_SENDER_EMAIL")
+    brevo_sender_name: str = Field(default="Faculty Patent Portal", alias="BREVO_SENDER_NAME")
+    brevo_timeout_seconds: float = Field(default=15.0, alias="BREVO_TIMEOUT_SECONDS")
+
+
 class SmtpSettings(BaseSettingsBase):
     """SMTP configuration for transactional email (password reset, etc.)."""
     smtp_enabled: bool = Field(default=False, alias="SMTP_ENABLED")
@@ -356,6 +370,7 @@ ocr_space_settings = OcrSpaceSettings()
 local_ocr_settings = LocalOcrSettings()
 upload_settings = UploadSettings()
 rate_limit_settings = RateLimitSettings()
+brevo_settings = BrevoSettings()
 smtp_settings = SmtpSettings()
 scheduler_settings = SchedulerSettings()
 
@@ -369,5 +384,6 @@ def get_settings():
         "local_ocr": local_ocr_settings,
         "upload": upload_settings,
         "rate_limit": rate_limit_settings,
+        "brevo": brevo_settings,
         "smtp": smtp_settings,
     }

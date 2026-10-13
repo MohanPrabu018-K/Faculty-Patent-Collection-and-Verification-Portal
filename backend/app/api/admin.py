@@ -717,6 +717,7 @@ async def admin_settings(current_user: dict = Depends(get_current_user)):
         verification_settings,
     )
     from app.core.config import smtp_settings as _smtp_settings
+    from app.services.transactional_email import active_email_provider as _active_email_provider
     from app.services.ocr_pipeline import _resolve_tesseract_cmd
 
     tesseract_path = _resolve_tesseract_cmd()
@@ -758,8 +759,10 @@ async def admin_settings(current_user: dict = Depends(get_current_user)):
         },
         "email": {
             # Item 1: operability indicator only — never secrets. Lets an
-            # admin verify whether password-reset delivery can work.
-            "status": "CONFIGURED" if (_smtp_settings.smtp_enabled and _smtp_settings.smtp_host) else "DISABLED",
+            # admin verify whether password-reset delivery can work. Brevo
+            # (transactional API) counts as configured; SMTP is the fallback.
+            "status": "CONFIGURED" if _active_email_provider() is not None else "DISABLED",
+            "provider": _active_email_provider(),
             "reset_token_expiry_hours": getattr(_smtp_settings, "reset_token_expiry_hours", 1),
         },
         "uploads": {

@@ -23,6 +23,14 @@ vi.mock('../../api/client', () => ({
   api: apiStubs,
 }));
 
+const { authState } = vi.hoisted(() => ({
+  authState: { user: { id: 'u1', role: 'faculty' } as { id: string; role: string } | null },
+}));
+
+vi.mock('../../stores/auth', () => ({
+  useAuth: () => ({ user: authState.user, loading: false }),
+}));
+
 function renderBell() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
@@ -41,6 +49,7 @@ const ITEMS = [
 
 beforeEach(() => {
   cleanup();
+  authState.user = { id: 'u1', role: 'faculty' };
   apiStubs.notificationsUnreadCount.mockReset();
   apiStubs.notifications.mockReset();
   apiStubs.markNotificationRead.mockReset();
@@ -69,6 +78,15 @@ describe('NotificationBell behavior', () => {
     await screen.findByText('Assoc');
     await user.click(screen.getByRole('button', { name: /Mark all read/ }));
     await waitFor(() => expect(apiStubs.markAllNotificationsRead).toHaveBeenCalledTimes(1));
+  });
+
+  it('does not fetch the unread count without a signed-in user', async () => {
+    authState.user = null;
+    renderBell();
+    await waitFor(() => expect(screen.getByRole('button', { name: /Notifications/ })).toBeInTheDocument());
+    // Give the disabled query a chance to fire if the gate were missing.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(apiStubs.notificationsUnreadCount).not.toHaveBeenCalled();
   });
 });
 

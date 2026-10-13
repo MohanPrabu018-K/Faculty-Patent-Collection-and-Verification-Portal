@@ -15,7 +15,7 @@ See [`PROJECT_BLUEPRINT.md`](PROJECT_BLUEPRINT.md) for the full master reference
 | API | FastAPI + Pydantic v2 (async), SQLAlchemy 2.0 + Alembic |
 | Database | PostgreSQL 16 — single source of truth |
 | Document processing | **FastAPI `BackgroundTasks`** — the deterministic 11-agent pipeline runs in-process (no Celery, no Redis, no queue) |
-| OCR | **OCR.Space** free HTTP API (`httpx`), with HTTP-429 retry/backoff; degrades gracefully to empty text if the key is missing or the API fails |
+| OCR | **Local-first**: PyMuPDF embedded text → PaddleOCR (optional) → **Tesseract** (local, open-source; set `TESSERACT_CMD` if not on `PATH`) → OCR.Space (optional external fallback, HTTP-429 retry/backoff, degrades gracefully when unset/failing) |
 | QR | `pyzbar` (OpenCV fallback) |
 | PDF | PyMuPDF + pdfplumber |
 | Frontend | React 18 + TypeScript + Vite |
@@ -28,7 +28,7 @@ POST /api/v1/uploads/  →  IpRecord/IpFile/ProcessingJob rows (status QUEUED)
                        →  background_tasks.add_task(run_document_pipeline, ...)
                        →  202 Accepted
 run_document_pipeline  →  AIOrchestrator.execute()  →  11 deterministic agents:
-   1 Classification · 2 QR · 3 OCR Extraction (OCR.Space) · 4 Understanding
+   1 Classification · 2 QR · 3 OCR Extraction (local-first: Tesseract) · 4 Understanding
    5 Verification · 6 Identity · 7 Duplicate · 8 Conflict
    9 Association · 10 Data Quality · 11 Analytics
                        →  persist extracted fields + ProcessingJob rows to PostgreSQL
@@ -39,7 +39,16 @@ GET /api/v1/uploads/{id}/status  →  UI polls until terminal status
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill in values. OCR.Space block:
+Copy `.env.example` to `.env` and fill in values. Local OCR block:
+
+```
+TESSERACT_CMD=                 # optional: explicit path if tesseract is not on PATH
+                              # (e.g. C:\Program Files\Tesseract-OCR\tesseract.exe)
+TESSERACT_LANGS=eng
+OCRSPACE_FALLBACK_ENABLED=true # set false to disable the external fallback entirely
+```
+
+OCR.Space (optional external fallback) block:
 
 ```
 OCRSPACE_API_KEY=            # free key from https://ocr.space/ocrapi  (configure locally; do not commit)
@@ -51,13 +60,16 @@ OCRSPACE_MAX_RETRIES=3        # retry HTTP 429 / transient failures
 OCRSPACE_BACKOFF_SECONDS=2.0  # linear backoff * attempt
 ```
 
-Without a valid key the pipeline still runs and reaches a terminal status; OCR text
-is simply empty and a warning is recorded.
+Leave `OCRSPACE_API_KEY` empty to run fully offline: the local engines still OCR
+scanned pages, and without a fallback key the pipeline records a warning instead
+of making an external call.
 
 ## Running (native, no Docker)
 
 Prerequisites: Python 3.12, Node.js 20+, PostgreSQL 16, libzbar. **No Redis, no
-Celery, no Tesseract.**
+Celery.** OCR is local-first: install Tesseract for scanned PDFs (see
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)) or set `TESSERACT_CMD` to an
+existing binary — run `python scripts/check_ocr_deps.py` to verify availability.
 
 ```bash
 # Backend

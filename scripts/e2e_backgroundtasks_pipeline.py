@@ -5,13 +5,30 @@ Launches a real uvicorn server (no Celery / Redis), then:
   deterministic 11-agent orchestrator -> persists to PostgreSQL ->
   GET /api/v1/uploads/{id}/status shows a terminal processing_status.
 
-Requires: PostgreSQL up, test users seeded (create_test_users.py), OCR.Space key
-configured in .env. Run from repo root:
+SAFETY (fail closed — required before anything runs):
+
+* ``STAGING_CONFIRM=1`` must be set: this script performs real upload + DB
+  writes and may only ever target a disposable test/staging stack.
+* ``STAGING_DATABASE_URL`` must be set to an explicit disposable PostgreSQL
+  target (validated by ``scripts/staging/guard.py``; loopback allowed). The
+  application ``DATABASE_URL`` and the root ``.env`` are NEVER consulted.
+* The spawned uvicorn subprocess receives a sandboxed environment: the
+  validated staging URL is pinned as ``DATABASE_URL`` (so the app's ``.env``
+  value cannot leak into the child), remote-opt-in/allowlist tokens are
+  stripped, and non-production run flags (``APP_ENV=development``,
+  ``E2E_TEST=1``, ``SCHEDULER_ENABLED=false``, ``COOKIE_SECURE=false``) apply.
+
+Example (cmd.exe / PowerShell, from repo root):
+
+    $env:STAGING_CONFIRM="1"
+    $env:STAGING_DATABASE_URL="postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/faculty_portal_staging"
     python scripts/e2e_backgroundtasks_pipeline.py
+
+Requires: disposable PostgreSQL up, test users seeded (create_test_users.py),
+local stack from repo root unless overridden. Run from repo root.
 """
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 import time
@@ -21,6 +38,10 @@ import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "backend"
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR / "staging"))
+import guard  # noqa: E402
+
 PDF = BACKEND / "test_patent.pdf"
 PORT = 8099
 BASE = f"http://127.0.0.1:{PORT}"
@@ -44,8 +65,12 @@ def _wait_health(proc: subprocess.Popen, timeout: float = 40.0) -> bool:
 
 
 def main() -> int:
+    # Fail closed BEFORE any side effect: explicit confirmation + a validated,
+    # disposable PostgreSQL target. Never falls back to DATABASE_URL / app .env.
+    guard.require_staging_confirm("scripts/e2e_backgroundtasks_pipeline.py")
+    staging_db_url = guard.resolve_staging_database_url()
     assert PDF.exists(), f"missing test PDF: {PDF}"
-    env = {**os.environ, "PYTHONPATH": str(BACKEND)}
+    env = guard.sandboxed_backend_env(staging_db_url, backend_dir=str(BACKEND))
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(PORT), "--log-level", "warning"],
         cwd=str(BACKEND), env=env,

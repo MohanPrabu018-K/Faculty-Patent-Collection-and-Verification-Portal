@@ -239,13 +239,21 @@ async def get_upload_status(
         dept = current_user.get("department_id")
         if not dept:
             raise HTTPException(status_code=403, detail="HOD account is missing a department")
-        query = query.where(IpRecord.department_id == dept)
+        # B12: no record-department SQL filter here; the shared HOD visibility
+        # rule is enforced after fetch (same as GET /faculty/{id}/status).
 
     result = await db.execute(query)
     ip_record = result.scalar_one_or_none()
 
     if not ip_record:
         raise HTTPException(status_code=404, detail="IP record not found")
+
+    if user_role == "hod_admin":
+        from app.api.hod import _hod_visible_record_ids
+
+        visible = await _hod_visible_record_ids(db, user_id, dept)
+        if not visible or ip_record.id not in visible:
+            raise HTTPException(status_code=404, detail="IP record not found")
 
     jobs_result = await db.execute(select(ProcessingJob).where(ProcessingJob.ip_record_id == ip_record_id))
     jobs = jobs_result.scalars().all()

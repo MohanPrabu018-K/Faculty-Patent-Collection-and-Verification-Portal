@@ -95,4 +95,30 @@ describe('RecordDetailPage certificate dates (Bug 1)', () => {
     expect(screen.queryByText(/T00:00:00/)).toBeNull();
     expect(screen.queryByText(/\+00:00/)).toBeNull();
   });
+
+  it('design registration date renders for designs, hidden for patents', async () => {
+    apiStubs.facultyRecordStatus.mockResolvedValue({
+      id: 'rec-2',
+      uploader_id: 'uploader-1',
+      faculty_name: 'Uploader One',
+      ip_type: 'DESIGN_REGISTRATION',
+      workflow_state: 'NEEDS_REVIEW',
+      verification_status: 'VERIFICATION_REQUIRED',
+      processing_status: 'COMPLETED',
+      design_number: '435272-001',
+      title: 'Chair',
+      registration_date: '2025-05-21T00:00:00',
+      contributors: [],
+      jobs: [],
+      files: [],
+      field_provenance: [],
+      evidence: {},
+      qr_data: [],
+    });
+    renderPage();
+    await screen.findByText('Extracted Information');
+    expect(screen.getByText('Registration date')).toBeInTheDocument();
+    expect(screen.getByText('21/05/2025')).toBeInTheDocument();
+    expect(screen.queryByText(/T00:00:00/)).toBeNull();
+  });
 });

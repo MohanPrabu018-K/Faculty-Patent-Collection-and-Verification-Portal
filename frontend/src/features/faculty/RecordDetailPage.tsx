@@ -217,6 +217,9 @@ export function RecordDetailPage() {
               { label: 'Application number', value: record.application_number },
             ]),
           { label: 'Filing date', value: formatDateOnly(record.filing_date) },
+          ...(isDesign
+            ? [{ label: 'Registration date', value: formatDateOnly(record.registration_date) }]
+            : []),
           { label: 'Grant date', value: formatDateOnly(record.grant_date) },
           { label: 'Published date', value: formatDateOnly(record.published_date) },
           { label: 'QR data', value: qrData.length ? qrData.join(', ') : null },
