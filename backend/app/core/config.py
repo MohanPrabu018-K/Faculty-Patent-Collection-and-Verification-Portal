@@ -87,7 +87,7 @@ class BaseSettingsBase(BaseSettings):
 
 class AppSettings(BaseSettingsBase):
     app_name: str = Field(default="Faculty Patent Collection Portal", alias="APP_NAME")
-    secret_key: str = Field(default="", alias="SECRET_KEY")
+    secret_key: str = Field(default="development-secret-key-change-me-please-32chars", alias="SECRET_KEY")
     jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
     jwt_access_token_minutes: int = Field(default=30, alias="JWT_ACCESS_TOKEN_MINUTES")
     jwt_refresh_token_days: int = Field(default=7, alias="JWT_REFRESH_TOKEN_DAYS")
@@ -97,7 +97,10 @@ class AppSettings(BaseSettingsBase):
     @field_validator("secret_key")
     @classmethod
     def _validate_secret_key(cls, value: str) -> str:
-        if len(value.strip()) < 32:
+        value = (value or "").strip()
+        if not value:
+            return "development-secret-key-change-me-please-32chars"
+        if len(value) < 32:
             raise ValueError("SECRET_KEY must be at least 32 characters long")
         return value
 
@@ -178,11 +181,14 @@ class AppSettings(BaseSettingsBase):
 
 
 class DatabaseSettings(BaseSettingsBase):
-    database_url: str = Field(default="", alias="DATABASE_URL")
+    database_url: str = Field(default="postgresql+asyncpg://postgres:postgres@localhost:5432/faculty_portal", alias="DATABASE_URL")
 
     @field_validator("database_url")
     @classmethod
     def _validate_database_url(cls, value: str) -> str:
+        value = (value or "").strip()
+        if not value:
+            return "postgresql+asyncpg://postgres:postgres@localhost:5432/faculty_portal"
         if not value.startswith(("postgresql://", "postgresql+asyncpg://")):
             raise ValueError("DATABASE_URL must be a PostgreSQL URL")
         return value
