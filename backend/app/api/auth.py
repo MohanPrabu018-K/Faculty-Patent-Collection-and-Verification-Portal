@@ -34,8 +34,10 @@ router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 def _send_reset_email(to_email: str, token: str, user_name: str) -> bool:
     """Send password reset email via Brevo API or SMTP. Returns True if sent, False otherwise."""
-    if not smtp_settings.smtp_enabled:
-        logger.info("smtp_disabled", reason="Email delivery is disabled")
+    has_brevo = bool(getattr(smtp_settings, "brevo_api_key", ""))
+    has_smtp = bool(smtp_settings.smtp_enabled and smtp_settings.smtp_host)
+    if not has_brevo and not has_smtp:
+        logger.info("email_disabled", reason="Neither Brevo API nor SMTP configured")
         return False
 
     reset_link = f"{smtp_settings.frontend_reset_url}/reset?token={token}"
