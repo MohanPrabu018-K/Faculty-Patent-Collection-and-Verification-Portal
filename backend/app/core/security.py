@@ -1,157 +1,337 @@
-import secrets
-import string
-from pathlib import Path
-from typing import Any
+from __future__ import annotations
+
+import asyncio
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, Tuple
 
 import structlog
+from app.core.config import app_settings, rate_limit_settings, upload_settings
+from app.core.logging import log_security_event
+from fastapi import Request, Response
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp
 
 logger = structlog.get_logger()
 
-from argon2 import PasswordHasher
-from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 
-from app.core.config import upload_settings
-
-# Single hasher instance shared by hash/verify so parameters always match.
-_password_hasher = PasswordHasher(
-    time_cost=2,
-    memory_cost=65536,
-    parallelism=2,
-    hash_len=32,
-    salt_len=16,
-)
+@dataclass
+class RateLimitRule:
+    key: str
+    limit: int
+    window_seconds: int
+    scope: str = "ip"
 
 
-def hash_password(plain_text: str) -> str:
-    """Hash a password using Argon2id.
+class InMemoryRateLimiter:
+    def __init__(self):
+        self._buckets: dict[str, list[float]] = {}
+        self._lock = asyncio.Lock()
 
-    Returns the hash string suitable for storage.
-    """
-    return _password_hasher.hash(plain_text)
+    async def check_rate_limit(self, key: str, limit: int, window_seconds: int) -> tuple[bool, dict[str, Any]]:
+        now = time.time()
+        window_start = now - window_seconds
+        async with self._lock:
+            if key not in self._buckets:
+                self._buckets[key] = []
+            self._buckets[key] = [ts for ts in self._buckets[key] if ts > window_start]
+            current_count = len(self._buckets[key])
+            if current_count >= limit:
+                oldest = min(self._buckets[key]) if self._buckets[key] else now
+                retry_after = int(oldest + window_seconds - now) + 1
+                return False, {
+                    "allowed": False,
+                    "limit": limit,
+                    "remaining": 0,
+                    "retry_after": retry_after,
+                    "reset_at": oldest + window_seconds,
+                }
+            self._buckets[key].append(now)
+            return True, {
+                "allowed": True,
+                "limit": limit,
+                "remaining": limit - current_count - 1,
+                "retry_after": 0,
+                "reset_at": now + window_seconds,
+            }
+
+    async def cleanup_old_entries(self, max_age_seconds: int = 3600):
+        now = time.time()
+        async with self._lock:
+            keys_to_delete = []
+            for key, timestamps in self._buckets.items():
+                self._buckets[key] = [ts for ts in timestamps if now - ts < max_age_seconds]
+                if not self._buckets[key]:
+                    keys_to_delete.append(key)
+            for key in keys_to_delete:
+                del self._buckets[key]
 
 
-# Alphabet for generated temporary passwords. Excluded characters are the ones
-# that are visually ambiguous (0/O, 1/l/I) and characters that are difficult to
-# type or that are likely to break shell quoting / URL encoding when copied.
-_TEMP_PW_LOWER = string.ascii_lowercase.replace("l", "")
-_TEMP_PW_UPPER = string.ascii_uppercase.replace("I", "").replace("O", "")
-_TEMP_PW_DIGITS = string.digits.replace("0", "").replace("1", "")
-_TEMP_PW_SPECIAL = "@#$%&*+?=_-"
-_TEMP_PW_ALPHABET = _TEMP_PW_LOWER + _TEMP_PW_UPPER + _TEMP_PW_DIGITS + _TEMP_PW_SPECIAL
+_rate_limiter = InMemoryRateLimiter()
 
 
-def generate_temporary_password(length: int = 18) -> str:
-    """Generate a cryptographically secure temporary password.
-
-    Uses the standard-library ``secrets`` module (never ``random``). Guarantees
-    at least one lowercase, one uppercase, one digit and one special character,
-    and excludes visually ambiguous characters.
-    """
-    if length < 4:
-        raise ValueError("length must be at least 4")
-    chars = [
-        secrets.choice(_TEMP_PW_LOWER),
-        secrets.choice(_TEMP_PW_UPPER),
-        secrets.choice(_TEMP_PW_DIGITS),
-        secrets.choice(_TEMP_PW_SPECIAL),
-    ]
-    chars += [secrets.choice(_TEMP_PW_ALPHABET) for _ in range(length - 4)]
-    secrets.SystemRandom().shuffle(chars)
-    return "".join(chars)
+async def get_rate_limiter() -> InMemoryRateLimiter:
+    return _rate_limiter
 
 
-def verify_password(plain_text: str, hashed: str) -> bool:
-    """Verify a password against its hash using Argon2id."""
-    try:
-        _password_hasher.verify(hashed, plain_text)
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app: ASGIApp):
+        super().__init__(app)
+        self.hsts_max_age = 31536000
+        self.csp_policy = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "img-src 'self' data: https:; "
+            "font-src 'self' data:; "
+            "connect-src 'self'; "
+            "frame-ancestors 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self'"
+        )
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+        if app_settings.cookie_secure:
+            response.headers["Strict-Transport-Security"] = f"max-age={self.hsts_max_age}; includeSubDomains; preload"
+        response.headers["Content-Security-Policy"] = self.csp_policy
+        if "server" in response.headers:
+            del response.headers["server"]
+        return response
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app: ASGIApp):
+        super().__init__(app)
+        import os
+
+        is_e2e = (
+            os.environ.get("E2E_TEST", "").strip().lower() in {"1", "true", "yes"}
+            or os.environ.get("APP_ENV", "").strip().lower() == "e2e"
+        )
+        multiplier = 10000 if is_e2e else 1
+        self.rules = [
+            RateLimitRule("login", rate_limit_settings.login_per_ip * multiplier, 60, "ip"),
+            RateLimitRule("upload", rate_limit_settings.upload_per_hour * multiplier, 3600, "user"),
+            RateLimitRule("search", rate_limit_settings.search_per_minute * multiplier, 60, "ip"),
+            RateLimitRule("api", rate_limit_settings.api_per_minute * multiplier, 60, "ip"),
+        ]
+        if is_e2e:
+            logger.info("rate_limits_e2e_mode", login=self.rules[0].limit, upload=self.rules[1].limit, search=self.rules[2].limit, api=self.rules[3].limit)
+
+    def _get_client_key(self, request: Request, rule: RateLimitRule) -> str:
+        if rule.scope == "ip":
+            client_ip = request.client.host if request.client else "unknown"
+            return f"{rule.key}:ip:{client_ip}"
+        if rule.scope == "user":
+            user_id = getattr(request.state, "user_id", None)
+            if user_id:
+                return f"{rule.key}:user:{user_id}"
+            client_ip = request.client.host if request.client else "unknown"
+            return f"{rule.key}:ip:{client_ip}"
+        if rule.scope == "endpoint":
+            return f"{rule.key}:endpoint:{request.url.path}"
+        return f"{rule.key}:global"
+
+    def _has_auth_material(self, request: Request) -> bool:
+        return bool(request.headers.get("authorization") or request.cookies.get("access_token"))
+
+    def _rule_applies(self, request: Request, rule: RateLimitRule) -> bool:
+        path = request.url.path
+        if rule.key == "login":
+            return path == "/api/v1/auth/login"
+        if rule.key == "upload":
+            return request.method == "POST" and (path == "/api/v1/uploads/" or path == "/api/v1/faculty/upload")
+        if rule.key == "search":
+            return path.startswith("/api/v1/search")
         return True
-    except (VerifyMismatchError, VerificationError, InvalidHashError):
-        return False
-    except Exception:
-        return False
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        if request.url.path in ["/healthz", "/readyz", "/metrics"]:
+            return await call_next(request)
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        if request.url.path != "/api/v1/auth/login" and not self._has_auth_material(request):
+            return await call_next(request)
+
+        for rule in self.rules:
+            if not self._rule_applies(request, rule):
+                continue
+            key = self._get_client_key(request, rule)
+            allowed, info = await _rate_limiter.check_rate_limit(key, rule.limit, rule.window_seconds)
+            if not allowed:
+                return JSONResponse(
+                    status_code=429,
+                    content={
+                        "error": "RATE_LIMIT_EXCEEDED",
+                        "message": f"Rate limit exceeded for {rule.key}",
+                        "retry_after": info["retry_after"],
+                    },
+                    headers={
+                        "X-RateLimit-Limit": str(info["limit"]),
+                        "X-RateLimit-Remaining": str(info["remaining"]),
+                        "X-RateLimit-Reset": str(int(info["reset_at"])),
+                    },
+                )
+            request.state.rate_limit_headers = info
+
+        response = await call_next(request)
+        if hasattr(request.state, "rate_limit_headers"):
+            info = request.state.rate_limit_headers
+            response.headers["X-RateLimit-Limit"] = str(info["limit"])
+            response.headers["X-RateLimit-Remaining"] = str(info["remaining"])
+            response.headers["X-RateLimit-Reset"] = str(int(info["reset_at"]))
+        return response
 
 
-def generate_jwt_token(
-    subject: str,
-    secret: str,
-    algorithm: str = "HS256",
-    minutes: int = 30,
-    email: str = "",
-    role: str = "faculty",
-    faculty_id: str = "",
-    department_id: str = "",
-    full_name: str = "",
-) -> str:
-    """Generate a JWT token."""
-    import jwt
-    import time
+class RequestValidationMiddleware(BaseHTTPMiddleware):
+    MAX_REQUEST_SIZE = 50 * 1024 * 1024
+    ALLOWED_CONTENT_TYPES = {"application/json", "application/x-www-form-urlencoded", "multipart/form-data"}
 
-    issued_at = int(time.time())
-    expires_at = issued_at + (minutes * 60)
-    token = jwt.encode(
-        {
-            "sub": subject,
-            "email": email,
-            "role": role,
-            "faculty_id": faculty_id,
-            "department_id": department_id,
-            "full_name": full_name,
-            "iat": issued_at,
-            "exp": expires_at,
-            "jti": secrets.token_urlsafe(16),
-        },
-        secret,
-        algorithm=algorithm,
-    )
-    return token
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > self.MAX_REQUEST_SIZE:
+            return JSONResponse(
+                status_code=413,
+                content={"error": "REQUEST_TOO_LARGE", "message": f"Request body too large. Maximum size: {self.MAX_REQUEST_SIZE} bytes"},
+            )
+        if request.method in ["POST", "PUT", "PATCH"]:
+            content_type = request.headers.get("content-type", "").split(";")[0]
+            if content_type and content_type not in self.ALLOWED_CONTENT_TYPES:
+                return JSONResponse(
+                    status_code=415,
+                    content={"error": "UNSUPPORTED_MEDIA_TYPE", "message": f"Unsupported content type: {content_type}"},
+                )
+        if ".." in request.url.path or request.url.path.startswith("/.."):
+            log_security_event(
+                event_type="PATH_TRAVERSAL_ATTEMPT",
+                detail=f"Path traversal attempt: {request.url.path}",
+                actor="unknown",
+                outcome="blocked",
+                ip_address=request.client.host if request.client else "unknown",
+            )
+            return JSONResponse(status_code=400, content={"error": "INVALID_PATH", "message": "Invalid path"})
+        return await call_next(request)
 
 
-def decode_jwt_token(token: str, secret: str, algorithm: str = "HS256") -> dict[str, Any] | None:
-    """Decode and validate a JWT token."""
-    import jwt
+class SafeErrorMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app: ASGIApp, debug: bool = False):
+        super().__init__(app)
+        self.debug = debug
 
-    try:
-        payload = jwt.decode(token, secret, algorithms=[algorithm])
-        return payload
-    except Exception:
-        return None
-
-
-def generate_csrf_token() -> str:
-    """Generate a CSRF token."""
-    return secrets.token_urlsafe(32)
-
-
-def validate_csrf_token(token: str, session_token: str | None = None) -> bool:
-    """Validate a CSRF token using the double-submit cookie pattern.
-
-    The token sent in the X-CSRF-Token header must exactly match the
-    csrf_token cookie value for the session.
-    """
-    if not token or not session_token:
-        return False
-    return secrets.compare_digest(str(token), str(session_token))
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        try:
+            return await call_next(request)
+        except Exception as exc:
+            logger.error("unhandled_exception", path=request.url.path, method=request.method, error=str(exc), exc_info=self.debug)
+            log_security_event(
+                event_type="INTERNAL_ERROR",
+                detail=f"Unhandled exception: {type(exc).__name__}",
+                actor="system",
+                outcome="error",
+                ip_address=request.client.host if request.client else "unknown",
+            )
+            if self.debug:
+                return JSONResponse(status_code=500, content={"error": "INTERNAL_ERROR", "message": str(exc), "type": type(exc).__name__})
+            return JSONResponse(status_code=500, content={"error": "INTERNAL_ERROR", "message": "An unexpected error occurred. Please try again later."})
 
 
-def validate_filename(filename: str, allowed_extensions: list[str] | None = None) -> tuple[bool, str | None]:
-    """Validate filename for upload."""
+def get_cors_config() -> dict[str, Any]:
+    return {
+        "allow_origins": app_settings.cors_origins,
+        "allow_credentials": True,
+        "allow_methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        "allow_headers": ["*"],
+        "expose_headers": ["*"],
+    }
+
+
+def sanitize_string(value: str, max_length: int = 1000) -> str:
+    if not isinstance(value, str):
+        return str(value)
+    value = value.replace("\x00", "")
+    if len(value) > max_length:
+        value = value[:max_length]
+    value = "".join(char for char in value if ord(char) >= 32 or char in "\n\t")
+    return value.strip()
+
+
+def sanitize_dict(data: dict[str, Any], max_depth: int = 10) -> dict[str, Any]:
+    if max_depth <= 0:
+        return {}
+    sanitized: dict[str, Any] = {}
+    for key, value in data.items():
+        sanitized_key = sanitize_string(key, 100)
+        if isinstance(value, str):
+            sanitized[sanitized_key] = sanitize_string(value)
+        elif isinstance(value, dict):
+            sanitized[sanitized_key] = sanitize_dict(value, max_depth - 1)
+        elif isinstance(value, list):
+            sanitized[sanitized_key] = [
+                sanitize_string(v) if isinstance(v, str)
+                else sanitize_dict(v, max_depth - 1) if isinstance(v, dict)
+                else v for v in value[:100]
+            ]
+        else:
+            sanitized[sanitized_key] = value
+    return sanitized
+
+
+def validate_email(email: str) -> bool:
+    import re
+
+    pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+    return bool(re.match(pattern, email))
+
+
+def validate_filename(filename: str) -> tuple[bool, str | None]:
     if not filename:
         return False, "Filename is empty"
-
-    safe_name = Path(filename).name
-    if safe_name != filename or not safe_name or safe_name in {".", ".."}:
-        return False, "Filename contains path traversal characters"
-
-    if len(safe_name) > 255:
+    if len(filename) > 255:
         return False, "Filename too long (max 255 characters)"
-
-    allowed = [ext.lower() for ext in (allowed_extensions or upload_settings.allowed_extensions)]
-    ext = Path(safe_name).suffix.lower()
-    if ext not in allowed:
-        return False, f"Invalid file extension: {ext}"
-
-    dangerous_chars = {'<', '>', ':', '"', '|', '?', '*', '\x00'}
-    if any(c in safe_name for c in dangerous_chars):
+    if ".." in filename or filename.startswith("/") or filename.startswith("\\"):
+        return False, "Invalid filename: path traversal attempt"
+    allowed_extensions = {ext.lower() for ext in upload_settings.allowed_extensions}
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if f".{ext}" not in allowed_extensions:
+        return False, f"File extension not allowed: .{ext}"
+    dangerous_chars = set('<>:"/\\|?*\x00')
+    if any(c in dangerous_chars for c in filename):
         return False, "Filename contains invalid characters"
-
     return True, None
+
+
+def validate_password_strength(password: str) -> tuple[bool, list[str]]:
+    errors: list[str] = []
+    if len(password) < 12:
+        errors.append("Password must be at least 12 characters long")
+    if not any(c.isupper() for c in password):
+        errors.append("Password must contain at least one uppercase letter")
+    if not any(c.islower() for c in password):
+        errors.append("Password must contain at least one lowercase letter")
+    if not any(c.isdigit() for c in password):
+        errors.append("Password must contain at least one digit")
+    if not any(c in "!@#$%^&*()_+-=[]{}|;:,.<>?" for c in password):
+        errors.append("Password must contain at least one special character")
+    common_patterns = ["password", "123456", "qwerty", "admin", "user"]
+    password_lower = password.lower()
+    for pattern in common_patterns:
+        if pattern in password_lower:
+            errors.append("Password contains common pattern")
+            break
+    return len(errors) == 0, errors
+
+
+def setup_security_middleware(app, debug: bool = False):
+    app.add_middleware(SafeErrorMiddleware, debug=debug)
+    app.add_middleware(RateLimitMiddleware)
+    app.add_middleware(RequestValidationMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware)
+    logger.info("security_middleware_configured")

@@ -1,292 +1,177 @@
-from __future__ import annotations
+import uuid
+from contextlib import asynccontextmanager
 
-import asyncio
-import time
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any, Tuple
+from app.api.admin import router as admin_router
+from app.api.associations import router as associations_router
+from app.api.auth import router as auth_router
+from app.api.excel_import import router as excel_import_router
+from app.api.hod import router as hod_router
+from app.api.conflicts import router as conflicts_router
+from app.api.duplicates import router as duplicates_router
+from app.api.faculty import router as faculty_router
+from app.api.ip_records import router as ip_records_router
+from app.api.notifications_audit import (
+    audit_router,
+    notifications_router,
+)
+from app.api.search_analytics_exports import (
+    analytics_router,
+    exports_router,
+    router as search_router,
+)
+from app.api.uploads import router as upload_router
+from app.api.verification import router as verification_router
+from app.core.config import app_settings
+from app.core.exceptions import (
+    PortalError,
+    portal_error_handler,
+)
+from app.core.logging import get_logger
+from app.core.performance import setup_performance_optimization
+from app.core.security import validate_csrf_token
+from app.core.security_middleware import setup_security_middleware
+from app.services.scheduler import lifespan_scheduler
 
-import structlog
-from app.core.config import app_settings, rate_limit_settings
-from app.core.logging import log_security_event
-from fastapi import Request, Response
+from fastapi import Depends, FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.types import ASGIApp
 
-logger = structlog.get_logger()
+logger = get_logger(__name__)
 
 
-@dataclass
-class RateLimitRule:
-    key: str
-    limit: int
-    window_seconds: int
-    scope: str = "ip"
+def create_app() -> FastAPI:
+    app = FastAPI(
+        title="Faculty Patent Collection Portal",
+        version="0.1.0",
+        description=(
+            "Production-grade, free-first institutional web portal "
+            "for patents and design registrations"
+        ),
+        docs_url="/docs",
+        redoc_url="/redoc",
+        lifespan=lifespan_scheduler,
+    )
 
+    setup_security_middleware(app, debug=app_settings.debug)
+    setup_performance_optimization(app)
 
-class InMemoryRateLimiter:
-    def __init__(self):
-        self._buckets: dict[str, list[float]] = {}
-        self._lock = asyncio.Lock()
+    @app.middleware("http")
+    async def request_middleware(request: Request, call_next):
+        request_id = str(uuid.uuid4())
+        request.state.request_id = request_id
 
-    async def check_rate_limit(self, key: str, limit: int, window_seconds: int) -> Tuple[bool, dict[str, Any]]:
-        now = time.time()
-        window_start = now - window_seconds
-        async with self._lock:
-            if key not in self._buckets:
-                self._buckets[key] = []
-            self._buckets[key] = [ts for ts in self._buckets[key] if ts > window_start]
-            current_count = len(self._buckets[key])
-            if current_count >= limit:
-                oldest = min(self._buckets[key]) if self._buckets[key] else now
-                retry_after = int(oldest + window_seconds - now) + 1
-                return False, {"allowed": False, "limit": limit, "remaining": 0, "retry_after": retry_after, "reset_at": oldest + window_seconds}
-            self._buckets[key].append(now)
-            return True, {"allowed": True, "limit": limit, "remaining": limit - current_count - 1, "retry_after": 0, "reset_at": now + window_seconds}
+        if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+            if not request.url.path.startswith("/api/v1/auth/"):
+                auth_header = request.headers.get("Authorization", "")
+                bearer_ok = False
+                if auth_header.lower().startswith("bearer "):
+                    try:
+                        from app.core.security import decode_jwt_token as _decode
 
-    async def cleanup_old_entries(self, max_age_seconds: int = 3600):
-        now = time.time()
-        async with self._lock:
-            keys_to_delete = []
-            for key, timestamps in self._buckets.items():
-                self._buckets[key] = [ts for ts in timestamps if now - ts < max_age_seconds]
-                if not self._buckets[key]:
-                    keys_to_delete.append(key)
-            for key in keys_to_delete:
-                del self._buckets[key]
+                        payload = _decode(
+                            auth_header[7:].strip(),
+                            app_settings.secret_key,
+                            app_settings.jwt_algorithm,
+                        )
+                        bearer_ok = bool(payload and payload.get("sub"))
+                    except Exception:
+                        bearer_ok = False
 
+                if not bearer_ok:
+                    csrf_token = request.headers.get("X-CSRF-Token", "")
+                    session_token = request.cookies.get("csrf_token", "")
+                    if not validate_csrf_token(csrf_token, session_token):
+                        return JSONResponse(
+                            status_code=400,
+                            content={
+                                "error": "CSRF_TOKEN_INVALID",
+                                "message": "Invalid or missing CSRF token",
+                            },
+                        )
 
-_rate_limiter = InMemoryRateLimiter()
-
-
-async def get_rate_limiter() -> InMemoryRateLimiter:
-    return _rate_limiter
-
-
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app: ASGIApp):
-        super().__init__(app)
-        self.hsts_max_age = 31536000
-        self.csp_policy = (
-            "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval'  https://cdn.jsdelivr.net; "
-            "style-src 'self' 'unsafe-inline'  https://cdn.jsdelivr.net; "
-            "img-src 'self' data: https:; "
-            "font-src 'self' data:; "
-            "connect-src 'self'; "
-            "frame-ancestors 'none'; "
-            "base-uri 'self'; "
-            "form-action 'self'"
-        )
-
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
         response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
-        if app_settings.cookie_secure:
-            response.headers["Strict-Transport-Security"] = f"max-age={self.hsts_max_age}; includeSubDomains; preload"
-        response.headers["Content-Security-Policy"] = self.csp_policy
-        if "server" in response.headers:
-            del response.headers["server"]
         return response
 
+    cors_origins = getattr(app_settings, "cors_origins", None) or ["http://localhost:5173"]
+    if isinstance(cors_origins, str):
+        cors_origins = [cors_origins]
 
-class RateLimitMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app: ASGIApp):
-        super().__init__(app)
-        # E2E_TEST environment guard: when E2E_TEST=1 (or APP_ENV=e2e),
-        # multiply all rate limits by 100x to prevent 429s during concurrent
-        # Playwright hardening runs. Production/default limits remain unchanged.
-        import os
-        is_e2e = os.environ.get("E2E_TEST", "").strip() in ("1", "true", "yes") or os.environ.get("APP_ENV", "").strip().lower() == "e2e"
-        login_limit = rate_limit_settings.login_per_ip * (10000 if is_e2e else 1)
-        upload_limit = rate_limit_settings.upload_per_hour * (10000 if is_e2e else 1)
-        search_limit = rate_limit_settings.search_per_minute * (10000 if is_e2e else 1)
-        api_limit = rate_limit_settings.api_per_minute * (10000 if is_e2e else 1)
-        self.rules = [
-            RateLimitRule("login", login_limit, 60, "ip"),
-            RateLimitRule("upload", upload_limit, 3600, "user"),
-            RateLimitRule("search", search_limit, 60, "ip"),
-            RateLimitRule("api", api_limit, 60, "ip"),
-        ]
-        if is_e2e:
-            logger.info("rate_limits_e2e_mode", login=login_limit, upload=upload_limit, search=search_limit, api=api_limit)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "Authorization", "X-CSRF-Token"],
+        expose_headers=["X-Request-ID"],
+    )
 
-    def _get_client_key(self, request: Request, rule: RateLimitRule) -> str:
-        if rule.scope == "ip":
-            client_ip = request.client.host if request.client else "unknown"
-            return f"{rule.key}:ip:{client_ip}"
-        if rule.scope == "user":
-            user_id = getattr(request.state, "user_id", None)
-            if user_id:
-                return f"{rule.key}:user:{user_id}"
-            client_ip = request.client.host if request.client else "unknown"
-            return f"{rule.key}:ip:{client_ip}"
-        if rule.scope == "endpoint":
-            return f"{rule.key}:endpoint:{request.url.path}"
-        return f"{rule.key}:global"
+    @app.exception_handler(PortalError)
+    async def portal_exception_handler(request: Request, exc: PortalError):
+        return portal_error_handler(exc)
 
-    def _has_auth_material(self, request: Request) -> bool:
-        return bool(request.headers.get("authorization") or request.cookies.get("access_token"))
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request: Request, exc: Exception):
+        logger.exception(
+            "unhandled_exception",
+            path=request.url.path,
+            method=request.method,
+            exc_type=type(exc).__name__,
+            request_id=getattr(request.state, "request_id", None),
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "INTERNAL_ERROR",
+                "message": "An unexpected error occurred",
+            },
+        )
 
-    def _rule_applies(self, request: Request, rule: RateLimitRule) -> bool:
-        path = request.url.path
-        if rule.key == "login":
-            return path == "/api/v1/auth/login"
-        if rule.key == "upload":
-            return request.method == "POST" and (path == "/api/v1/uploads/" or path == "/api/v1/faculty/upload")
-        if rule.key == "search":
-            return path.startswith("/api/v1/search")
-        # Generic API bucket applies to all other authenticated API requests.
-        return True
+    @app.get("/healthz", include_in_schema=False)
+    async def health_check():
+        return {"status": "ok"}
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        if request.url.path in ["/healthz", "/readyz", "/metrics"]:
-            return await call_next(request)
+    @app.get("/readyz", include_in_schema=False)
+    async def readiness_check():
+        return {"status": "ready"}
 
-        # CORS preflight (OPTIONS) must pass through without rate-limiting
-        # so the CORSMiddleware can set the proper headers.
-        if request.method == "OPTIONS":
-            return await call_next(request)
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics():
+        return {
+            "status": "ok",
+            "service": app_settings.app_name,
+            "version": "0.1.0",
+        }
 
-        if request.url.path != "/api/v1/auth/login" and not self._has_auth_material(request):
-            return await call_next(request)
+    app.include_router(auth_router, tags=["auth"])
+    app.include_router(faculty_router, tags=["faculty"])
+    app.include_router(admin_router, tags=["admin"])
+    app.include_router(hod_router, tags=["hod"])
+    app.include_router(excel_import_router, tags=["excel-import"])
+    app.include_router(upload_router, tags=["uploads"])
+    app.include_router(ip_records_router, tags=["ip-records"])
+    app.include_router(associations_router, tags=["associations"])
+    app.include_router(duplicates_router, tags=["duplicates"])
+    app.include_router(conflicts_router, tags=["conflicts"])
+    app.include_router(verification_router, tags=["verification"])
+    app.include_router(search_router, tags=["search"])
+    app.include_router(analytics_router, tags=["analytics"])
+    app.include_router(exports_router, tags=["exports"])
+    app.include_router(notifications_router, tags=["notifications"])
+    app.include_router(audit_router, tags=["audit"])
 
-        for rule in self.rules:
-            if not self._rule_applies(request, rule):
-                continue
-            key = self._get_client_key(request, rule)
-            allowed, info = await _rate_limiter.check_rate_limit(key, rule.limit, rule.window_seconds)
-            headers = {"X-RateLimit-Limit": str(info["limit"]), "X-RateLimit-Remaining": str(info["remaining"]), "X-RateLimit-Reset": str(int(info["reset_at"]))}
-            if not info["allowed"]:
-                return JSONResponse(status_code=429, content={"error": "RATE_LIMIT_EXCEEDED", "message": f"Rate limit exceeded for {rule.key}", "retry_after": info["retry_after"]}, headers=headers)
-            request.state.rate_limit_headers = info
-
-        response = await call_next(request)
-        if hasattr(request.state, "rate_limit_headers"):
-            info = request.state.rate_limit_headers
-            response.headers["X-RateLimit-Limit"] = str(info["limit"])
-            response.headers["X-RateLimit-Remaining"] = str(info["remaining"])
-            response.headers["X-RateLimit-Reset"] = str(int(info["reset_at"]))
-        return response
+    return app
 
 
-class RequestValidationMiddleware(BaseHTTPMiddleware):
-    MAX_REQUEST_SIZE = 50 * 1024 * 1024
-    ALLOWED_CONTENT_TYPES = {"application/json", "application/x-www-form-urlencoded", "multipart/form-data"}
-
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        content_length = request.headers.get("content-length")
-        if content_length and int(content_length) > self.MAX_REQUEST_SIZE:
-            return JSONResponse(status_code=413, content={"error": "REQUEST_TOO_LARGE", "message": f"Request body too large. Maximum size: {self.MAX_REQUEST_SIZE} bytes"})
-        if request.method in ["POST", "PUT", "PATCH"]:
-            content_type = request.headers.get("content-type", "").split(";")[0]
-            if content_type and content_type not in self.ALLOWED_CONTENT_TYPES:
-                return JSONResponse(status_code=415, content={"error": "UNSUPPORTED_MEDIA_TYPE", "message": f"Unsupported content type: {content_type}"})
-        if ".." in request.url.path or request.url.path.startswith("/.."):
-            log_security_event(event_type="PATH_TRAVERSAL_ATTEMPT", detail=f"Path traversal attempt: {request.url.path}", actor="unknown", outcome="blocked", ip_address=request.client.host if request.client else None, user_agent=request.headers.get("user-agent"))
-            return JSONResponse(status_code=400, content={"error": "INVALID_PATH", "message": "Invalid path"})
-        return await call_next(request)
+app = create_app()
 
 
-class SafeErrorMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app: ASGIApp, debug: bool = False):
-        super().__init__(app)
-        self.debug = debug
-
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        try:
-            return await call_next(request)
-        except Exception as exc:
-            logger.error("unhandled_exception", path=request.url.path, method=request.method, error=str(exc), exc_info=self.debug)
-            log_security_event(event_type="INTERNAL_ERROR", detail=f"Unhandled exception: {type(exc).__name__}", actor="system", outcome="error", ip_address=request.client.host if request.client else None)
-            if self.debug:
-                return JSONResponse(status_code=500, content={"error": "INTERNAL_ERROR", "message": str(exc), "type": type(exc).__name__})
-            return JSONResponse(status_code=500, content={"error": "INTERNAL_ERROR", "message": "An unexpected error occurred. Please try again later."})
-
-
-def get_cors_config() -> dict[str, Any]:
-    return {"allow_origins": app_settings.cors_origins, "allow_credentials": True, "allow_methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], "allow_headers": ["*"], "expose_headers": ["X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "X-Request-ID"], "max_age": 86400}
-
-
-def sanitize_string(value: str, max_length: int = 1000) -> str:
-    if not isinstance(value, str):
-        return str(value)
-    value = value.replace("\x00", "")
-    if len(value) > max_length:
-        value = value[:max_length]
-    value = "".join(char for char in value if ord(char) >= 32 or char in "\n\t")
-    return value.strip()
-
-
-def sanitize_dict(data: dict[str, Any], max_depth: int = 10) -> dict[str, Any]:
-    if max_depth <= 0:
-        return {}
-    sanitized = {}
-    for key, value in data.items():
-        sanitized_key = sanitize_string(key, 100)
-        if isinstance(value, str):
-            sanitized[sanitized_key] = sanitize_string(value)
-        elif isinstance(value, dict):
-            sanitized[sanitized_key] = sanitize_dict(value, max_depth - 1)
-        elif isinstance(value, list):
-            sanitized[sanitized_key] = [sanitize_string(v) if isinstance(v, str) else sanitize_dict(v, max_depth - 1) if isinstance(v, dict) else v for v in value[:100]]
-        else:
-            sanitized[sanitized_key] = value
-    return sanitized
-
-
-def validate_email(email: str) -> bool:
-    import re
-    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    return bool(re.match(pattern, email))
-
-
-def validate_filename(filename: str) -> Tuple[bool, str | None]:
-    if not filename:
-        return False, "Filename is empty"
-    if len(filename) > 255:
-        return False, "Filename too long (max 255 characters)"
-    if ".." in filename or filename.startswith("/") or "\\" in filename:
-        return False, "Invalid filename: path traversal attempt"
-    allowed_extensions = set(app_settings.allowed_extensions)
-    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    if f".{ext}" not in allowed_extensions:
-        return False, f"File extension not allowed: .{ext}"
-    dangerous_chars = set('<>:"/\\|?*\x00')
-    if any(c in dangerous_chars for c in filename):
-        return False, "Filename contains invalid characters"
-    return True, None
-
-
-def validate_password_strength(password: str) -> Tuple[bool, list[str]]:
-    errors = []
-    if len(password) < 12:
-        errors.append("Password must be at least 12 characters long")
-    if not any(c.isupper() for c in password):
-        errors.append("Password must contain at least one uppercase letter")
-    if not any(c.islower() for c in password):
-        errors.append("Password must contain at least one lowercase letter")
-    if not any(c.isdigit() for c in password):
-        errors.append("Password must contain at least one digit")
-    if not any(c in "!@#$%^&*()_+-=[]{}|;:,.<>?" for c in password):
-        errors.append("Password must contain at least one special character")
-    common_patterns = ["password", "123456", "qwerty", "admin", "user"]
-    password_lower = password.lower()
-    for pattern in common_patterns:
-        if pattern in password_lower:
-            errors.append("Password contains common pattern")
-            break
-    return len(errors) == 0, errors
-
-
-def setup_security_middleware(app, debug: bool = False):
-    app.add_middleware(SafeErrorMiddleware, debug=debug)
-    app.add_middleware(RateLimitMiddleware)
-    app.add_middleware(RequestValidationMiddleware)
-    app.add_middleware(SecurityHeadersMiddleware)
-    logger.info("security_middleware_configured")
+@app.get("/")
+async def root():
+    return {
+        "name": app_settings.app_name,
+        "version": "0.1.0",
+        "status": "operational",
+    }
