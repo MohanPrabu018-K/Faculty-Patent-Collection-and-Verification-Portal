@@ -271,6 +271,36 @@ class UploadSettings(BaseSettingsBase):
     s3_bucket_name: str = Field(default="", alias="S3_BUCKET_NAME")
     s3_region_name: str = Field(default="auto", alias="S3_REGION_NAME")
 
+    # Google Drive configuration (100% Free: ₹0 cost with standard 15GB Google account)
+    google_drive_folder_id: str = Field(default="", alias="GOOGLE_DRIVE_FOLDER_ID")
+    google_drive_client_id: str = Field(default="", alias="GOOGLE_DRIVE_CLIENT_ID")
+    google_drive_client_secret: str = Field(default="", alias="GOOGLE_DRIVE_CLIENT_SECRET")
+    google_drive_refresh_token: str = Field(default="", alias="GOOGLE_DRIVE_REFRESH_TOKEN")
+    google_drive_service_account_json: str = Field(default="", alias="GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON")
+
+    @model_validator(mode="after")
+    def _validate_storage_backend(self):
+        backend = (self.storage_backend or "local").strip().lower()
+        if backend in ("gdrive", "googledrive"):
+            import os
+            app_env = (os.environ.get("APP_ENV") or "").strip().lower()
+            if app_env in ("production", "staging", "prod"):
+                has_oauth = bool(
+                    self.google_drive_folder_id
+                    and self.google_drive_client_id
+                    and self.google_drive_client_secret
+                    and self.google_drive_refresh_token
+                )
+                has_sa = bool(self.google_drive_folder_id and self.google_drive_service_account_json)
+                if not (has_oauth or has_sa):
+                    raise ValueError(
+                        "Production STORAGE_BACKEND=gdrive requires GOOGLE_DRIVE_FOLDER_ID and "
+                        "either OAuth credentials (GOOGLE_DRIVE_CLIENT_ID, GOOGLE_DRIVE_CLIENT_SECRET, "
+                        "GOOGLE_DRIVE_REFRESH_TOKEN) or GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON. "
+                        "Silent fallback to ephemeral storage is strictly prohibited."
+                    )
+        return self
+
     @field_validator("max_upload_bytes", "max_pdf_pages", "max_image_dimension")
     @classmethod
     def _validate_positive_ints(cls, value: int) -> int:

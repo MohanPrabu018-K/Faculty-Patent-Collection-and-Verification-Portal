@@ -111,10 +111,19 @@ async def upload_certificate(
             storage_key=storage_key,
             data=content,
             content_type=file.content_type or "application/octet-stream",
+            original_name=original_filename,
         )
     except Exception as e:
         logger.error("file_save_failed", error=str(e), error_type=type(e).__name__, storage_key=storage_key)
         raise PortalError(message=f"Failed to save file: {e}", error_code="UPLOAD_ERROR", status_code=500)
+
+    effective_storage_key = getattr(file_path, "storage_key", storage_key)
+    drive_file_id = getattr(file_path, "drive_file_id", None)
+
+    evidence_payload: dict[str, object] = {}
+    if drive_file_id:
+        evidence_payload["drive_file_id"] = drive_file_id
+        evidence_payload["storage_backend"] = "gdrive"
 
     ip_record = IpRecord(
         id=str(uuid.uuid4()),
@@ -126,7 +135,7 @@ async def upload_certificate(
         historical_department_name=uploader_department_name,
         processing_status="QUEUED",
         verification_status="UNVERIFIED",
-        evidence={},
+        evidence=evidence_payload,
     )
 
     db.add(ip_record)
@@ -139,7 +148,7 @@ async def upload_certificate(
     ip_file = IpFile(
         id=str(uuid.uuid4()),
         ip_record_id=ip_record.id,
-        storage_key=storage_key,
+        storage_key=effective_storage_key,
         original_filename=original_filename,
         file_extension=file_extension,
         file_size_bytes=len(content),

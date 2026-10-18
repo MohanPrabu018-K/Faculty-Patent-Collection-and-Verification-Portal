@@ -26,9 +26,12 @@ variable / platform secret.
   backend process via FastAPI `BackgroundTasks`, so the backend **must be a
   long-running process** (a normal web service / VM / container) — **not** a
   serverless function that freezes after returning the HTTP response.
-* **Local files:** uploaded documents are written under `LOCAL_STORAGE_ROOT`
-  (`./storage` by default). Use a persistent disk/volume, or set
-  `STORAGE_BACKEND=s3` if you wire an object store (not required).
+* **Storage Architecture:** uploaded documents are cached under `LOCAL_STORAGE_ROOT`
+  (`./storage` by default). For containerized free hosting (e.g. Render free tier where
+  ephemeral disk is wiped upon container restart or idle spin-down), set `STORAGE_BACKEND=gdrive`
+  for 15 GB of ₹0 zero-cost persistent storage on a standard Google account (see
+  [Google Drive Storage Setup Guide](GOOGLE_DRIVE_STORAGE_SETUP.md)). S3 / Cloudflare R2 is also
+  supported (`STORAGE_BACKEND=s3`). Local storage remains default for offline dev and tests.
 * **OCR:** local-first — PyMuPDF embedded text → Tesseract (must be installed on
   the backend host) → OCR.Space (optional external fallback, disabled by leaving
   `OCRSPACE_API_KEY` empty). The portal is fully functional with local OCR only.
