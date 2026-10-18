@@ -603,19 +603,4 @@ def setup_performance_optimization(app: Any):
     """Setup performance optimizations for FastAPI app."""
     # Add performance monitoring middleware
     app.add_middleware(PerformanceMonitoringMiddleware)
-    
-    # Start background cache cleanup
-    @app.on_event("startup")
-    async def startup_cache_cleanup():
-        app.state._cache_cleanup_task = await start_cache_cleanup_task()
-    
-    @app.on_event("shutdown")
-    async def shutdown_cache_cleanup():
-        if hasattr(app.state, "_cache_cleanup_task"):
-            app.state._cache_cleanup_task.cancel()
-            try:
-                await app.state._cache_cleanup_task
-            except asyncio.CancelledError:
-                pass
-    
     logger.info("performance_optimization_configured")

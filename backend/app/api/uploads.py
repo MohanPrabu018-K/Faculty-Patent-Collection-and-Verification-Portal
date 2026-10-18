@@ -15,6 +15,7 @@ from app.core.exceptions import PortalError, RateLimitError
 from app.core.logging import log_audit
 from app.core.security import validate_filename
 from app.models.base import Department, IpFile, IpRecord, ProcessingJob, User
+from app.services.storage import get_storage_service
 from app.workers.orchestrator_task import run_document_pipeline
 
 import structlog
@@ -103,16 +104,16 @@ async def upload_certificate(
         uploader_department_name = _dept.name if _dept else None
 
     storage_key = f"{faculty_id}/{uuid.uuid4()}{file_extension}"
-    storage_root = Path(upload_settings.local_storage_root)
-    storage_root.mkdir(parents=True, exist_ok=True)
-    file_path = storage_root / storage_key
-    file_path.parent.mkdir(parents=True, exist_ok=True)
+    storage_service = get_storage_service()
 
     try:
-        with open(file_path, "wb") as f:
-            f.write(content)
+        file_path = storage_service.save_file(
+            storage_key=storage_key,
+            data=content,
+            content_type=file.content_type or "application/octet-stream",
+        )
     except Exception as e:
-        logger.error("file_save_failed", error=str(e), error_type=type(e).__name__, file_path=str(file_path))
+        logger.error("file_save_failed", error=str(e), error_type=type(e).__name__, storage_key=storage_key)
         raise PortalError(message=f"Failed to save file: {e}", error_code="UPLOAD_ERROR", status_code=500)
 
     ip_record = IpRecord(

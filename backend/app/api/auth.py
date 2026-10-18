@@ -23,7 +23,7 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
-from app.models.base import User
+from app.models.base import User, utcnow
 
 from fastapi import APIRouter, Depends, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -467,7 +467,7 @@ async def forgot_password(
 
     if user and user.is_active:
         token = secrets.token_urlsafe(48)
-        expires_at = datetime.utcnow() + timedelta(hours=smtp_settings.reset_token_expiry_hours)
+        expires_at = utcnow() + timedelta(hours=smtp_settings.reset_token_expiry_hours)
 
         from app.models.base import SecurityEvent
         security_event = SecurityEvent(
@@ -565,7 +565,7 @@ async def reset_password(
             expires_at = datetime.fromisoformat(expires_at_str)
         except (ValueError, TypeError):
             continue
-        if datetime.utcnow() > expires_at:
+        if utcnow() > expires_at:
             continue
         if verify_password(body.token, token_hash):
             matched_event = event
@@ -596,7 +596,7 @@ async def reset_password(
     matched_event.details = {
         **(matched_event.details or {}),
         "used": True,
-        "completed_at": datetime.utcnow().isoformat(),
+        "completed_at": utcnow().isoformat(),
     }
 
     await db.commit()

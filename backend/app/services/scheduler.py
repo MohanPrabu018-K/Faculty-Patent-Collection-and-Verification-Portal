@@ -7,6 +7,7 @@ Uses APScheduler to run periodic background jobs:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
@@ -39,16 +40,33 @@ def create_scheduler() -> AsyncIOScheduler:
 @asynccontextmanager
 async def lifespan_scheduler(app) -> AsyncGenerator[None, None]:
     """
-    FastAPI lifespan handler for scheduler startup/shutdown.
+    FastAPI lifespan handler for scheduler and performance cache startup/shutdown.
     
     Starts the scheduler on application startup and shuts it down gracefully on shutdown.
     Only starts the scheduler if SCHEDULER_ENABLED is True.
     """
     global _scheduler
     
+    cache_task = None
+    try:
+        from app.core.performance import start_cache_cleanup_task
+        cache_task = await start_cache_cleanup_task()
+        if hasattr(app, "state"):
+            app.state._cache_cleanup_task = cache_task
+    except Exception:
+        logger.warning("Cache cleanup task failed to start", exc_info=True)
+
     if not scheduler_settings.enabled:
         logger.info("Scheduler disabled via SCHEDULER_ENABLED=False")
-        yield
+        try:
+            yield
+        finally:
+            if cache_task is not None:
+                cache_task.cancel()
+                try:
+                    await cache_task
+                except asyncio.CancelledError:
+                    pass
         return
     
     _scheduler = get_scheduler()
@@ -109,6 +127,12 @@ async def lifespan_scheduler(app) -> AsyncGenerator[None, None]:
     try:
         yield
     finally:
+        if cache_task is not None:
+            cache_task.cancel()
+            try:
+                await cache_task
+            except asyncio.CancelledError:
+                pass
         logger.info("Shutting down scheduler")
         if _scheduler is not None:
             try:

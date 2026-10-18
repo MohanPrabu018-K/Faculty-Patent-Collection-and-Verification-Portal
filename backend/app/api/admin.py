@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy import func, inspect as sa_inspect, or_, select, delete
@@ -35,6 +35,7 @@ from app.models.base import (
     SecurityEvent,
     User,
     VerificationAttempt,
+    utcnow,
 )
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"], dependencies=[Depends(require_super_admin)])
@@ -1072,7 +1073,7 @@ async def admin_grant_patent(
     }
 
     record.workflow_state = WorkflowState.GRANTED.value
-    record.evidence = {**(record.evidence or {}), "granted_at": datetime.utcnow().isoformat(), "granted_by": current_user.get("id")}
+    record.evidence = {**(record.evidence or {}), "granted_at": datetime.now(UTC).isoformat(), "granted_by": current_user.get("id")}
     await db.commit()
 
     log_audit(
@@ -1128,7 +1129,7 @@ async def admin_resolve_duplicate(case_id: str, request: Request, current_user: 
     case.kept_record_id = body.get("kept_record_id")
     case.resolution_notes = body.get("notes")
     case.resolved_by = current_user.get("id")
-    case.resolved_at = datetime.utcnow()
+    case.resolved_at = utcnow()
     await db.commit()
     return {"case_id": case_id, "action": body.get("action"), "kept_record_id": case.kept_record_id}
 
@@ -1167,7 +1168,7 @@ async def admin_resolve_conflict(conflict_id: str, request: Request, current_use
     case.status = "RESOLVED"
     case.resolution_notes = body.get("notes")
     case.resolved_by = current_user.get("id")
-    case.resolved_at = datetime.utcnow()
+    case.resolved_at = utcnow()
     await db.commit()
     return {"conflict_id": conflict_id, "action": body.get("action")}
 

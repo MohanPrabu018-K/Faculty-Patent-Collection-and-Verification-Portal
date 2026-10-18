@@ -32,6 +32,8 @@ def test_upload_settings_defaults():
     assert settings.storage_backend == "local"
     assert settings.max_upload_bytes == 20971520
     assert settings.allowed_extensions == [".pdf", ".png", ".jpg", ".jpeg"]
+    assert settings.s3_bucket_name == ""
+    assert settings.s3_endpoint_url == ""
 
 
 def test_rate_limit_settings_defaults():

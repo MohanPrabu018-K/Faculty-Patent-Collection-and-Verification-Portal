@@ -14,6 +14,7 @@ from app.core.database import get_async_session
 from app.core.exceptions import NotFoundError, PortalError
 from app.core.logging import log_audit
 from app.services.export_renderers import api_date_only
+from app.services.storage import get_storage_service
 from app.models.base import IpRecord
 
 logger = structlog.get_logger()
@@ -180,11 +181,12 @@ async def download_ip_record_file(
     if not selected:
         raise NotFoundError("IP record file", file_id or record_id)
 
-    storage_root = Path(upload_settings.local_storage_root)
-    file_path = (storage_root / selected.storage_key).resolve()
-    if not str(file_path).startswith(str(storage_root.resolve())):
+    storage_service = get_storage_service()
+    try:
+        file_path = storage_service.get_file_path(selected.storage_key)
+    except ValueError:
         raise PortalError(message="Invalid storage path", error_code="AUTHORIZATION_ERROR", status_code=403)
-    if not file_path.is_file():
+    if not file_path or not file_path.is_file():
         raise NotFoundError("Stored file", selected.storage_key)
 
     log_audit(

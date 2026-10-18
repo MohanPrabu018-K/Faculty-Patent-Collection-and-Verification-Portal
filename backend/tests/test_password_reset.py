@@ -20,7 +20,7 @@ from sqlalchemy import select
 from app.core.database import get_async_session_context
 from app.core.security import hash_password
 from app.main import app
-from app.models.base import AuditLog, Notification, SecurityEvent, User
+from app.models.base import AuditLog, Notification, SecurityEvent, User, utcnow
 
 GENERIC_MESSAGE = "If the email is registered, a password reset link has been sent."
 UNAVAILABLE_MESSAGE = "Password reset email is currently unavailable. Please contact the administrator."
@@ -100,7 +100,7 @@ def _plant_event(uid: str, token: str, hours_valid: float = 1.0):
                 user_id=uid,
                 details={
                     "token_hash": hash_password(token),
-                    "expires_at": (datetime.utcnow() + timedelta(hours=hours_valid)).isoformat(),
+                    "expires_at": (utcnow() + timedelta(hours=hours_valid)).isoformat(),
                     "used": False,
                 },
             ))
@@ -148,7 +148,7 @@ def test_forgot_registered_returns_generic_success_and_creates_event(client, tem
     assert len(events) == 1
     details = events[0].details or {}
     assert details.get("used") is False
-    assert datetime.fromisoformat(details["expires_at"]) > datetime.utcnow()
+    assert datetime.fromisoformat(details["expires_at"]) > utcnow()
     # Stored as a hash, never plaintext.
     assert details.get("token_hash") and "token_hash" in details
     assert "token" not in {k for k in details if k != "token_hash"}

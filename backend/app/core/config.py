@@ -265,6 +265,11 @@ class UploadSettings(BaseSettingsBase):
     max_image_dimension: int = Field(default=10000, alias="MAX_IMAGE_DIMENSION")
     allowed_extensions: List[str] = Field(default=[".pdf", ".png", ".jpg", ".jpeg"], alias="ALLOWED_EXTENSIONS")
     clamav_host: str = Field(default="", alias="CLAMAV_HOST")
+    s3_endpoint_url: str = Field(default="", alias="S3_ENDPOINT_URL")
+    s3_access_key_id: str = Field(default="", alias="S3_ACCESS_KEY_ID")
+    s3_secret_access_key: str = Field(default="", alias="S3_SECRET_ACCESS_KEY")
+    s3_bucket_name: str = Field(default="", alias="S3_BUCKET_NAME")
+    s3_region_name: str = Field(default="auto", alias="S3_REGION_NAME")
 
     @field_validator("max_upload_bytes", "max_pdf_pages", "max_image_dimension")
     @classmethod

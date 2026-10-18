@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 import structlog
 from fastapi import APIRouter, Depends, Query, Request, status
@@ -562,7 +562,7 @@ async def submit_institutional_verification(record_id: str, request: Request, cu
     dept_id = record.department_id
     official_preserved = record.official_verification_status or record.verification_status
     attempt_no = (await db.execute(select(func.count()).select_from(VerificationAttempt).where(VerificationAttempt.ip_record_id == record_id, VerificationAttempt.source == INSTITUTIONAL_SOURCE))).scalar_one() + 1
-    decided_at = datetime.utcnow().isoformat()
+    decided_at = datetime.now(UTC).isoformat()
     attempt = VerificationAttempt(
         id=str(uuid.uuid4()),
         ip_record_id=record_id,

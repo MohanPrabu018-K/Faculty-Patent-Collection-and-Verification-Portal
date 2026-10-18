@@ -992,7 +992,8 @@ def requeue_stuck_pipelines(stuck_after_seconds: int = 300, max_records: int = 2
             .all()
         )
 
-        storage_root = Path(upload_settings.local_storage_root).resolve()
+        from app.services.storage import get_storage_service
+        storage_service = get_storage_service()
 
         for job in rows:
             record_id = job.ip_record_id
@@ -1009,10 +1010,8 @@ def requeue_stuck_pipelines(stuck_after_seconds: int = 300, max_records: int = 2
                 skipped_missing_file.append(record_id)
                 continue
 
-            # Resolve inside the storage root and refuse traversal, mirroring
-            # the download path in app/api/ip_records.py.
-            candidate = (storage_root / file_row.storage_key).resolve()
-            if not str(candidate).startswith(str(storage_root)) or not candidate.exists():
+            candidate = storage_service.get_file_path(file_row.storage_key)
+            if not candidate or not candidate.exists():
                 skipped_missing_file.append(record_id)
                 continue
 

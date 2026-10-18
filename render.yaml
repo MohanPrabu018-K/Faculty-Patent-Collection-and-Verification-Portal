@@ -35,9 +35,17 @@ services:
       - key: WEB_CONCURRENCY
         value: "2"
       - key: LOCAL_STORAGE_ROOT
-        value: /data/storage # NOTE: ephemeral on the free plan (wiped on redeploy).
-                             # Add a Render Disk mounted at /data on a paid plan,
-                             # or set STORAGE_BACKEND=s3, for durable uploads.
+        value: /data/storage # Ephemeral container cache. With STORAGE_BACKEND=s3/r2, uploads are durable.
+      - key: STORAGE_BACKEND
+        value: local         # Set to "s3" or "r2" in dashboard to enable Cloudflare R2 persistent storage
+      - key: S3_ENDPOINT_URL
+        sync: false          # set in dashboard: https://<account_id>.r2.cloudflarestorage.com
+      - key: S3_ACCESS_KEY_ID
+        sync: false          # set in dashboard for Cloudflare R2
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false          # set in dashboard for Cloudflare R2
+      - key: S3_BUCKET_NAME
+        sync: false          # set in dashboard: e.g. faculty-patents
       - key: JWT_ACCESS_TOKEN_MINUTES
         value: "30"
       - key: SECRET_KEY
