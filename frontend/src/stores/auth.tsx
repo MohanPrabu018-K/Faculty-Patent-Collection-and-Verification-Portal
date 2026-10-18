@@ -6,7 +6,7 @@ export type User = AuthUser;
 type AuthContextValue = {
   user: User | null;
   loading: boolean;
-  login: (email: string, password: string, csrfToken?: string) => Promise<void>;
+  login: (email: string, password: string, csrfToken?: string) => Promise<User>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
   reload: () => Promise<void>;
@@ -37,7 +37,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     reload,
     login: async (email, password, csrfToken) => {
       await api.login(email, password, csrfToken);
-      setUser(await api.me());
+      // Return the fresh session so callers (e.g. LoginPage role routing)
+      // don't need a second identical /auth/me round-trip.
+      const me = await api.me();
+      setUser(me);
+      return me;
     },
     logout: async () => {
       await api.logout();

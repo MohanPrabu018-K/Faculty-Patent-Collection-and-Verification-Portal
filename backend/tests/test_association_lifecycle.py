@@ -1,4 +1,4 @@
-"""Association lifecycle regression tests (Bugs #1, #2, #11).
+﻿"""Association lifecycle regression tests (Bugs #1, #2, #11).
 
 Exhaustive writer audit shows creation paths ALWAYS set status="PENDING"
 and only an explicit recipient respond() transitions state. These tests lock
@@ -307,3 +307,31 @@ def test_hod_cannot_respond(client, pair, probe_record):
         json={},
     )
     assert r.status_code == 403, r.text
+
+
+def test_unknown_recipient_is_404_without_row(client, pair, probe_record):
+    """Unknown faculty_id as recipient: 404, and no request row is created."""
+    r = client.post(
+        "/api/v1/associations/?recipient_faculty_id=FAC-NOPE-UNKNOWN999",
+        headers=_sender_headers(client, pair),
+        json={"record_id": probe_record, "reason": "unknown probe"},
+    )
+    assert r.status_code == 404, r.text
+
+    async def _check():
+        async with get_async_session_context() as db:
+            rows = (await db.execute(select(AssociationRequest).where(
+                AssociationRequest.ip_record_id == probe_record))).scalars().all()
+            assert rows == []
+
+    asyncio.run(_check())
+
+
+def test_unknown_record_is_404_without_row(client, pair):
+    """Unknown record id: 404, and no request row is created."""
+    r = client.post(
+        f"/api/v1/associations/?recipient_faculty_id={pair['recip']['faculty_id']}",
+        headers=_sender_headers(client, pair),
+        json={"record_id": "00000000-0000-4000-8000-000000000000", "reason": "unknown probe"},
+    )
+    assert r.status_code == 404, r.text

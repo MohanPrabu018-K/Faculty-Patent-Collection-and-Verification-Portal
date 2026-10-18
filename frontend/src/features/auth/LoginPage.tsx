@@ -121,8 +121,9 @@ export function LoginPage() {
     setError('');
     try {
       const csrf = await api.csrf();
-      await login(data.email, data.password, csrf.csrf_token);
-      const me = await api.me();
+      // login() already returns the fresh session (one /auth/me inside);
+      // do not fetch it a second time just for role routing.
+      const me = await login(data.email, data.password, csrf.csrf_token);
       const from = (location.state as { from?: unknown } | null)?.from;
       navigate(allowedFrom(from, me.role) ?? homeForRole(me.role), { replace: true });
     } catch (err) {
