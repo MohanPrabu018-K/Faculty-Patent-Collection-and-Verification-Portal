@@ -41,6 +41,15 @@ node_modules/
 .claude/
 .vscode/
 .idea/
+.opencode/
+.agents/
+opencode.json
+skills-lock.json
+
+# Database dumps (never commit DB dumps)
+*.dump
+*.sql
+faculty_portal_staging
 
 # OS
 .DS_Store
