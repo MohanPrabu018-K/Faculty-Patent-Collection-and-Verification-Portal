@@ -451,11 +451,13 @@ class StorageService:
                     drive_file_id = parts[1]
             return StorageResult(local_path, storage_key=storage_key, drive_file_id=drive_file_id)
 
-        # If missing locally and Google Drive is configured, fetch from Drive
-        if self.is_gdrive_enabled:
+        # If missing locally and Google Drive is configured:
+        # Fetch from Drive if gdrive is enabled OR if the key is explicitly a gdrive key (enables safe rollback)
+        is_gdrive_key = storage_key.startswith("gdrive/")
+        if self.is_gdrive_enabled or is_gdrive_key:
             is_prod = os.environ.get("APP_ENV", "").strip().lower() in ("production", "staging", "prod")
             if not self.gdrive.is_configured:
-                if is_prod:
+                if is_prod and self.is_gdrive_enabled:
                     raise RuntimeError(
                         "Production STORAGE_BACKEND=gdrive is configured but Google Drive credentials "
                         "are missing. Cannot restore document."
@@ -466,7 +468,8 @@ class StorageService:
             return self.gdrive.download_file(storage_key, local_path)
 
         # If missing locally and S3 is configured, fetch from S3
-        if self.is_s3_enabled:
+        is_s3_key = storage_key.startswith("s3/")
+        if self.is_s3_enabled or is_s3_key:
             try:
                 s3 = self._get_s3_client()
                 local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -497,12 +500,12 @@ class StorageService:
         except ValueError:
             return False
 
-        if self.is_gdrive_enabled:
-            if not self.gdrive.is_configured:
-                return False
+        is_gdrive_key = storage_key.startswith("gdrive/")
+        if (self.is_gdrive_enabled or is_gdrive_key) and self.gdrive.is_configured:
             return self.gdrive.file_exists(storage_key)
 
-        if self.is_s3_enabled:
+        is_s3_key = storage_key.startswith("s3/")
+        if (self.is_s3_enabled or is_s3_key) and self.is_s3_enabled:
             try:
                 s3 = self._get_s3_client()
                 s3.head_object(
@@ -524,7 +527,8 @@ class StorageService:
         except Exception:
             logger.warning("local_delete_failed", key=storage_key, exc_info=True)
 
-        if self.is_gdrive_enabled and self.gdrive.is_configured:
+        is_gdrive_key = storage_key.startswith("gdrive/")
+        if (self.is_gdrive_enabled or is_gdrive_key) and self.gdrive.is_configured:
             self.gdrive.delete_file(storage_key)
 
         if self.is_s3_enabled:

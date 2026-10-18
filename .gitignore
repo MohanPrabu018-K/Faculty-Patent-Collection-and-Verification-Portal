@@ -49,6 +49,8 @@ skills-lock.json
 # Database dumps (never commit DB dumps)
 *.dump
 *.sql
+*.backup
+*backup*.json
 faculty_portal_staging
 
 # OS

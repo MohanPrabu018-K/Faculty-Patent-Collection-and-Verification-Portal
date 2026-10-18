@@ -27,7 +27,8 @@ def test_ocr_space_settings_defaults():
     assert settings.language == "eng"
 
 
-def test_upload_settings_defaults():
+def test_upload_settings_defaults(monkeypatch):
+    monkeypatch.delenv("STORAGE_BACKEND", raising=False)
     settings = UploadSettings()
     assert settings.storage_backend == "local"
     assert settings.max_upload_bytes == 20971520

@@ -13,18 +13,28 @@ _DEV_SECRET_MARKERS = ("change-me", "changeme", "dev-secret", "dev-jwt", "insecu
 
 
 def _load_local_env_file() -> None:
-    env_path = Path(__file__).resolve().parents[3] / ".env"
-    if not env_path.exists():
-        return
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
+    initial_process_keys = set(os.environ.keys())
+    core_dir = Path(__file__).resolve().parent
+    backend_env = core_dir.parent.parent / ".env"
+    root_env = core_dir.parent.parent.parent / ".env"
+
+    file_vars: dict[str, str] = {}
+    # Read root .env first, then backend/.env so backend/.env takes precedence
+    for env_path in (root_env, backend_env):
+        if not env_path.is_file():
             continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-        if not key or key in os.environ:
-            continue
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if not key or key in initial_process_keys:
+                continue
+            file_vars[key] = value
+
+    for key, value in file_vars.items():
         if value.lower() in {"true", "false"}:
             os.environ[key] = value.lower()
         elif key in {"CORS_ORIGINS", "ALLOWED_EXTENSIONS"} and value and not value.startswith("["):
@@ -32,6 +42,7 @@ def _load_local_env_file() -> None:
             os.environ[key] = json.dumps(parts)
         else:
             os.environ[key] = value
+
 
 
 for env_name in ("DEBUG", "COOKIE_SECURE"):

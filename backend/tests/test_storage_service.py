@@ -120,3 +120,37 @@ def test_s3_r2_upload_and_download(tmp_path, monkeypatch):
         Bucket="faculty-patents",
         Key=key,
     )
+
+
+def test_rollback_preserves_gdrive_download(tmp_path, monkeypatch):
+    """Verify that when rolled back to STORAGE_BACKEND=local, gdrive/ keys can still be retrieved."""
+    monkeypatch.setattr(upload_settings, "storage_backend", "local")
+    monkeypatch.setattr(upload_settings, "local_storage_root", str(tmp_path))
+    monkeypatch.setattr(upload_settings, "google_drive_folder_id", "test_folder")
+    monkeypatch.setattr(upload_settings, "google_drive_client_id", "cid")
+    monkeypatch.setattr(upload_settings, "google_drive_client_secret", "csec")
+    monkeypatch.setattr(upload_settings, "google_drive_refresh_token", "rtok")
+
+    service = StorageService()
+    assert not service.is_gdrive_enabled  # New uploads will go to local disk
+    assert service.gdrive.is_configured  # Credentials exist for reading previous files
+
+    mock_drive = MagicMock()
+    service.gdrive._drive_service = mock_drive
+
+    gdrive_key = "gdrive/file_abc123/patent.pdf"
+    content = b"%PDF-1.4 Recovered In Rollback"
+
+    def fake_download(storage_key, dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(content)
+        from app.services.storage import StorageResult
+        return StorageResult(dest, storage_key=storage_key, drive_file_id="file_abc123")
+
+    with patch.object(service.gdrive, "download_file", side_effect=fake_download):
+        restored = service.get_file_path(gdrive_key)
+
+    assert restored is not None
+    assert restored.exists()
+    assert restored.read_bytes() == content
+
