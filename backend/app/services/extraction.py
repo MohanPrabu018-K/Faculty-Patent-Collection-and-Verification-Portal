@@ -1516,8 +1516,8 @@ class StructuredExtractionService:
             r"\s*[:\-]?\s*"
             r"[0-9A-Z][0-9A-Z\-/]*"
             r".{0,150}?"
-            r"\bdate\b"
-            r"\s*[:\-]\s*"
+            r"\b(?:date\s+of\s+registration|registration\s+date|date)\b"
+            r"\s*[:\-]?\s*"
             r"([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4})"
         )
 
@@ -1544,8 +1544,8 @@ class StructuredExtractionService:
             r"\s*[:\-]?\s*"
             r"[0-9A-Z][0-9A-Z\-/]*"
             r".{0,150}?"
-            r"\bdate\b"
-            r"\s*[:\-]\s*"
+            r"\b(?:date\s+of\s+registration|registration\s+date|date)\b"
+            r"\s*[:\-]?\s*"
             r"([0-9]{1,2}-[0-9]{1,2}-[0-9]{2,4})"
         )
 
@@ -1560,6 +1560,18 @@ class StructuredExtractionService:
                 match.group(1)
             )
 
+            if normalized:
+                return normalized
+
+        # Explicit registration date label fallback
+        pattern_explicit = (
+            r"\b(?:date\s+of\s+registration|registration\s+date)\b"
+            r"\s*[:\-]?\s*"
+            r"([0-9]{1,2}[/\-][0-9]{1,2}[/\-][0-9]{2,4})"
+        )
+        match = re.search(pattern_explicit, document_text, re.IGNORECASE)
+        if match:
+            normalized = normalize_date(match.group(1))
             if normalized:
                 return normalized
 
@@ -1589,12 +1601,12 @@ class StructuredExtractionService:
         explicit_patterns = [
             r"(?:certificate\s+date|"
             r"date\s+of\s+certificate)"
-            r"\s*[:\-]\s*"
+            r"\s*[:\-]?\s*"
             r"([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4})",
 
             r"(?:certificate\s+date|"
             r"date\s+of\s+certificate)"
-            r"\s*[:\-]\s*"
+            r"\s*[:\-]?\s*"
             r"([0-9]{1,2}-[0-9]{1,2}-[0-9]{2,4})",
         ]
 

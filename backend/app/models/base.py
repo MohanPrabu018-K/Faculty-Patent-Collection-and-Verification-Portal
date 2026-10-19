@@ -77,7 +77,16 @@ FIELD_SOURCE_CHOICES = (
     "UNKNOWN",
 )
 FIELD_STATUS_CHOICES = ("PENDING", "CONFIRMED", "CONFLICT", "NEEDS_VERIFICATION")
-MATCH_STATUS_CHOICES = ("SUGGESTED", "CONFIRMED", "VERIFICATION_REQUIRED", "NO_MATCH")
+MATCH_STATUS_CHOICES = (
+    "SUGGESTED",
+    "CONFIRMED",
+    "CONFIRMED_INTERNAL",
+    "PROBABLE_INTERNAL",
+    "AMBIGUOUS_INTERNAL",
+    "CONFIRMED_EXTERNAL",
+    "VERIFICATION_REQUIRED",
+    "NO_MATCH",
+)
 
 
 def ip_type_enum():
@@ -205,6 +214,15 @@ class IpRecord(Base):
     # BUG 7: grant date is a calendar DATE (migration 009), never a
     # timestamp. Filing/publication dates intentionally stay DateTime.
     grant_date = Column(Date, nullable=True)
+    # Certificate issue date (migration 012): calendar DATE, never timestamp.
+    certificate_date = Column(Date, nullable=True)
+
+    @property
+    def effective_filing_date(self):
+        """Effective filing date: returns filing_date if present; for design registrations,
+        registration_date serves as effective filing/priority date when filing_date is not present.
+        Preserves stored filing_date without modification."""
+        return self.filing_date or (self.registration_date if self.ip_type == "DESIGN_REGISTRATION" else None)
 
     # Contributor info
     contributor_name = Column(String, nullable=True)
@@ -678,6 +696,15 @@ class MasterIpRecord(Base):
     registration_date = Column(DateTime, nullable=True)
     # BUG 7: grant date is a calendar DATE (migration 009), never a timestamp.
     grant_date = Column(Date, nullable=True)
+    # Certificate issue date (migration 012): calendar DATE, never timestamp.
+    certificate_date = Column(Date, nullable=True)
+
+    @property
+    def effective_filing_date(self):
+        """Effective filing date: returns filing_date if present; for design registrations,
+        registration_date serves as effective filing/priority date when filing_date is not present.
+        Preserves stored filing_date without modification."""
+        return self.filing_date or (self.registration_date if self.ip_type == "DESIGN_REGISTRATION" else None)
 
     status = Column(String, default="ACTIVE", nullable=False, index=True)
     official_source = Column(String, nullable=True)

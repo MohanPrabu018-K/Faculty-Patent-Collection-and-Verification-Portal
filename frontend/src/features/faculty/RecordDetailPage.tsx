@@ -36,6 +36,8 @@ function workflowGuidance(state: unknown): string | null {
       return 'What you need to do: compare with the existing record below. No action is needed unless the records are unrelated.';
     case 'NEEDS_REVIEW':
       return 'What you need to do: confirm or correct the extracted fields in Review & Confirm.';
+    case 'IDENTITY_REVIEW':
+      return 'What you need to do: review candidate faculty matches below and confirm or reject identities.';
     case 'VERIFIED':
       return 'This record has completed verification.';
     case 'REJECTED':
@@ -124,6 +126,25 @@ export function RecordDetailPage() {
         return;
       }
       setAssocFeedback({ kind: 'error', text: err instanceof Error ? `Could not send association requests: ${err.message}` : 'Could not send association requests.' });
+    },
+  });
+
+  const [identityFeedback, setIdentityFeedback] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
+  const reviewContributor = useMutation({
+    mutationFn: ({ contributorId, action, notes }: { contributorId: string; action: 'confirm' | 'reject'; notes?: string }) =>
+      api.facultyContributorReview(String(recordId || ''), contributorId, action, notes),
+    onSuccess: async (res) => {
+      setIdentityFeedback({ kind: 'success', text: res?.message || 'Contributor review updated successfully.' });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['faculty-record', recordId] }),
+        queryClient.invalidateQueries({ queryKey: ['associations'] }),
+      ]);
+    },
+    onError: (err) => {
+      setIdentityFeedback({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Could not submit contributor review.',
+      });
     },
   });
 
@@ -220,6 +241,7 @@ export function RecordDetailPage() {
           ...(isDesign
             ? [{ label: 'Registration date', value: formatDateOnly(record.registration_date) }]
             : []),
+          { label: 'Certificate Issue Date', value: formatDateOnly(record.certificate_date) },
           { label: 'Grant date', value: formatDateOnly(record.grant_date) },
           { label: 'Published date', value: formatDateOnly(record.published_date) },
           { label: 'QR data', value: qrData.length ? qrData.join(', ') : null },
@@ -236,7 +258,14 @@ export function RecordDetailPage() {
       </SectionCard>
 
       <SectionCard title="Contributors & Associations" subtitle="Everyone named in the document, and their college association state.">
+        {identityFeedback ? <div className={identityFeedback.kind === 'success' ? 'alert alert-success' : 'alert alert-error'} style={{ marginBottom: 12 }}>{identityFeedback.text}</div> : null}
         {assocFeedback ? <div className={assocFeedback.kind === 'success' ? 'alert alert-success' : 'alert alert-error'}>{assocFeedback.text}</div> : null}
+        {isUploader && String(record.workflow_state || '') === 'IDENTITY_REVIEW' ? (
+          <div className="alert alert-warning" role="status" style={{ marginBottom: 12 }}>
+            This document contains contributor names with probable or ambiguous faculty matches.
+            Please review the candidate identities below to confirm internal faculty or mark them as external.
+          </div>
+        ) : null}
         {isUploader && String(record.workflow_state || '') === 'FACULTY_ASSOCIATION_PENDING' ? (
           <div className="stack" style={{ marginBottom: 12 }}>
             <div className="alert alert-info" role="status">
@@ -261,11 +290,50 @@ export function RecordDetailPage() {
           const assocState = associationSendState(contributor, { currentUserId, isUploader, recordId: String(recordId || ''), requests: assocRows });
           const contributorName = String(contributor.name || 'contributor');
           const isSelfRow = Boolean(currentUserId && String(contributor.user_id || '') !== '' && String(contributor.user_id) === String(currentUserId));
+          const matchStatus = String(contributor.match_status || '');
+          const isProbable = matchStatus === 'PROBABLE_INTERNAL';
+          const isAmbiguous = matchStatus === 'AMBIGUOUS_INTERNAL';
+          const isReviewRequired = isProbable || isAmbiguous;
+          const candidateName = contributor.faculty_name || contributor.faculty_id;
+          const confidencePct = typeof contributor.match_confidence === 'number' ? Math.round(contributor.match_confidence * 100) : null;
+          const canReview = Boolean(isUploader || user?.role === 'hod_admin' || user?.role === 'super_admin');
           return (
             <div key={ckey} className="mini-card">
               <strong>{display(contributor.name)}</strong>
               <div className="muted">{contributor.is_external ? 'External contributor — not college faculty' : `Internal faculty${contributor.faculty_id ? ` · ${display(contributor.faculty_id)}` : ''}`}</div>
               <div className="muted">Association: {isSelfRow && isUploader ? 'Automatically accepted (uploader)' : display(contributor.match_status)}</div>
+              {isReviewRequired ? (
+                <div style={{ marginTop: 8, padding: '8px 12px', background: 'rgba(255, 193, 7, 0.1)', border: '1px solid rgba(255, 193, 7, 0.4)', borderRadius: 4 }}>
+                  <div style={{ fontWeight: 600, color: '#b27b00' }}>
+                    {isProbable ? 'Probable Internal Faculty (Review Required)' : 'Ambiguous Match (Review Required)'}
+                  </div>
+                  {candidateName ? (
+                    <div className="muted" style={{ fontSize: '0.85em', marginTop: 2 }}>
+                      Candidate match: <strong>{String(candidateName)}</strong> {confidencePct !== null ? `(${confidencePct}% confidence)` : ''}
+                    </div>
+                  ) : null}
+                  {canReview && contributor.id ? (
+                    <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-primary"
+                        disabled={reviewContributor.isPending}
+                        onClick={() => reviewContributor.mutate({ contributorId: String(contributor.id), action: 'confirm' })}
+                      >
+                        Confirm Faculty Identity
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-secondary"
+                        disabled={reviewContributor.isPending}
+                        onClick={() => reviewContributor.mutate({ contributorId: String(contributor.id), action: 'reject' })}
+                      >
+                        Mark as External
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
               {assocState === 'pending' && !isSelfRow ? <div className="muted" style={{ marginTop: 8 }}>Request Sent · Pending recipient decision</div> : null}
               {assocState === 'accepted' && !isSelfRow ? <div className="muted" style={{ marginTop: 8 }}>Association Accepted</div> : null}
             </div>

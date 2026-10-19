@@ -68,6 +68,7 @@ class IdentityMatchResult:
     
     candidates: list[IdentityCandidate] = field(default_factory=list)
     best_match: IdentityCandidate | None = None
+    match_status: str = "CONFIRMED_EXTERNAL"
     requires_human_review: bool = False
     review_reason: str | None = None
     total_candidates: int = 0
@@ -85,42 +86,98 @@ def normalize_name(name: str) -> str:
         return ""
     # Remove extra whitespace, convert to lowercase
     normalized = re.sub(r'\s+', ' ', name.strip().lower())
-    # Remove common titles
-    normalized = re.sub(r'\b(dr|prof|professor|mr|ms|mrs|miss)\.?\b', '', normalized)
+    # Remove common titles and honorifics
+    normalized = re.sub(r'\b(dr|prof|professor|mr|ms|mrs|miss|shri|smt|er)\.?\b', '', normalized)
     # Remove punctuation except hyphens and apostrophes in names
     normalized = re.sub(r'[^\w\s\-\']', '', normalized)
     return normalized.strip()
 
 
 def calculate_name_similarity(name1: str, name2: str) -> float:
-    """Calculate similarity between two names using multiple algorithms."""
+    """Calculate similarity between two names using multiple algorithms.
+
+    Supports:
+    - Exact normalized matching (1.0)
+    - Full token reordering (e.g. "Devakirubai Navulkumar" vs "Navulkumar Devakirubai" -> 0.98)
+    - Initial expansions with token alignment (e.g. "Dr. Devakirubai Navulkumar" vs "Dr. N. Devakirubai" -> ~0.92)
+    - Character-level SequenceMatcher edit distance
+    - Penalizes unmatched extra tokens to avoid lookalike false positives
+    """
     if not name1 or not name2:
         return 0.0
-    
+
     n1 = normalize_name(name1)
     n2 = normalize_name(name2)
-    
+
+    if not n1 or not n2:
+        return 0.0
+
     if n1 == n2:
         return 1.0
-    
-    # SequenceMatcher ratio (similar to Levenshtein)
+
+    tokens1 = [t for t in n1.split() if t]
+    tokens2 = [t for t in n2.split() if t]
+
+    if not tokens1 or not tokens2:
+        return 0.0
+
+    # Exact token sets matching in different order
+    if set(tokens1) == set(tokens2):
+        return 0.98
+
+    # SequenceMatcher ratio (character-level Levenshtein-like)
     seq_ratio = SequenceMatcher(None, n1, n2).ratio()
-    
-    # Token-based matching (for reordered names)
-    tokens1 = set(n1.split())
-    tokens2 = set(n2.split())
-    if tokens1 and tokens2:
-        token_overlap = len(tokens1 & tokens2) / len(tokens1 | tokens2)
-    else:
-        token_overlap = 0.0
-    
+
+    # Token-level bipartite alignment matching
+    pair_scores: list[tuple[float, int, int]] = []
+    for i, t1 in enumerate(tokens1):
+        for j, t2 in enumerate(tokens2):
+            score = 0.0
+            if t1 == t2:
+                score = 1.0
+            elif (len(t1) == 1 and len(t2) > 1 and t2.startswith(t1)) or \
+                 (len(t2) == 1 and len(t1) > 1 and t1.startswith(t2)):
+                # Initial expansion match (single letter matches first char of word)
+                score = 0.85
+            elif len(t1) > 1 and len(t2) > 1:
+                ratio = SequenceMatcher(None, t1, t2).ratio()
+                if ratio >= 0.85:
+                    score = ratio * 0.9
+            if score > 0:
+                pair_scores.append((score, i, j))
+
+    # Greedily match highest scoring pairs
+    pair_scores.sort(key=lambda x: x[0], reverse=True)
+    matched_t1: set[int] = set()
+    matched_t2: set[int] = set()
+    total_token_score = 0.0
+
+    for score, i, j in pair_scores:
+        if i not in matched_t1 and j not in matched_t2:
+            matched_t1.add(i)
+            matched_t2.add(j)
+            total_token_score += score
+
+    # Normalize by max token count to penalize extraneous unmatched tokens
+    denom = max(len(tokens1), len(tokens2))
+    token_alignment_score = total_token_score / denom if denom > 0 else 0.0
+
+    # Token overlap (Jaccard)
+    s1, s2 = set(tokens1), set(tokens2)
+    token_overlap = len(s1 & s2) / len(s1 | s2) if (s1 | s2) else 0.0
+
     # Initials matching
-    initials1 = ''.join(w[0] for w in n1.split() if w)
-    initials2 = ''.join(w[0] for w in n2.split() if w)
-    initials_match = 1.0 if initials1 == initials2 and initials1 else 0.0
-    
-    # Weighted combination
-    return max(seq_ratio, token_overlap * 0.8, initials_match * 0.6)
+    initials1 = ''.join(w[0] for w in tokens1 if w)
+    initials2 = ''.join(w[0] for w in tokens2 if w)
+    initials_match = 0.85 if initials1 == initials2 and len(initials1) >= 2 else 0.0
+
+    if len(tokens1) > 1 and len(tokens2) > 1:
+        # For multi-token names, token alignment is the definitive measure.
+        # Bounding character sequence ratio prevents lookalikes where common
+        # first/last names falsely inflate character ratio (e.g. Ramesh Patel vs Ramesh Kumar).
+        return max(token_alignment_score, token_overlap * 0.9, initials_match)
+
+    return max(seq_ratio, token_alignment_score, token_overlap * 0.9, initials_match)
 
 
 def generate_name_variants(name: str) -> set[str]:
@@ -258,15 +315,16 @@ class IdentityResolutionService:
         result.candidates = candidates
         result.total_candidates = len(candidates)
         
-        # Determine best match and if review required
+        # Determine best match, match status, and if review required
         if candidates:
             result.best_match = candidates[0]
-            result.requires_human_review = self._should_require_review(candidates)
-            if result.requires_human_review:
-                result.review_reason = self._get_review_reason(candidates)
+            result.match_status, result.requires_human_review, result.review_reason = (
+                self._determine_match_status(candidates)
+            )
         else:
-            result.requires_human_review = True
-            result.review_reason = "No matching faculty found"
+            result.match_status = "CONFIRMED_EXTERNAL"
+            result.requires_human_review = False
+            result.review_reason = "No matching faculty found in database"
         
         result.processing_time_ms = (time.time() - start_time) * 1000
         
@@ -407,17 +465,42 @@ class IdentityResolutionService:
         return candidate
     
     def _calculate_overall_confidence(self, candidate: IdentityCandidate) -> float:
-        """Calculate overall confidence score for a candidate."""
-        # Weights for different factors
-        weights = {
-            "name": 0.40,           # Primary factor
-            "institution": 0.20,    # Strong indicator
-            "department": 0.15,     # Moderate indicator
-            "designation": 0.10,    # Weak indicator (can change)
-            "public_data": 0.10,    # External verification
-            "prior_assoc": 0.05,    # Historical data
-        }
-        
+        """Calculate overall confidence score with evidence-aware dynamic weighting.
+
+        When the certificate lacks institutional/department headers (e.g. Design
+        Registration Certificates), weights are rebalanced over observed signals
+        so valid identity candidates are not artificially suppressed.
+        """
+        has_inst_evidence = bool(candidate.extracted_institution)
+        has_dept_evidence = bool(candidate.extracted_department)
+        has_desig_evidence = bool(candidate.extracted_designation)
+
+        if has_inst_evidence or has_dept_evidence:
+            # Multi-factor certificate evidence available
+            weights = {
+                "name": 0.40,
+                "institution": 0.25 if has_inst_evidence else 0.0,
+                "department": 0.20 if has_dept_evidence else 0.0,
+                "designation": 0.10 if has_desig_evidence else 0.0,
+                "public_data": 0.10 if candidate.public_data_match else 0.0,
+                "prior_assoc": 0.05 if candidate.prior_association_match else 0.0,
+            }
+        else:
+            # Name-centric certificate (no institutional headers on document)
+            # Rebalance weights over available signals without penalizing missing certificate headers
+            weights = {
+                "name": 0.75,
+                "institution": 0.0,
+                "department": 0.0,
+                "designation": 0.10 if has_desig_evidence else 0.0,
+                "public_data": 0.10 if candidate.public_data_match else 0.0,
+                "prior_assoc": 0.05 if candidate.prior_association_match else 0.0,
+            }
+
+        weight_sum = sum(weights.values())
+        if weight_sum <= 0:
+            weight_sum = 1.0
+
         scores = {
             "name": candidate.name_similarity,
             "institution": 1.0 if candidate.institution_match else 0.0,
@@ -426,20 +509,19 @@ class IdentityResolutionService:
             "public_data": 1.0 if candidate.public_data_match else 0.0,
             "prior_assoc": 1.0 if candidate.prior_association_match else 0.0,
         }
-        
-        # Calculate weighted score
-        total = sum(weights[k] * scores[k] for k in weights)
-        
-        # Boost if exact name match
-        if candidate.name_similarity >= 0.95:
+
+        total = sum((weights[k] / weight_sum) * scores[k] for k in weights)
+
+        # Boost if exact unambiguous name match (name_similarity >= 0.98)
+        if candidate.name_similarity >= 0.98:
             total = min(total + 0.1, 1.0)
-        
+
         # Penalty for very low name similarity
         if candidate.name_similarity < 0.3:
             total *= 0.5
-        
+
         return min(max(total, 0.0), 1.0)
-    
+
     def _get_confidence_level(self, confidence: float) -> MatchConfidence:
         """Convert confidence score to level."""
         if confidence >= 0.95:
@@ -452,65 +534,66 @@ class IdentityResolutionService:
             return MatchConfidence.LOW
         else:
             return MatchConfidence.AMBIGUOUS
-    
+
+    def _determine_match_status(
+        self, candidates: list[IdentityCandidate]
+    ) -> tuple[str, bool, str | None]:
+        """Determine match status, review requirement, and review reason.
+
+        States:
+        - CONFIRMED_INTERNAL: high confidence (>= 0.85) with exact name match and
+          corroborating institutional/department/prior evidence (or near-perfect name).
+        - PROBABLE_INTERNAL: plausible candidate (>= 0.40) but unconfirmed (initial
+          expansion, token reorder, or lacks institutional corroboration).
+        - AMBIGUOUS_INTERNAL: multiple candidates above actionable floor within 0.15 score diff.
+        - CONFIRMED_EXTERNAL: no candidate reaches the actionable confidence threshold.
+        """
+        if not candidates:
+            return "CONFIRMED_EXTERNAL", False, "No matching faculty found in database"
+
+        best = candidates[0]
+
+        # 1. Ambiguity detection: check if multiple candidates score >= 0.40 within 0.15 diff
+        credible = [c for c in candidates if c.overall_confidence >= 0.40]
+        if len(credible) > 1:
+            diff = credible[0].overall_confidence - credible[1].overall_confidence
+            if diff < 0.15:
+                return (
+                    "AMBIGUOUS_INTERNAL",
+                    True,
+                    f"Multiple plausible faculty candidates: {credible[0].full_name} ({credible[0].overall_confidence:.2f}) vs {credible[1].full_name} ({credible[1].overall_confidence:.2f})",
+                )
+
+        # 2. Confirmed internal match
+        has_corroborating_evidence = bool(
+            best.institution_match
+            or best.department_match
+            or best.prior_association_match
+            or best.public_data_match
+        )
+        if best.overall_confidence >= 0.85 and best.name_similarity >= 0.95 and (has_corroborating_evidence or best.name_similarity >= 0.99):
+            return "CONFIRMED_INTERNAL", False, None
+
+        # 3. Probable internal match: plausible but requires human verification
+        if best.overall_confidence >= 0.40:
+            return (
+                "PROBABLE_INTERNAL",
+                True,
+                f"Probable internal faculty: {best.full_name} (confidence {best.overall_confidence:.2f}) requires human verification",
+            )
+
+        # 4. Weak / no match: candidate below actionable floor
+        return "CONFIRMED_EXTERNAL", False, f"Candidate {best.full_name} confidence ({best.overall_confidence:.2f}) below threshold"
+
     def _should_require_review(self, candidates: list[IdentityCandidate]) -> bool:
         """Determine if human review is required."""
-        if not candidates:
-            return True
-        
-        best = candidates[0]
-        
-        # Low confidence always requires review
-        if best.overall_confidence < 0.5:
-            return True
-        
-        # Ambiguous confidence requires review
-        if best.confidence_level == MatchConfidence.AMBIGUOUS:
-            return True
-        
-        # Multiple high-confidence candidates = ambiguity
-        high_conf = [c for c in candidates if c.overall_confidence >= 0.7]
-        if len(high_conf) > 1:
-            # Check if they're very close
-            if high_conf[0].overall_confidence - high_conf[1].overall_confidence < 0.15:
-                return True
-        
-        # Multiple medium-confidence candidates that are close
-        med_conf = [c for c in candidates if 0.5 <= c.overall_confidence < 0.7]
-        if len(med_conf) > 1:
-            if med_conf[0].overall_confidence - med_conf[1].overall_confidence < 0.15:
-                return True
-        
-        return False
-    
+        _, requires_review, _ = self._determine_match_status(candidates)
+        return requires_review
+
     def _get_review_reason(self, candidates: list[IdentityCandidate]) -> str:
         """Get human-readable reason for review requirement."""
-        if not candidates:
-            return "No matching faculty found in database"
-        
-        best = candidates[0]
-        
-        if best.overall_confidence < 0.3:
-            return "Very low confidence match - no strong candidate found"
-        
-        if best.confidence_level == MatchConfidence.AMBIGUOUS:
-            return "Ambiguous match - confidence below threshold"
-        
-        high_conf = [c for c in candidates if c.overall_confidence >= 0.7]
-        if len(high_conf) > 1:
-            if high_conf[0].overall_confidence - high_conf[1].overall_confidence < 0.15:
-                return f"Multiple candidates with similar confidence: {high_conf[0].full_name} ({high_conf[0].overall_confidence:.2f}) vs {high_conf[1].full_name} ({high_conf[1].overall_confidence:.2f})"
-        
-        # Check medium confidence
-        med_conf = [c for c in candidates if 0.5 <= c.overall_confidence < 0.7]
-        if len(med_conf) > 1:
-            if med_conf[0].overall_confidence - med_conf[1].overall_confidence < 0.15:
-                return f"Multiple candidates with similar confidence: {med_conf[0].full_name} ({med_conf[0].overall_confidence:.2f}) vs {med_conf[1].full_name} ({med_conf[1].overall_confidence:.2f})"
-        
-        if best.overall_confidence < 0.5:
-            return f"Low confidence match: {best.full_name} ({best.overall_confidence:.2f})"
-        
-        return "Review required per policy"
+        _, _, reason = self._determine_match_status(candidates)
+        return reason or "Review required per policy"
     
     def _load_faculty_from_db(self, role: str = "faculty") -> list[dict[str, Any]]:
         """Load the real user master database from PostgreSQL.

@@ -23,6 +23,7 @@ class _FakeRecord:
         self.application_number = kwargs.get("application_number", "")
         self.title = kwargs.get("title", "Some Invention")
         self.grant_date = kwargs.get("grant_date", datetime(2024, 10, 22, 0, 0, 0))
+        self.certificate_date = kwargs.get("certificate_date", datetime(2024, 5, 3, 0, 0, 0))
         self.filing_date = kwargs.get("filing_date", datetime(2024, 1, 5, 0, 0, 0))
         self.applicant = kwargs.get("applicant", "Applicant")
         self.patentee = kwargs.get("patentee", "")
@@ -64,6 +65,21 @@ def test_grant_date_empty_when_missing():
     out = renderers.render_csv([_FakeRecord(grant_date=None)])
     rows = list(csv.reader(io.StringIO(out.decode("utf-8"))))
     idx = rows[0].index("grant_date")
+    assert rows[1][idx] == ""
+
+
+def test_certificate_date_has_no_time_component():
+    out = renderers.render_csv([_FakeRecord()])
+    rows = list(csv.reader(io.StringIO(out.decode("utf-8"))))
+    idx = rows[0].index("certificate_date")
+    assert rows[1][idx] == "2024-05-03"
+    assert "T" not in rows[1][idx]
+
+
+def test_certificate_date_empty_when_missing():
+    out = renderers.render_csv([_FakeRecord(certificate_date=None)])
+    rows = list(csv.reader(io.StringIO(out.decode("utf-8"))))
+    idx = rows[0].index("certificate_date")
     assert rows[1][idx] == ""
 
 

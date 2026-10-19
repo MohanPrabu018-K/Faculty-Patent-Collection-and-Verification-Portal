@@ -285,6 +285,8 @@ export const api = {
   facultyRecords: (params = '', signal?: AbortSignal) => request<FacultyRecordsResponse>(`/faculty/my-records${params}`, { signal }),
   facultyRecordStatus: (recordId: string) => request<RecordStatusResponse>(`/faculty/${recordId}/status`),
   facultyRecordReview: (recordId: string, corrections: Record<string, unknown>) => requestWithBody(`/faculty/${recordId}/review`, { corrections }, { method: 'POST' }),
+  facultyContributorReview: (recordId: string, contributorId: string, action: 'confirm' | 'reject', notes?: string) =>
+    requestWithBody<{ success: boolean; message: string }>(`/faculty/${recordId}/contributors/${contributorId}/review`, { action, notes }, { method: 'POST' }),
   recordFileUrl: (recordId: string, fileId?: string) => `${API_BASE}/ip-records/${recordId}/file${fileId ? `?file_id=${encodeURIComponent(fileId)}` : ''}`,
   downloadRecordFile: async (recordId: string, fileId: string, filename: string) => {
     const dlHeaders: Record<string, string> = withAuthHeader({});

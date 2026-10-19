@@ -247,10 +247,28 @@ async def _internal_approval_state(
                 IpContributor.is_external.is_(False),
                 IpContributor.user_id.is_not(None),
                 IpContributor.user_id != record.uploader_id,
+                IpContributor.match_status.notin_(("PROBABLE_INTERNAL", "AMBIGUOUS_INTERNAL")),
             )
         )
     ).scalars().all()
     internal_ids = [uid for uid in set(internal_rows) if uid]
+
+    # Unresolved probable/ambiguous faculty candidates with candidate user_id
+    # are outstanding and must be reviewed before institutional verification
+    probable_rows = (
+        await db.execute(
+            select(IpContributor.user_id).where(
+                IpContributor.ip_record_id == record.id,
+                IpContributor.match_status.in_(("PROBABLE_INTERNAL", "AMBIGUOUS_INTERNAL")),
+                IpContributor.user_id.is_not(None),
+                IpContributor.user_id != record.uploader_id,
+            )
+        )
+    ).scalars().all()
+    for p_uid in probable_rows:
+        if p_uid:
+            _require(p_uid)
+            _note(p_uid)
 
     scope = AssociationRequest.ip_record_id == record.id
     if record.master_ip_id:
@@ -681,6 +699,16 @@ async def _reevaluate_final_after_institutional(db: AsyncSession, record: IpReco
     if conflict_open:
         missing.append("no unresolved conflict")
 
+    # Contributor identities: unresolved probable/ambiguous matches block final verification
+    unresolved_identities = (await db.execute(
+        select(func.count()).select_from(IpContributor).where(
+            IpContributor.ip_record_id == record.id,
+            IpContributor.match_status.in_(("PROBABLE_INTERNAL", "AMBIGUOUS_INTERNAL")),
+        )
+    )).scalar_one()
+    if unresolved_identities > 0 or record.workflow_state == "IDENTITY_REVIEW":
+        missing.append("contributor identities resolved")
+
     # Faculty approval: every internal contributor other than the uploader must
     # have an ACCEPTED/APPROVED association on this record (or its master).
     internal_others = (await db.execute(
@@ -689,6 +717,7 @@ async def _reevaluate_final_after_institutional(db: AsyncSession, record: IpReco
             IpContributor.is_external.is_(False),
             IpContributor.user_id.is_not(None),
             IpContributor.user_id != record.uploader_id,
+            IpContributor.match_status.notin_(("PROBABLE_INTERNAL", "AMBIGUOUS_INTERNAL")),
         )
     )).scalars().all()
     pending_approvers = []

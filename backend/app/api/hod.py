@@ -302,6 +302,8 @@ async def documents(
                 "design_number": r.design_number,
                 "application_number": r.application_number,
                 "grant_date": api_date_only(r.grant_date),
+                "certificate_date": api_date_only(r.certificate_date),
+                "registration_date": r.registration_date.isoformat() if r.registration_date else None,
                 "uploader_id": r.uploader_id,
                 "faculty_name": fname,
                 "faculty_id": fid,

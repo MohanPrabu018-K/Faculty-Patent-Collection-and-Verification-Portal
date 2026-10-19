@@ -1381,6 +1381,7 @@ async def admin_list_master_records(current_user: dict = Depends(get_current_use
             "filing_date": m.filing_date.isoformat() if m.filing_date else None,
             "registration_date": m.registration_date.isoformat() if m.registration_date else None,
             "grant_date": api_date_only(m.grant_date),
+            "certificate_date": api_date_only(m.certificate_date),
             "workflow_state": m.workflow_state,
             "official_verification_status": m.official_verification_status,
             "linked_records": linked,

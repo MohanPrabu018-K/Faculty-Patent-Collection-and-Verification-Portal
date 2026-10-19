@@ -75,6 +75,7 @@ class FacultyIdentityResolutionAgent:
                 
                 entity_result = {
                     "contributor_name": name,
+                    "match_status": resolution_result.match_status,
                     "candidates": [
                         {
                             "id": c.user_id,
@@ -104,23 +105,26 @@ class FacultyIdentityResolutionAgent:
                 if best:
                     overall_confidences.append(best.overall_confidence)
                 
-                # Check for ambiguity. Only candidates at/above the actionable
-                # confidence floor count as genuine alternatives: the scorer
-                # returns low-similarity names as weak candidates for recall,
-                # and treating those as "possible matches" produced bogus
-                # same-name conflicts (e.g. 6 matches for a name in no way
-                # resembling any faculty member).
-                credible = [c for c in candidates if c.overall_confidence >= 0.4]
-                if len(credible) > 1:
+                # Check for ambiguity and unconfirmed identity
+                if resolution_result.match_status == "AMBIGUOUS_INTERNAL":
+                    credible = [c for c in candidates if c.overall_confidence >= 0.4]
                     conflicts.append({
                         "type": "same_name_faculty",
                         "contributor": name,
-                        "description": f"Found {len(credible)} possible matches for contributor: {name}",
+                        "description": f"Multiple plausible faculty candidates for: {name}",
                         "candidate_ids": [c.user_id for c in credible],
                     })
                     warnings.append(f"Same-name faculty detected for {name} - requires manual verification")
+                elif resolution_result.match_status == "PROBABLE_INTERNAL":
+                    conflicts.append({
+                        "type": "unconfirmed_identity",
+                        "contributor": name,
+                        "description": f"Probable faculty candidate for: {name} ({best.full_name if best else ''})",
+                        "candidate_ids": [best.user_id] if best else [],
+                    })
+                    warnings.append(f"Probable faculty match for {name} - requires manual verification")
                 
-                if not candidates:
+                if not candidates or resolution_result.match_status == "CONFIRMED_EXTERNAL":
                     warnings.append(f"No matching faculty records found for {name} - will be classified as EXTERNAL")
             
             # Calculate overall confidence
@@ -133,7 +137,7 @@ class FacultyIdentityResolutionAgent:
             
             # Any contributor with ambiguity requires review
             requires_review = any(
-                e.get("requires_review") or len(e.get("candidates", [])) > 1
+                e.get("requires_review") or e.get("match_status") in ("AMBIGUOUS_INTERNAL", "PROBABLE_INTERNAL")
                 for e in resolved_entities
             ) or confidence < 0.5
             

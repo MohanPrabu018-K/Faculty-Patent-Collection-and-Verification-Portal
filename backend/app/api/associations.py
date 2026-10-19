@@ -186,6 +186,7 @@ async def _other_internal_reviewers(db: AsyncSession, record: IpRecord) -> list[
                 _IpContributor.is_external.is_(False),
                 _IpContributor.user_id.is_not(None),
                 _IpContributor.user_id != record.uploader_id,
+                _IpContributor.match_status.notin_(("PROBABLE_INTERNAL", "AMBIGUOUS_INTERNAL")),
             )
         )
     ).scalars().all()
@@ -298,6 +299,7 @@ async def _represented_department_ids(db: AsyncSession, record: IpRecord) -> lis
                 _IpContributor.ip_record_id == record.id,
                 _IpContributor.is_external.is_(False),
                 _IpContributor.user_id.is_not(None),
+                _IpContributor.match_status.notin_(("PROBABLE_INTERNAL", "AMBIGUOUS_INTERNAL")),
             )
         )
     ).scalars().all()

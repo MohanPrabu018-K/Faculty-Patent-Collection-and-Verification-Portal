@@ -57,6 +57,8 @@ class SearchResult:
     applicant: str | None = None
     inventors: list[str] = field(default_factory=list)
     filing_date: str | None = None
+    registration_date: str | None = None
+    certificate_date: str | None = None
     grant_date: str | None = None
     verification_status: str = ""
     processing_status: str = ""
@@ -241,7 +243,7 @@ class SearchService:
             results = []
             for record in rows:
                 contributor_count = counts.get(record.id, 0)
-                results.append(SearchResult(id=record.id, ip_type=record.ip_type, patent_number=record.patent_number, design_number=record.design_number, application_number=record.application_number, title=record.title, applicant=record.applicant, filing_date=record.filing_date.isoformat() if record.filing_date else None, grant_date=api_date_only(record.grant_date), verification_status=record.verification_status, processing_status=record.processing_status, faculty_name=record.uploader.full_name if record.uploader else None, faculty_id=record.uploader.faculty_id if record.uploader else None, department=record.department.name if record.department else None, institution=None, contributor_count=contributor_count, is_collaborative=contributor_count > 1, created_at=record.created_at.isoformat() if record.created_at else None, score=1.0))
+                results.append(SearchResult(id=record.id, ip_type=record.ip_type, patent_number=record.patent_number, design_number=record.design_number, application_number=record.application_number, title=record.title, applicant=record.applicant, filing_date=record.filing_date.isoformat() if record.filing_date else None, registration_date=record.registration_date.isoformat() if record.registration_date else None, certificate_date=api_date_only(record.certificate_date), grant_date=api_date_only(record.grant_date), verification_status=record.verification_status, processing_status=record.processing_status, faculty_name=record.uploader.full_name if record.uploader else None, faculty_id=record.uploader.faculty_id if record.uploader else None, department=record.department.name if record.department else None, institution=None, contributor_count=contributor_count, is_collaborative=contributor_count > 1, created_at=record.created_at.isoformat() if record.created_at else None, score=1.0))
             return SearchResponse(results=results, total=total, page=page, per_page=per_page, total_pages=(total + per_page - 1) // per_page, query_time_ms=round((time.time() - start) * 1000, 2), facets={})
 
     async def get_suggestions(self, query: str, limit: int = 10) -> list[str]:

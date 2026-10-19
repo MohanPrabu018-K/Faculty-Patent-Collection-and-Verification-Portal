@@ -82,7 +82,33 @@ def _persist_orchestrator_result(ip_record_id: str, result):
         # when OTHER internal faculty exist. With no faculty stage needed,
         # the record completes immediately when identifier and processing
         # allow it (grant-eligible without any human association step).
-        if _pipeline_has_blockers(result):
+        # Check if unresolved probable or ambiguous internal identities exist,
+        # OR if the record entered in IDENTITY_REVIEW and still has any unreviewed internal contributor.
+        unresolved_identities = session.execute(
+            select(IpContributor).where(
+                IpContributor.ip_record_id == ip_record.id,
+                IpContributor.match_status.in_(("PROBABLE_INTERNAL", "AMBIGUOUS_INTERNAL", "VERIFICATION_REQUIRED")),
+            )
+        ).scalars().all()
+
+        has_unreviewed_identity_gate = False
+        if entry_state == "IDENTITY_REVIEW":
+            unreviewed_internals = session.execute(
+                select(IpContributor).where(
+                    IpContributor.ip_record_id == ip_record.id,
+                    IpContributor.is_external.is_(False),
+                    IpContributor.source != "HUMAN_REVIEW",
+                )
+            ).scalars().all()
+            if unreviewed_internals:
+                has_unreviewed_identity_gate = True
+
+        if unresolved_identities or has_unreviewed_identity_gate:
+            from app.services.workflow import WorkflowState, advance_through
+
+            ip_record.workflow_state = WorkflowState.IDENTITY_REVIEW.value
+            ip_record.verification_status = "VERIFICATION_REQUIRED"
+        elif _pipeline_has_blockers(result):
             ip_record.workflow_state = _derive_workflow_state(ip_record, result)
         else:
             from app.services.workflow import advance_through
@@ -119,10 +145,14 @@ def _persist_orchestrator_result(ip_record_id: str, result):
 def _pipeline_has_blockers(result) -> bool:
     """True when duplicate/conflict/identity signals must stop the workflow."""
     return any(
-        a.get("agent_name") in (
-            "DuplicateDetectionAgent", "ConflictResolutionAgent",
-            "FacultyIdentityResolutionAgent",
-        ) and a.get("conflicts")
+        (
+            a.get("agent_name") in ("DuplicateDetectionAgent", "ConflictResolutionAgent")
+            and a.get("conflicts")
+        )
+        or (
+            a.get("agent_name") == "FacultyIdentityResolutionAgent"
+            and (a.get("conflicts") or a.get("requires_human_review"))
+        )
         for a in result.agent_outputs or []
     )
 
@@ -131,6 +161,7 @@ def _other_internal_user_ids_sync(session, ip_record) -> list[str]:
     """OTHER internal faculty for a record (uploader excluded, HODs excluded).
 
     Sync variant of the exact business rule for the pipeline persist step.
+    Only confirmed internal faculty qualify as approval requirements.
     """
     rows = session.execute(
         select(IpContributor.user_id).where(
@@ -138,6 +169,7 @@ def _other_internal_user_ids_sync(session, ip_record) -> list[str]:
             IpContributor.is_external.is_(False),
             IpContributor.user_id.is_not(None),
             IpContributor.user_id != ip_record.uploader_id,
+            IpContributor.match_status.in_(("CONFIRMED", "CONFIRMED_INTERNAL", "ACCEPTED", "APPROVED")),
         )
     ).scalars().all()
     ids = sorted({uid for uid in rows if uid})
@@ -258,20 +290,22 @@ def _update_ip_record_from_agents(ip_record, result):
                         # layer, so clearing another record's identifier here
                         # would destroy evidence instead of resolving anything.
                         setattr(ip_record, key, value)
-                for key in ("filing_date", "grant_date", "published_date", "registration_date"):
-                    # BUG 7: grant_date is a DATE column (migration 009) -
-                    # persist the calendar date, never a timestamp. A bare
-                    # year or unparseable value is skipped, never persisted.
+                for key in ("filing_date", "grant_date", "published_date", "registration_date", "certificate_date"):
+                    # BUG 7 / Migration 009 & 012: grant_date and certificate_date are
+                    # DATE columns - persist the calendar date, never a timestamp.
+                    # A bare year or unparseable value is skipped, never persisted.
                     #
                     # registration_date matters for design registrations: the
                     # certificate's "Design No. / Date" pair is the date the
                     # design was registered, and the extraction service emits
-                    # it as registration_date. Omitting it here dropped the
-                    # only date a design certificate carries, leaving every
-                    # design record with null dates despite a successful OCR.
+                    # it as registration_date.
+                    #
+                    # certificate_date records the certificate issue date
+                    # (e.g. 03/05/2024 for design certificates), stored distinctly
+                    # without conflating with grant_date or published_date.
                     value = _coerce_record_datetime(_collapse_value(extracted_data.get(key)))
                     if value is not None:
-                        if key == "grant_date":
+                        if key in ("grant_date", "certificate_date"):
                             value = _as_grant_date(value)
                             if value is None:
                                 continue
@@ -566,61 +600,105 @@ def _extract_contributor_names(result) -> list[dict[str, Any]]:
 _IDENTITY_INTERNAL_THRESHOLD = 0.4
 
 
-def _resolve_contributor_match(name, resolved_entities):
+def _resolve_contributor_match(
+    name: str | None, resolved_entities: list[dict[str, Any]]
+) -> tuple[str | None, float | None, str, str, bool]:
     """Match one contributor name against identity resolution output.
 
-    Returns ``(matched_user_id, match_confidence, is_internal)`` where
-    ``is_internal`` is True only for a credible best match at or above
-    ``_IDENTITY_INTERNAL_THRESHOLD``. Below the floor the caller must treat
-    the contributor as EXTERNAL with no retained user id.
+    Returns ``(matched_user_id, match_confidence, match_status, contributor_type, is_external)``.
+    Differentiates:
+    - CONFIRMED_INTERNAL: high confidence with exact match (user_id preserved, is_external=False)
+    - PROBABLE_INTERNAL: plausible candidate for review (user_id preserved, is_external=False)
+    - AMBIGUOUS_INTERNAL: multiple plausible candidates (user_id=None, is_external=False)
+    - CONFIRMED_EXTERNAL: no plausible candidate (user_id=None, is_external=True)
     """
-    matched_user_id = None
-    match_confidence = None
-
+    matched_entity = None
     for entity in resolved_entities or []:
         if not isinstance(entity, dict):
             continue
-        # The FacultyIdentityResolutionAgent emits per-contributor dicts of
-        # the form {contributor_name, best_match{id, faculty_id, confidence},
-        # candidates[]}; older callers may emit a flat {name, id, confidence}
-        # shape, which is still accepted here.
         ent_name = entity.get("contributor_name") or entity.get("name")
         if not ent_name or ent_name.lower() != (name or "").lower():
             continue
-        best = entity.get("best_match") or {}
-        if not isinstance(best, dict):
-            best = {}
-        matched_user_id = (
-            best.get("id")
-            or best.get("faculty_id")
-            or entity.get("id")
-            or entity.get("faculty_id")
-        )
-        try:
-            match_confidence = float(
-                best.get("confidence", entity.get("confidence") or 0.0) or 0.0
-            )
-        except (TypeError, ValueError):
-            match_confidence = 0.0
+        matched_entity = entity
         break
 
-    is_internal = bool(
-        matched_user_id
-        and (match_confidence or 0.0) >= _IDENTITY_INTERNAL_THRESHOLD
+    if not matched_entity:
+        return None, None, "CONFIRMED_EXTERNAL", "EXTERNAL", True
+
+    best = matched_entity.get("best_match") or {}
+    if not isinstance(best, dict):
+        best = {}
+    matched_user_id = (
+        best.get("id")
+        or best.get("faculty_id")
+        or matched_entity.get("id")
+        or matched_entity.get("faculty_id")
     )
-    if not is_internal:
-        return None, None, False
-    return matched_user_id, match_confidence, True
+    try:
+        match_confidence = float(
+            best.get("confidence", matched_entity.get("confidence") or 0.0) or 0.0
+        )
+    except (TypeError, ValueError):
+        match_confidence = 0.0
+
+    raw_status = matched_entity.get("match_status")
+    if raw_status in ("CONFIRMED", "CONFIRMED_INTERNAL"):
+        return matched_user_id, match_confidence, "CONFIRMED_INTERNAL", "INTERNAL_FACULTY", False
+    elif raw_status == "PROBABLE_INTERNAL":
+        return matched_user_id, match_confidence, "PROBABLE_INTERNAL", "UNKNOWN", False
+    elif raw_status == "AMBIGUOUS_INTERNAL":
+        return None, match_confidence, "AMBIGUOUS_INTERNAL", "UNKNOWN", False
+    elif raw_status == "CONFIRMED_EXTERNAL":
+        return None, None, "CONFIRMED_EXTERNAL", "EXTERNAL", True
+
+    # Fallback to confidence floor if raw_status was not explicitly passed
+    if matched_user_id and match_confidence >= 0.85:
+        return matched_user_id, match_confidence, "CONFIRMED_INTERNAL", "INTERNAL_FACULTY", False
+    elif matched_user_id and match_confidence >= _IDENTITY_INTERNAL_THRESHOLD:
+        return matched_user_id, match_confidence, "PROBABLE_INTERNAL", "UNKNOWN", False
+    else:
+        return None, None, "CONFIRMED_EXTERNAL", "EXTERNAL", True
+
+
+def _is_human_reviewed(contributor, session) -> bool:
+    """Determine whether an IpContributor record carries an explicit human review decision."""
+    if getattr(contributor, "source", None) == "HUMAN_REVIEW":
+        return True
+    if contributor.match_status in ("CONFIRMED_INTERNAL", "CONFIRMED_EXTERNAL"):
+        from app.models.base import AuditLog
+        audit = session.execute(
+            select(AuditLog.id).where(
+                AuditLog.target_id == contributor.id,
+                AuditLog.action.in_(("CONTRIBUTOR_IDENTITY_CONFIRMED", "CONTRIBUTOR_IDENTITY_REJECTED")),
+            ).limit(1)
+        ).scalar_one_or_none()
+        if audit is not None:
+            return True
+    return False
 
 
 def _create_contributors(ip_record, result):
-    """Persist extracted contributors with INTERNAL/EXTERNAL/UNKNOWN classification.
+    """Persist extracted contributors with INTERNAL/PROBABLE/EXTERNAL classification.
 
     Identity resolution results (FacultyIdentityResolutionAgent) are used to
-    classify a contributor as INTERNAL_FACULTY when a real DB user was matched,
-    otherwise the contributor is classified EXTERNAL (or UNKNOWN when no name).
+    classify contributors safely:
+    - CONFIRMED_INTERNAL: high confidence exact match
+    - PROBABLE_INTERNAL: plausible candidate preserved for human review
+    - AMBIGUOUS_INTERNAL: multiple candidates flagged for human review
+    - CONFIRMED_EXTERNAL: external / no matching college faculty
+
+    Fix 1: Safe preservation of human review decisions upon reprocessing.
+    - Confirmed/rejected human review decisions survive reprocessing without blind deletion.
+    - Reviewer identity and audit history are preserved by maintaining existing contributor rows.
+    - Exact normalized names are required when multiple contributors exist (avoiding similarity guessing).
+    - Ambiguous mappings are retained for manual review.
+    - OCR-derived fields (designation, department, institution, author_position) are refreshed.
     """
     from app.models.base import User
+    from app.services.identity_resolution import (
+        calculate_name_similarity,
+        normalize_name,
+    )
 
     session = get_session()
     try:
@@ -634,78 +712,150 @@ def _create_contributors(ip_record, result):
 
         contributors = _extract_contributor_names(result)
 
-        # Remove any existing contributor rows for this record to keep idempotent.
+        # Inspect existing contributors to preserve human review decisions
         existing = session.execute(
             select(IpContributor).where(IpContributor.ip_record_id == ip_record.id)
         ).scalars().all()
-        for c in existing:
+
+        human_reviewed = [c for c in existing if _is_human_reviewed(c, session)]
+        unreviewed = [c for c in existing if c not in human_reviewed]
+
+        for c in unreviewed:
             session.delete(c)
         session.flush()
 
+        num_extracted = len(contributors)
+        num_reviewed = len(human_reviewed)
+
+        # Build candidate matches between extracted contributors and existing human-reviewed rows
+        match_map = {idx: [] for idx in range(num_extracted)}
+        reverse_map = {r.id: [] for r in human_reviewed}
+
+        for idx, contributor in enumerate(contributors):
+            ext_name = contributor.get("name") or "UNKNOWN"
+            norm_ext = normalize_name(ext_name)
+
+            for r in human_reviewed:
+                norm_r = normalize_name(r.name or "")
+                is_match = False
+                if norm_ext and norm_r and norm_ext == norm_r:
+                    is_match = True
+                elif num_extracted == 1 and num_reviewed == 1:
+                    # Single contributor document: safe to use high similarity
+                    sim = calculate_name_similarity(ext_name, r.name or "")
+                    if sim >= 0.85:
+                        is_match = True
+
+                if is_match:
+                    match_map[idx].append(r)
+                    reverse_map[r.id].append(idx)
+
+        matched_reviewed_ids = set()
+
         for idx, contributor in enumerate(contributors):
             name = contributor.get("name") or "UNKNOWN"
-            contributor_type = "UNKNOWN"
-            matched_user_id = None
-            match_confidence = None
-            match_status = "VERIFICATION_REQUIRED"
+            matched_candidates = match_map[idx]
 
-            # Try to find a matching resolved entity for this contributor name.
-            (
-                matched_user_id,
-                match_confidence,
-                is_internal,
-            ) = _resolve_contributor_match(name, resolved_entities)
-            if is_internal:
-                contributor_type = "INTERNAL_FACULTY"
-                match_status = (
-                    "CONFIRMED"
-                    if (match_confidence or 0.0) >= 0.75
-                    else "VERIFICATION_REQUIRED"
-                )
-
-            # If no per-name match but a single unambiguous best match exists and
-            # there is only one contributor, associate it with that faculty.
-            if matched_user_id is None and best_match_id and len(contributors) == 1:
-                best = next((e for e in resolved_entities if (e.get("id") or e.get("faculty_id")) == best_match_id), None)
-                if best:
-                    matched_user_id = best.get("id") or best.get("faculty_id")
-                    match_confidence = float(best.get("confidence") or 0.0)
-                    contributor_type = "INTERNAL_FACULTY"
-                    match_status = (
-                        "CONFIRMED" if match_confidence >= 0.75 else "VERIFICATION_REQUIRED"
-                    )
-
-            if contributor_type == "UNKNOWN" and name != "UNKNOWN":
-                # A name was extracted but did not match any faculty → external.
-                contributor_type = "EXTERNAL"
-                match_status = "NO_MATCH"
-
-            if contributor_type != "INTERNAL_FACULTY":
-                # EXTERNAL/UNKNOWN rows must never retain a candidate user id:
-                # the best match below the internal floor is lookalike noise,
-                # and persisting it points review, master linkage and
-                # association targeting at the wrong faculty member.
-                matched_user_id = None
-                match_confidence = None
-
-            session.add(
-                IpContributor(
-                    id=str(uuid.uuid4()),
-                    ip_record_id=ip_record.id,
-                    user_id=matched_user_id,
-                    name=name,
-                    designation=contributor.get("designation"),
-                    department=contributor.get("department"),
-                    institution=contributor.get("institution"),
-                    contributor_type=contributor_type,
-                    author_position=idx + 1,
-                    match_confidence=match_confidence,
-                    match_status=match_status,
-                    source="CERTIFICATE_OCR",
-                    is_external=(contributor_type == "EXTERNAL"),
-                    contributor_order=idx,
-                )
+            # Unambiguous 1-to-1 match
+            is_unambiguous = (
+                len(matched_candidates) == 1
+                and len(reverse_map[matched_candidates[0].id]) == 1
             )
+
+            # Ambiguous mapping (multiple matches on either side)
+            is_ambiguous = (
+                len(matched_candidates) > 1
+                or (len(matched_candidates) == 1 and len(reverse_map[matched_candidates[0].id]) > 1)
+            )
+
+            if is_unambiguous:
+                r = matched_candidates[0]
+                matched_reviewed_ids.add(r.id)
+
+                # Refresh OCR-derived fields while preserving human review decisions & reviewer history
+                r.designation = contributor.get("designation")
+                r.department = contributor.get("department")
+                r.institution = contributor.get("institution")
+                r.author_position = idx + 1
+                r.contributor_order = idx
+                r.source = "HUMAN_REVIEW"
+                # Note: r.id, r.user_id, r.contributor_type, r.match_status, r.is_external are preserved!
+
+            elif is_ambiguous:
+                # Contributor mapping is ambiguous -> retain for manual review
+                session.add(
+                    IpContributor(
+                        id=str(uuid.uuid4()),
+                        ip_record_id=ip_record.id,
+                        user_id=None,
+                        name=name,
+                        designation=contributor.get("designation"),
+                        department=contributor.get("department"),
+                        institution=contributor.get("institution"),
+                        contributor_type="UNKNOWN",
+                        author_position=idx + 1,
+                        match_confidence=0.5,
+                        match_status="AMBIGUOUS_INTERNAL",
+                        source="CERTIFICATE_OCR",
+                        is_external=False,
+                        contributor_order=idx,
+                    )
+                )
+
+            else:
+                # Normal resolution for unreviewed contributor
+                (
+                    matched_user_id,
+                    match_confidence,
+                    match_status,
+                    contributor_type,
+                    is_external,
+                ) = _resolve_contributor_match(name, resolved_entities)
+
+                # If no per-name match but a single unambiguous best match exists and
+                # there is only one contributor, associate it with that faculty.
+                if matched_user_id is None and best_match_id and len(contributors) == 1:
+                    best = next((e for e in resolved_entities if (e.get("id") or e.get("faculty_id")) == best_match_id), None)
+                    if best:
+                        uid = best.get("id") or best.get("faculty_id")
+                        conf = float(best.get("confidence") or 0.0)
+                        if conf >= 0.85:
+                            matched_user_id = uid
+                            match_confidence = conf
+                            contributor_type = "INTERNAL_FACULTY"
+                            match_status = "CONFIRMED_INTERNAL"
+                            is_external = False
+                        elif conf >= _IDENTITY_INTERNAL_THRESHOLD:
+                            matched_user_id = uid
+                            match_confidence = conf
+                            contributor_type = "UNKNOWN"
+                            match_status = "PROBABLE_INTERNAL"
+                            is_external = False
+
+                session.add(
+                    IpContributor(
+                        id=str(uuid.uuid4()),
+                        ip_record_id=ip_record.id,
+                        user_id=matched_user_id,
+                        name=name,
+                        designation=contributor.get("designation"),
+                        department=contributor.get("department"),
+                        institution=contributor.get("institution"),
+                        contributor_type=contributor_type,
+                        author_position=idx + 1,
+                        match_confidence=match_confidence,
+                        match_status=match_status,
+                        source="CERTIFICATE_OCR",
+                        is_external=is_external,
+                        contributor_order=idx,
+                    )
+                )
+
+        # Any reviewed contributor that was not matched to the extracted contributors is cleaned up
+        for r in human_reviewed:
+            if r.id not in matched_reviewed_ids:
+                session.delete(r)
+
         session.commit()
     except Exception:
         session.rollback()
@@ -772,6 +922,7 @@ def _create_or_link_master_record(ip_record, result):
                 filing_date=ip_record.filing_date,
                 registration_date=ip_record.registration_date,
                 grant_date=ip_record.grant_date,
+                certificate_date=ip_record.certificate_date,
                 status="ACTIVE",
                 workflow_state=ip_record.workflow_state or "UPLOADED",
             )
@@ -920,7 +1071,8 @@ def _derive_workflow_state(ip_record, result) -> str:
         for a in result.agent_outputs
     )
     open_identity_review = any(
-        a.get("agent_name") == "FacultyIdentityResolutionAgent" and a.get("conflicts")
+        a.get("agent_name") == "FacultyIdentityResolutionAgent"
+        and (a.get("conflicts") or a.get("requires_human_review"))
         for a in result.agent_outputs
     )
     # Check for faculty approval pending

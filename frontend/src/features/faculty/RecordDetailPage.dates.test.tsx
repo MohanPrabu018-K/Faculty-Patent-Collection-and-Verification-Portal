@@ -121,4 +121,33 @@ describe('RecordDetailPage certificate dates (Bug 1)', () => {
     expect(screen.getByText('21/05/2025')).toBeInTheDocument();
     expect(screen.queryByText(/T00:00:00/)).toBeNull();
   });
+
+  it('certificate issue date renders with label "Certificate Issue Date" in date-only format', async () => {
+    apiStubs.facultyRecordStatus.mockResolvedValue({
+      id: 'rec-3',
+      uploader_id: 'uploader-1',
+      faculty_name: 'Uploader One',
+      ip_type: 'DESIGN_REGISTRATION',
+      workflow_state: 'NEEDS_REVIEW',
+      verification_status: 'VERIFICATION_REQUIRED',
+      processing_status: 'COMPLETED',
+      design_number: '412286-001',
+      title: 'AI Based Goggles',
+      registration_date: '2024-03-18T00:00:00',
+      certificate_date: '2024-05-03',
+      contributors: [],
+      jobs: [],
+      files: [],
+      field_provenance: [],
+      evidence: {},
+      qr_data: [],
+    });
+    renderPage();
+    await screen.findByText('Extracted Information');
+    expect(screen.getByText('Certificate Issue Date')).toBeInTheDocument();
+    expect(screen.getByText('03/05/2024')).toBeInTheDocument();
+    expect(screen.getByText('Registration date')).toBeInTheDocument();
+    expect(screen.getByText('18/03/2024')).toBeInTheDocument();
+    expect(screen.queryByText(/T00:00:00/)).toBeNull();
+  });
 });

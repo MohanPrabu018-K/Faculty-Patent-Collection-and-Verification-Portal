@@ -18,18 +18,19 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-import logging
 import os
 import time
 from pathlib import Path
 from typing import Any
 
+import structlog
+
 from app.core.config import upload_settings
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
-class StorageResult(os.PathLike):
+class StorageResult(os.PathLike[str]):
     """Wrapper around a local Path that exposes storage_key and drive_file_id.
 
     Delegates all filesystem attributes and methods (__getattr__, __fspath__, __str__)
@@ -231,13 +232,13 @@ class GoogleDriveStorage:
             )
             files = res.get("files", [])
             if files:
-                return files[0]["id"]
+                return str(files[0]["id"])
         except Exception:
             logger.warning("gdrive_lookup_failed", storage_key=storage_key, exc_info=True)
 
         return None
 
-    def download_file(self, storage_key: str, destination_path: Path) -> Path | None:
+    def download_file(self, storage_key: str, destination_path: Path) -> StorageResult | Path | None:
         """Download file from Google Drive to local destination path."""
         from googleapiclient.http import MediaIoBaseDownload
 
@@ -436,7 +437,7 @@ class StorageService:
             drive_file_id=drive_file_id,
         )
 
-    def get_file_path(self, storage_key: str) -> Path | None:
+    def get_file_path(self, storage_key: str) -> StorageResult | Path | None:
         """Get local Path to file, fetching from Google Drive or S3 if missing locally."""
         try:
             local_path = self._resolve_safe_local_path(storage_key)

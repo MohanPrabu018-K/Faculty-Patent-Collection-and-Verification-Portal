@@ -338,6 +338,31 @@ class TestCanonicalHardening:
         # Should extract first design number
         assert res["normalized_fields"].get("design_number") is not None
 
+    def test_design_registration_and_certificate_date_isolation(self):
+        svc = StructuredExtractionService()
+        text = (
+            "ORIGINAL\n"
+            "No. 188830\n"
+            "CERTIFICATE OF REGISTRATION OF DESIGN\n"
+            "Design No. 435272-001\n"
+            "Date 18/03/2024\n"
+            "Priority Number: None\n"
+            "Certified that the design of which a copy is annexed hereto has been registered as of the number and date given above in class 24-01\n"
+            "In accordance with the provisions of the Designs Act, 2000 and the Designs Rules, 2001\n"
+            "Name of Proprietor: Mohan Prabu\n"
+            "Date of Certificate: 03/05/2024\n"
+            "Controller General of Patents, Designs and Trade Marks"
+        )
+        res = svc.extract_from_text(text, "DESIGN_REGISTRATION")
+        canonical = normalize_canonical_data(res["normalized_fields"])
+        assert canonical.get("design_number") == "435272-001"
+        assert str(canonical.get("registration_date")) in ("2024-03-18", "18/03/2024")
+        assert str(canonical.get("certificate_date")) in ("2024-05-03", "03/05/2024")
+        # Ensure filing_date, grant_date, and published_date are NOT conflated or set
+        assert canonical.get("filing_date") is None
+        assert canonical.get("grant_date") is None
+        assert canonical.get("published_date") is None
+
 
 # ========== PHASE 4: Official Verification 8+ fixtures ==========
 class TestOfficialVerification:

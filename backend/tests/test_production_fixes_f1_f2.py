@@ -101,12 +101,14 @@ def test_external_contributor_match_returns_no_user():
             "candidates": [],
         }
     ]
-    user_id, confidence, is_internal = _resolve_contributor_match(
-        "Dr. Suneel Kumar Asileti", resolved
+    user_id, confidence, match_status, contributor_type, is_external = (
+        _resolve_contributor_match("Dr. Suneel Kumar Asileti", resolved)
     )
-    assert is_internal is False
+    assert is_external is True
     assert user_id is None
     assert confidence is None
+    assert match_status == "CONFIRMED_EXTERNAL"
+    assert contributor_type == "EXTERNAL"
 
 
 def test_external_below_floor_returns_no_user():
@@ -120,7 +122,9 @@ def test_external_below_floor_returns_no_user():
     assert _resolve_contributor_match("Dr. U. Sakthi", resolved) == (
         None,
         None,
-        False,
+        "CONFIRMED_EXTERNAL",
+        "EXTERNAL",
+        True,
     )
 
 
@@ -132,12 +136,13 @@ def test_internal_exact_match_keeps_user():
             "candidates": [],
         }
     ]
-    user_id, confidence, is_internal = _resolve_contributor_match(
-        "Dr. Ashwin. M", resolved
+    user_id, confidence, match_status, contributor_type, is_external = (
+        _resolve_contributor_match("Dr. Ashwin. M", resolved)
     )
-    assert is_internal is True
+    assert is_external is False
     assert user_id == "uid-ashwin"
     assert confidence == 0.5
+    assert match_status == "PROBABLE_INTERNAL"
 
 
 def test_internal_high_confidence_match_keeps_user():
@@ -148,10 +153,16 @@ def test_internal_high_confidence_match_keeps_user():
             "candidates": [],
         }
     ]
-    user_id, confidence, is_internal = _resolve_contributor_match(
-        "dr. n. devakirubai", resolved
+    user_id, confidence, match_status, contributor_type, is_external = (
+        _resolve_contributor_match("dr. n. devakirubai", resolved)
     )
-    assert (user_id, confidence, is_internal) == ("uid-deva", 0.9, True)
+    assert (user_id, confidence, match_status, contributor_type, is_external) == (
+        "uid-deva",
+        0.9,
+        "CONFIRMED_INTERNAL",
+        "INTERNAL_FACULTY",
+        False,
+    )
 
 
 def test_legacy_flat_entity_shape_still_matches():
@@ -159,13 +170,27 @@ def test_legacy_flat_entity_shape_still_matches():
     assert _resolve_contributor_match("Dr. X", resolved) == (
         "uid-x",
         0.6,
-        True,
+        "PROBABLE_INTERNAL",
+        "UNKNOWN",
+        False,
     )
 
 
 def test_no_resolution_entity_returns_no_user():
-    assert _resolve_contributor_match("Nobody Here", []) == (None, None, False)
-    assert _resolve_contributor_match("Nobody Here", None) == (None, None, False)
+    assert _resolve_contributor_match("Nobody Here", []) == (
+        None,
+        None,
+        "CONFIRMED_EXTERNAL",
+        "EXTERNAL",
+        True,
+    )
+    assert _resolve_contributor_match("Nobody Here", None) == (
+        None,
+        None,
+        "CONFIRMED_EXTERNAL",
+        "EXTERNAL",
+        True,
+    )
 
 
 def test_internal_threshold_separates_exact_from_noise():
@@ -209,17 +234,20 @@ def test_patent_inventors_mirrored_as_canonical_contributors():
         {"name": "B. SAMPLE"},
     ]
     # And a canonical contributor entry flows through identity matching.
-    user_id, confidence, is_internal = _resolve_contributor_match(
-        "B. SAMPLE",
-        [
-            {
-                "contributor_name": "B. SAMPLE",
-                "best_match": {"id": "uid-sample", "confidence": 0.5},
-                "candidates": [],
-            }
-        ],
+    user_id, confidence, match_status, contributor_type, is_external = (
+        _resolve_contributor_match(
+            "B. SAMPLE",
+            [
+                {
+                    "contributor_name": "B. SAMPLE",
+                    "best_match": {"id": "uid-sample", "confidence": 0.5},
+                    "candidates": [],
+                }
+            ],
+        )
     )
-    assert (user_id, confidence, is_internal) == ("uid-sample", 0.5, True)
+    assert (user_id, confidence, is_external) == ("uid-sample", 0.5, False)
+    assert match_status == "PROBABLE_INTERNAL"
 
 
 def test_master_identifier_present_with_application_only():

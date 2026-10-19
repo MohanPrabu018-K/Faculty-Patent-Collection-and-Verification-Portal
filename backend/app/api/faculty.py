@@ -8,7 +8,7 @@ import structlog
 
 from app.core.config import app_settings, upload_settings
 from app.api.deps import get_current_user
-from app.core.exceptions import PortalError
+from app.core.exceptions import AuthorizationError, NotFoundError, PortalError
 from app.core.database import get_async_session
 from app.services.export_renderers import api_date_only
 from app.models.base import (
@@ -22,11 +22,13 @@ from app.models.base import (
     IpContributor,
     IpFile,
     IpRecord,
+    MasterIpContributor,
     ProcessingJob,
     User,
 )
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.services.identity_resolution import calculate_name_similarity, normalize_name
 
 
 logger = structlog.get_logger()
@@ -59,7 +61,10 @@ def _faculty_record_scope(user_id: str):
     """
     contributor_ids = (
         select(IpContributor.ip_record_id)
-        .where(IpContributor.user_id == user_id)
+        .where(
+            IpContributor.user_id == user_id,
+            IpContributor.match_status.in_(("CONFIRMED", "CONFIRMED_INTERNAL", "ACCEPTED", "APPROVED")),
+        )
     )
     accepted_assoc_ids = (
         select(AssociationRequest.ip_record_id)
@@ -573,6 +578,7 @@ async def my_ip_records(
                     else None
                 ),
                 "grant_date": api_date_only(r.grant_date),
+                "certificate_date": api_date_only(r.certificate_date),
                 "published_date": (
                     r.published_date.isoformat()
                     if r.published_date
@@ -744,6 +750,7 @@ async def get_record_status(
     # targets the existing POST /associations/ endpoint (faculty lookup by
     # faculty_id). Read-only map; no authorization changes.
     _contributor_faculty: dict[str, str | None] = {}
+    _contributor_name: dict[str, str | None] = {}
     _contributor_active: dict[str, bool] = {}
     _contributor_user_ids = {
         c.user_id for c in contributors if c.user_id
@@ -757,6 +764,7 @@ async def get_record_status(
             )
         ).scalars().all():
             _contributor_faculty[_u.id] = _u.faculty_id
+            _contributor_name[_u.id] = _u.full_name
             # Bug 8: the UI must hide "Send Association Request" for
             # deactivated faculty (backend still enforces on create).
             _contributor_active[_u.id] = bool(_u.is_active)
@@ -881,6 +889,7 @@ async def get_record_status(
             else None
         ),
         "grant_date": api_date_only(ip_record.grant_date),
+        "certificate_date": api_date_only(ip_record.certificate_date),
         "published_date": (
             ip_record.published_date.isoformat()
             if ip_record.published_date
@@ -984,6 +993,11 @@ async def get_record_status(
                 # up by faculty_id). No authorization logic changes.
                 "user_id": c.user_id,
                 "faculty_id": _contributor_faculty.get(
+                    c.user_id
+                )
+                if c.user_id
+                else None,
+                "faculty_name": _contributor_name.get(
                     c.user_id
                 )
                 if c.user_id
@@ -1235,6 +1249,345 @@ async def submit_record_review(
             "pending final verification"
         ),
     }
+
+
+@router.post(
+    "/{record_id}/contributors/{contributor_id}/review",
+    status_code=status.HTTP_200_OK,
+)
+async def review_contributor_identity(
+    request: Request,
+    record_id: str,
+    contributor_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Review and confirm or reject an unconfirmed contributor identity.
+
+    Authorized roles:
+    - Record uploader
+    - Department HOD (HOD of the record's department)
+    - Super Admin
+
+    Actions:
+    - confirm: sets match_status=CONFIRMED_INTERNAL, contributor_type=INTERNAL_FACULTY,
+      is_external=False, and idempotently generates an AssociationRequest for the
+      faculty candidate if not uploader.
+    - reject: sets match_status=CONFIRMED_EXTERNAL, contributor_type=EXTERNAL,
+      is_external=True, user_id=None.
+    """
+    actor_id = current_user.get("id")
+    actor_role = current_user.get("role", "")
+    actor_dept = current_user.get("department_id")
+
+    record = (
+        await db.execute(select(IpRecord).where(IpRecord.id == record_id))
+    ).scalar_one_or_none()
+    if not record:
+        raise NotFoundError("IP record", record_id)
+
+    # Authorization check
+    is_uploader = bool(actor_id and record.uploader_id == actor_id)
+    is_admin = (actor_role == "super_admin")
+    is_hod = bool(actor_role == "hod_admin" and actor_dept and actor_dept == record.department_id)
+
+    if not (is_uploader or is_admin or is_hod):
+        raise AuthorizationError(
+            "Only the record uploader, department HOD, or Super Admin may review contributor identity"
+        )
+
+    # FIX 3: Lock review after verification
+    # Reject identity-review mutation with HTTP 409 Conflict if record is already in VERIFIED state
+    is_verified_state = (
+        record.workflow_state in ("VERIFIED", "GRANTED")
+        or record.verification_status == "VERIFIED"
+    )
+    if is_verified_state:
+        raise PortalError(
+            message="Cannot review contributor identity for a record that has already completed verification",
+            error_code="RECORD_ALREADY_VERIFIED",
+            status_code=409,
+        )
+
+    contributor = (
+        await db.execute(
+            select(IpContributor).where(
+                IpContributor.id == contributor_id,
+                IpContributor.ip_record_id == record.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not contributor:
+        raise NotFoundError("Contributor", contributor_id)
+
+    body = (
+        await request.json()
+        if request.headers.get("content-type", "").startswith("application/json")
+        else {}
+    )
+    action = str(body.get("action", "confirm")).lower().strip()
+    target_faculty_id = body.get("faculty_id") or body.get("user_id") or contributor.user_id
+    notes = body.get("notes") or body.get("resolution_notes")
+
+    if action not in ("confirm", "reject"):
+        raise PortalError(
+            message="action must be 'confirm' or 'reject'",
+            error_code="VALIDATION_ERROR",
+            status_code=422,
+        )
+
+    master_contrib = None
+    if record.master_ip_id:
+        master_contrib = (
+            await db.execute(
+                select(MasterIpContributor).where(
+                    MasterIpContributor.master_ip_id == record.master_ip_id,
+                    func.lower(MasterIpContributor.name) == contributor.name.lower(),
+                )
+            )
+        ).scalar_one_or_none()
+
+    if action == "confirm":
+        # Contributor name must not be empty or malformed
+        raw_contrib_name = (contributor.name or "").strip()
+        norm_contrib_name = normalize_name(raw_contrib_name)
+        if not raw_contrib_name or not norm_contrib_name:
+            raise PortalError(
+                message="Contributor name is empty or invalid for identity confirmation",
+                error_code="INVALID_CONTRIBUTOR_NAME",
+                status_code=422,
+            )
+
+        if not target_faculty_id:
+            raise PortalError(
+                message="A target faculty candidate must be specified to confirm identity",
+                error_code="VALIDATION_ERROR",
+                status_code=422,
+            )
+
+        target_user = (
+            await db.execute(
+                select(User).where(
+                    or_(
+                        User.id == target_faculty_id,
+                        User.faculty_id == target_faculty_id,
+                    )
+                )
+            )
+        ).scalar_one_or_none()
+
+        if not target_user or not target_user.is_active:
+            raise PortalError(
+                message="Target faculty member not found or is inactive",
+                error_code="VALIDATION_ERROR",
+                status_code=422,
+            )
+
+        if target_user.role == "hod_admin":
+            raise PortalError(
+                message="HOD accounts cannot be associated as faculty contributors",
+                error_code="VALIDATION_ERROR",
+                status_code=422,
+            )
+
+        raw_target_name = (target_user.full_name or "").strip()
+        norm_target_name = normalize_name(raw_target_name)
+        if not raw_target_name or not norm_target_name:
+            raise PortalError(
+                message="Target user does not have a valid name registered for identity association",
+                error_code="INVALID_TARGET_USER_NAME",
+                status_code=422,
+            )
+
+        # Name plausibility validation (FIX 2)
+        # Conservative threshold: similarity >= 0.40 (matches _IDENTITY_INTERNAL_THRESHOLD)
+        # If below 0.40, require explicit review notes (minimum 10 characters) explaining the identity association
+        similarity = calculate_name_similarity(raw_contrib_name, raw_target_name)
+        if similarity < 0.40:
+            if not notes or len(str(notes).strip()) < 10:
+                raise PortalError(
+                    message=(
+                        f"Candidate '{target_user.full_name}' is not plausible for contributor '{contributor.name}' "
+                        f"(similarity {similarity:.2f} < 0.40). For legitimate alternate names, explicit review notes "
+                        f"(minimum 10 characters) explaining the identity association are required."
+                    ),
+                    error_code="IMPLAUSIBLE_CANDIDATE",
+                    status_code=422,
+                )
+
+        # Update contributor (FIX 1: mark source as HUMAN_REVIEW)
+        contributor.user_id = target_user.id
+        contributor.contributor_type = "INTERNAL_FACULTY"
+        contributor.match_status = "CONFIRMED_INTERNAL"
+        contributor.is_external = False
+        contributor.source = "HUMAN_REVIEW"
+
+        if master_contrib:
+            master_contrib.matched_faculty_id = target_user.id
+            master_contrib.contributor_type = "INTERNAL_FACULTY"
+            master_contrib.match_status = "CONFIRMED_INTERNAL"
+            master_contrib.match_status = "CONFIRMED_INTERNAL"
+
+        # Generate association request if target is not the uploader (uploader is auto-accepted)
+        assoc_created = False
+        if target_user.id != record.uploader_id:
+            existing_req = (
+                await db.execute(
+                    select(AssociationRequest).where(
+                        AssociationRequest.ip_record_id == record.id,
+                        or_(
+                            AssociationRequest.target_faculty_id == target_user.id,
+                            AssociationRequest.recipient_id == target_user.id,
+                        ),
+                        AssociationRequest.status.in_((
+                            "PENDING", "CLARIFICATION_REQUESTED", "ADMIN_REVIEW", "ACCEPTED", "APPROVED"
+                        )),
+                    ).limit(1)
+                )
+            ).scalar_one_or_none()
+
+            if not existing_req:
+                new_req = AssociationRequest(
+                    id=str(uuid.uuid4()),
+                    ip_record_id=record.id,
+                    master_ip_id=record.master_ip_id,
+                    contributor_id=master_contrib.id if master_contrib else None,
+                    requesting_faculty_id=record.uploader_id or actor_id,
+                    target_faculty_id=target_user.id,
+                    requester_id=record.uploader_id or actor_id,
+                    recipient_id=target_user.id,
+                    reason="Identity confirmed by reviewer: named in patent; explicit acceptance required",
+                    status="PENDING",
+                )
+                db.add(new_req)
+                assoc_created = True
+
+        # Check if any unresolved contributors remain
+        unresolved_count = (
+            await db.execute(
+                select(func.count()).select_from(IpContributor).where(
+                    IpContributor.ip_record_id == record.id,
+                    IpContributor.id != contributor.id,
+                    IpContributor.match_status.in_(("PROBABLE_INTERNAL", "AMBIGUOUS_INTERNAL")),
+                )
+            )
+        ).scalar_one()
+
+        if unresolved_count == 0 and record.workflow_state == "IDENTITY_REVIEW":
+            from app.services.workflow import WorkflowState, advance_through
+            record.workflow_state = advance_through(
+                record.workflow_state, WorkflowState.FACULTY_ASSOCIATION_PENDING
+            )
+
+        from app.core.logging import log_audit
+        log_audit(
+            actor=actor_id,
+            action="CONTRIBUTOR_IDENTITY_CONFIRMED",
+            target_type="ip_contributor",
+            target_id=contributor.id,
+            status="confirmed",
+            after={
+                "contributor_id": contributor.id,
+                "contributor_name": contributor.name,
+                "confirmed_user_id": target_user.id,
+                "confirmed_faculty_id": target_user.faculty_id,
+                "association_request_created": assoc_created,
+                "notes": notes,
+                "name_similarity": similarity,
+                "source": "HUMAN_REVIEW",
+            },
+        )
+        await db.commit()
+        return {
+            "status": "success",
+            "action": "confirmed",
+            "contributor_id": contributor.id,
+            "contributor_name": contributor.name,
+            "matched_user_id": target_user.id,
+            "match_status": contributor.match_status,
+            "is_external": contributor.is_external,
+            "association_request_created": assoc_created,
+            "workflow_state": record.workflow_state,
+        }
+
+    else:  # reject
+        contributor.user_id = None
+        contributor.contributor_type = "EXTERNAL"
+        contributor.match_status = "CONFIRMED_EXTERNAL"
+        contributor.is_external = True
+        contributor.source = "HUMAN_REVIEW"
+
+        if master_contrib:
+            master_contrib.matched_faculty_id = None
+            master_contrib.contributor_type = "EXTERNAL"
+            master_contrib.match_status = "CONFIRMED_EXTERNAL"
+
+        # Check if any unresolved contributors remain
+        unresolved_count = (
+            await db.execute(
+                select(func.count()).select_from(IpContributor).where(
+                    IpContributor.ip_record_id == record.id,
+                    IpContributor.id != contributor.id,
+                    IpContributor.match_status.in_(("PROBABLE_INTERNAL", "AMBIGUOUS_INTERNAL")),
+                )
+            )
+        ).scalar_one()
+
+        if unresolved_count == 0 and record.workflow_state == "IDENTITY_REVIEW":
+            from app.services.workflow import WorkflowState, advance_through
+            other_internal = (
+                await db.execute(
+                    select(IpContributor.user_id).where(
+                        IpContributor.ip_record_id == record.id,
+                        IpContributor.id != contributor.id,
+                        IpContributor.is_external.is_(False),
+                        IpContributor.user_id.is_not(None),
+                        IpContributor.user_id != record.uploader_id,
+                        IpContributor.match_status.in_(("CONFIRMED", "CONFIRMED_INTERNAL", "ACCEPTED", "APPROVED")),
+                    )
+                )
+            ).scalars().all()
+
+            if other_internal:
+                record.workflow_state = advance_through(
+                    record.workflow_state, WorkflowState.FACULTY_ASSOCIATION_PENDING
+                )
+            else:
+                identifier = record.patent_number or record.application_number or record.design_number or record.serial_number
+                if identifier:
+                    record.workflow_state = advance_through(
+                        record.workflow_state, WorkflowState.FACULTY_ASSOCIATION_COMPLETE
+                    )
+                    record.verification_status = "VERIFIED"
+                else:
+                    record.workflow_state = advance_through(
+                        record.workflow_state, WorkflowState.FACULTY_ASSOCIATION_PENDING
+                    )
+
+        from app.core.logging import log_audit
+        log_audit(
+            actor=actor_id,
+            action="CONTRIBUTOR_IDENTITY_REJECTED",
+            target_type="ip_contributor",
+            target_id=contributor.id,
+            status="rejected",
+            after={
+                "contributor_id": contributor.id,
+                "contributor_name": contributor.name,
+                "notes": notes,
+                "source": "HUMAN_REVIEW",
+            },
+        )
+        await db.commit()
+        return {
+            "status": "success",
+            "action": "rejected",
+            "contributor_id": contributor.id,
+            "contributor_name": contributor.name,
+            "match_status": contributor.match_status,
+            "is_external": contributor.is_external,
+            "workflow_state": record.workflow_state,
+        }
 
 
 @router.post(
