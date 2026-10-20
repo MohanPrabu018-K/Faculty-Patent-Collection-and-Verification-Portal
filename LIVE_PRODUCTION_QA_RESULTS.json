@@ -1,0 +1,619 @@
+{
+  "metadata": {
+    "timestamp": "2026-10-20T07:00:47.459388+00:00",
+    "backend_url": "https://faculty-patent-portal-api.onrender.com",
+    "frontend_url": "https://faculty-patent-collection-and-verification-portal.pages.dev",
+    "primary_qa_record_id": "1d26ff7a-f817-4367-8ee8-da365eef44b3",
+    "approval_qa_record_id": "5c7bf164-1750-45aa-84e1-7897726fed5d",
+    "rejection_qa_record_id": "2c785d72-1864-4968-9468-f0961b540a7c"
+  },
+  "test_cases": [
+    {
+      "test_id": "TC-BL-01",
+      "feature": "Backend Health Probe",
+      "role": "Anonymous",
+      "action": "GET /healthz",
+      "expected": "HTTP 200 with status ok",
+      "actual": "{\"status\":\"ok\"}",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-BL-02",
+      "feature": "Backend Readiness Probe",
+      "role": "Anonymous",
+      "action": "GET /readyz",
+      "expected": "HTTP 200 with readiness details",
+      "actual": "{\"status\":\"ready\"}",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-BL-03",
+      "feature": "OpenAPI Schema Availability",
+      "role": "Anonymous",
+      "action": "GET /openapi.json",
+      "expected": "HTTP 200 containing OpenAPI 3 spec",
+      "actual": "Title: Faculty Patent Collection Portal, version: 0.1.0",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-BL-04",
+      "feature": "Frontend Cloudflare Pages Probe",
+      "role": "Anonymous",
+      "action": "GET /",
+      "expected": "HTTP 200 HTML content",
+      "actual": "Status 200, Length: 1067",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-AUTH-01",
+      "feature": "Valid Authentication (super_admin)",
+      "role": "super_admin",
+      "action": "POST /api/v1/auth/login for admin@faculty.edu",
+      "expected": "HTTP 200 with JWT and role super_admin",
+      "actual": "Role: super_admin, ID: test-admin-001, Dept: None",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-AUTH-02",
+      "feature": "Valid Authentication (hod_admin)",
+      "role": "hod_admin",
+      "action": "POST /api/v1/auth/login for mv-hod@faculty.edu",
+      "expected": "HTTP 200 with JWT and role hod_admin",
+      "actual": "Role: hod_admin, ID: mv-hod-001, Dept: mv-dept",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-AUTH-03",
+      "feature": "Valid Authentication (faculty)",
+      "role": "faculty",
+      "action": "POST /api/v1/auth/login for mv-fac@faculty.edu",
+      "expected": "HTTP 200 with JWT and role faculty",
+      "actual": "Role: faculty, ID: mv-fac-001, Dept: mv-dept",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-AUTH-04",
+      "feature": "Valid Authentication (faculty_isolated)",
+      "role": "faculty",
+      "action": "POST /api/v1/auth/login for faculty2@faculty.edu",
+      "expected": "HTTP 200 with JWT and role faculty",
+      "actual": "Role: faculty, ID: test-faculty-002, Dept: None",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-AUTH-05",
+      "feature": "Invalid Password Handling",
+      "role": "Anonymous",
+      "action": "POST /api/v1/auth/login with wrong password",
+      "expected": "HTTP 401 Unauthorized",
+      "actual": "Invalid email or password",
+      "http_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-AUTH-06",
+      "feature": "Nonexistent User Handling",
+      "role": "Anonymous",
+      "action": "POST /api/v1/auth/login with invalid email",
+      "expected": "HTTP 401 Unauthorized",
+      "actual": "Invalid email or password",
+      "http_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-AUTH-07",
+      "feature": "Malformed Token Rejection",
+      "role": "Anonymous",
+      "action": "GET /api/v1/auth/me with invalid JWT",
+      "expected": "HTTP 401 Unauthorized",
+      "actual": "Invalid or expired authentication token",
+      "http_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-RBAC-01",
+      "feature": "Faculty Access to Admin Records Endpoint",
+      "role": "Faculty",
+      "action": "GET /api/v1/admin/ip-records/{id}",
+      "expected": "HTTP 403 Forbidden",
+      "actual": "Role 'faculty' not authorized",
+      "http_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-RBAC-02",
+      "feature": "HOD Access to Admin Records Endpoint",
+      "role": "HOD",
+      "action": "GET /api/v1/admin/ip-records/{id}",
+      "expected": "HTTP 403 Forbidden",
+      "actual": "Role 'hod_admin' not authorized",
+      "http_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-RBAC-03",
+      "feature": "Faculty Access to Audit Log API",
+      "role": "Faculty",
+      "action": "GET /api/v1/audit/",
+      "expected": "HTTP 403 Forbidden",
+      "actual": "Role 'faculty' not authorized",
+      "http_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-RBAC-04",
+      "feature": "HOD Access to Global Audit Log API",
+      "role": "HOD",
+      "action": "GET /api/v1/audit/",
+      "expected": "HTTP 403 Forbidden",
+      "actual": "Role 'hod_admin' not authorized",
+      "http_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-RBAC-05",
+      "feature": "Owner Faculty Access to Own Record",
+      "role": "Faculty (Owner)",
+      "action": "GET /api/v1/ip-records/1d26ff7a-f817-4367-8ee8-da365eef44b3",
+      "expected": "HTTP 200 OK",
+      "actual": "Title: IOT SOLUTIONS FOR REMOTE VEHICLE OPERATION AND SURVEILLANCE",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-RBAC-06",
+      "feature": "Cross-Faculty IDOR Protection",
+      "role": "Faculty (Other)",
+      "action": "GET /api/v1/ip-records/1d26ff7a-f817-4367-8ee8-da365eef44b3 by non-owner",
+      "expected": "HTTP 403 Forbidden",
+      "actual": "Not authorized",
+      "http_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-UPL-01",
+      "feature": "Upload Empty File Rejection",
+      "role": "Faculty",
+      "action": "POST /api/v1/uploads/ with 0-byte file",
+      "expected": "HTTP 400 Bad Request",
+      "actual": "File is empty",
+      "http_status": 400,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-UPL-02",
+      "feature": "Upload Disallowed Extension Rejection",
+      "role": "Faculty",
+      "action": "POST /api/v1/uploads/ with .exe file",
+      "expected": "HTTP 400 Bad Request",
+      "actual": "Invalid file extension",
+      "http_status": 400,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-UPL-03",
+      "feature": "Live Faculty Document Upload",
+      "role": "Faculty",
+      "action": "POST /api/v1/uploads/ with valid patent PDF",
+      "expected": "HTTP 202 Accepted",
+      "actual": "Status pending, background processing started",
+      "http_status": 202,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-STO-01",
+      "feature": "Authorized Owner File Download",
+      "role": "Faculty (Owner)",
+      "action": "GET /api/v1/ip-records/{id}/file",
+      "expected": "HTTP 200 with PDF bytes",
+      "actual": "Status 200, Bytes: 91592",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-STO-02",
+      "feature": "Super Admin File Download",
+      "role": "Super Admin",
+      "action": "GET /api/v1/ip-records/{id}/file",
+      "expected": "HTTP 200 with PDF bytes",
+      "actual": "Status 200, Bytes: 91592",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-STO-03",
+      "feature": "Unauthorized Faculty File Download Blocked",
+      "role": "Faculty (Other)",
+      "action": "GET /api/v1/ip-records/{id}/file by non-owner",
+      "expected": "HTTP 403 Forbidden",
+      "actual": "Not authorized",
+      "http_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-STO-04",
+      "feature": "Anonymous File Download Blocked",
+      "role": "Anonymous",
+      "action": "GET /api/v1/ip-records/{id}/file without token",
+      "expected": "HTTP 401 Unauthorized",
+      "actual": "Authentication credentials missing",
+      "http_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-CLR-01",
+      "feature": "Association Request Creation",
+      "role": "Faculty (Uploader)",
+      "action": "POST /api/v1/associations/?recipient_faculty_id=FAC002",
+      "expected": "HTTP 201 Created",
+      "actual": "Request created in status PENDING",
+      "http_status": 201,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-CLR-02",
+      "feature": "Faculty Request Clarification",
+      "role": "Faculty (Recipient)",
+      "action": "POST /api/v1/associations/{id}/respond?action=clarification_requested",
+      "expected": "HTTP 200 with status CLARIFICATION_REQUESTED",
+      "actual": "Status transitioned to CLARIFICATION_REQUESTED",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-CLR-03",
+      "feature": "Uploader Provide Clarification",
+      "role": "Faculty (Requester)",
+      "action": "POST /api/v1/associations/{id}/clarify",
+      "expected": "HTTP 200 with status PENDING",
+      "actual": "Status returned to PENDING, audit event ASSOCIATION_CLARIFICATION_PROVIDED logged",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-CLR-04",
+      "feature": "Super Admin Institutional Clarification",
+      "role": "Super Admin",
+      "action": "POST /api/v1/verification/institutional/{id} decision=clarification",
+      "expected": "HTTP 200 OK with institutional_status=CLARIFICATION",
+      "actual": "institutional_status=CLARIFICATION, workflow_state=NEEDS_REVIEW",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-APP-01",
+      "feature": "Approval Workflow Test Doc Upload",
+      "role": "Faculty",
+      "action": "POST /api/v1/uploads/ for QA-PAT-APP-20261020",
+      "expected": "HTTP 202 Accepted",
+      "actual": "Record 5c7bf164-1750-45aa-84e1-7897726fed5d created",
+      "http_status": 202,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-APP-02",
+      "feature": "Faculty Association Acceptance",
+      "role": "Faculty",
+      "action": "POST /api/v1/associations/{id}/respond?action=accepted",
+      "expected": "HTTP 200 with FACULTY_ASSOCIATION_COMPLETE and VERIFIED",
+      "actual": "workflow_state=FACULTY_ASSOCIATION_COMPLETE, verification_status=VERIFIED",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-APP-03",
+      "feature": "Post-Faculty-Stage HOD Queue Visibility",
+      "role": "HOD",
+      "action": "GET /api/v1/hod/documents",
+      "expected": "Record visible in mv-dept HOD queue",
+      "actual": "Record 5c7bf164-1750-45aa-84e1-7897726fed5d present in queue",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-APP-04",
+      "feature": "Faculty Grant Attempt Negative Gate",
+      "role": "Faculty",
+      "action": "POST /api/v1/admin/ip-records/{id}/grant by faculty",
+      "expected": "HTTP 403 Forbidden",
+      "actual": "Role 'faculty' not authorized",
+      "http_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-APP-05",
+      "feature": "HOD Grant Attempt Negative Gate",
+      "role": "HOD",
+      "action": "POST /api/v1/admin/ip-records/{id}/grant by HOD",
+      "expected": "HTTP 403 Forbidden",
+      "actual": "Role 'hod_admin' not authorized",
+      "http_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-APP-06",
+      "feature": "Unconfirmed Grant Attempt Negative Gate",
+      "role": "Super Admin",
+      "action": "POST /api/v1/admin/ip-records/{id}/grant with confirm=False",
+      "expected": "HTTP 422 Unprocessable Entity",
+      "actual": "Grant requires explicit confirmation",
+      "http_status": 422,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-APP-07",
+      "feature": "Super Admin Patent Grant Execution",
+      "role": "Super Admin",
+      "action": "POST /api/v1/admin/ip-records/{id}/grant with confirm=True",
+      "expected": "HTTP 200 with workflow_state=GRANTED",
+      "actual": "Patent granted successfully, workflow_state=GRANTED, audit event PATENT_GRANTED logged",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-APP-08",
+      "feature": "Double Grant Rejection Gate",
+      "role": "Super Admin",
+      "action": "POST /api/v1/admin/ip-records/{id}/grant on granted record",
+      "expected": "HTTP 422 Unprocessable Entity",
+      "actual": "Patent is already granted (GRANT_ALREADY_GRANTED)",
+      "http_status": 422,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-REJ-01",
+      "feature": "Rejection Workflow Test Doc Upload",
+      "role": "Faculty",
+      "action": "POST /api/v1/uploads/ for QA-PAT-REJ-20261020",
+      "expected": "HTTP 202 Accepted",
+      "actual": "Record 2c785d72-1864-4968-9468-f0961b540a7c created",
+      "http_status": 202,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-REJ-02",
+      "feature": "Faculty Association Rejection",
+      "role": "Faculty",
+      "action": "POST /api/v1/associations/{id}/respond?action=rejected",
+      "expected": "HTTP 200 with request REJECTED and record routed to NEEDS_REVIEW",
+      "actual": "Association request status=REJECTED, workflow_state=NEEDS_REVIEW",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-REJ-03",
+      "feature": "Grant Refused on Unverified/Disputed Record",
+      "role": "Super Admin",
+      "action": "POST /api/v1/admin/ip-records/{id}/grant on NEEDS_REVIEW record",
+      "expected": "HTTP 422 Unprocessable Entity",
+      "actual": "Cannot grant from current workflow state: NEEDS_REVIEW",
+      "http_status": 422,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-REJ-04",
+      "feature": "Super Admin Institutional Rejection",
+      "role": "Super Admin",
+      "action": "POST /api/v1/verification/institutional/{id} decision=reject",
+      "expected": "HTTP 200 with institutional_status=REJECTED, verification_attempt=MISMATCH",
+      "actual": "institutional_status=REJECTED, attempt=MISMATCH, audit event INSTITUTIONAL_VERIFICATION_REJECT logged",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-REJ-05",
+      "feature": "Re-Association Resubmission After Rejection",
+      "role": "Faculty (Uploader)",
+      "action": "POST /api/v1/associations/?recipient_faculty_id=FAC002 on rejected record",
+      "expected": "HTTP 201 Created",
+      "actual": "New association request a37b8a10-febe-4514-a8e3-c82cbaa8a9db created in status PENDING",
+      "http_status": 201,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-HOD-01",
+      "feature": "HOD Department Dashboard KPIs",
+      "role": "HOD",
+      "action": "GET /api/v1/hod/dashboard",
+      "expected": "HTTP 200 with department documents and conflicts",
+      "actual": "Total docs: 1, Pending: 1, Conflicts: 1",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-HOD-02",
+      "feature": "HOD Privacy Barrier Before Faculty Approval",
+      "role": "HOD",
+      "action": "GET /api/v1/hod/documents for pre-approval record",
+      "expected": "Pre-approval record strictly withheld from queue",
+      "actual": "Queue size: 0 when only pre-approval record exists",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-HOD-03",
+      "feature": "HOD Institutional Verification Rule D Restriction",
+      "role": "HOD",
+      "action": "POST /api/v1/verification/institutional/{id} by HOD",
+      "expected": "HTTP 403 Forbidden",
+      "actual": "Only the Super Admin can perform institutional verification",
+      "http_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-ADM-01",
+      "feature": "Super Admin View Institutional Verification Status",
+      "role": "Super Admin",
+      "action": "GET /api/v1/verification/institutional/{id}",
+      "expected": "HTTP 200 with institutional status data",
+      "actual": "Workflow State: NEEDS_REVIEW, Official: VERIFICATION_REQUIRED",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-ADM-02",
+      "feature": "Super Admin Dashboard KPIs",
+      "role": "Super Admin",
+      "action": "GET /api/v1/admin/dashboard",
+      "expected": "HTTP 200 with KPI metrics",
+      "actual": "KPI Keys: ['kpis', 'recent_activity']",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-ADM-03",
+      "feature": "Super Admin IP Records Listing",
+      "role": "Super Admin",
+      "action": "GET /api/v1/admin/ip-records",
+      "expected": "HTTP 200 with total records",
+      "actual": "Total records: 19",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-ADM-04",
+      "feature": "Super Admin Faculty Listing",
+      "role": "Super Admin",
+      "action": "GET /api/v1/admin/faculty",
+      "expected": "HTTP 200 with faculty list",
+      "actual": "Total faculty: 36",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-ADM-05",
+      "feature": "Super Admin Departments Listing",
+      "role": "Super Admin",
+      "action": "GET /api/v1/admin/departments",
+      "expected": "HTTP 200 with department array",
+      "actual": "Department count: 4",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-AUD-01",
+      "feature": "Super Admin Audit Log Query by Entity",
+      "role": "Super Admin",
+      "action": "GET /api/v1/audit/?entity_id={id}",
+      "expected": "HTTP 200 with audit events",
+      "actual": "Audit events returned successfully",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-SEC-01",
+      "feature": "SQL Injection Safe Parameter Handling",
+      "role": "Faculty",
+      "action": "GET /api/v1/search/?q=' OR '1'='1",
+      "expected": "Parametrized search without syntax error or leakage",
+      "actual": "Status 200, 1 result",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-SEC-02",
+      "feature": "XSS Harmless Probe Handling",
+      "role": "Faculty",
+      "action": "GET /api/v1/search/?q=<script>alert(1)</script>",
+      "expected": "Sanitized JSON response without executable script reflection",
+      "actual": "Status 200, safe JSON",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-SEC-03",
+      "feature": "Security Response Headers",
+      "role": "Anonymous",
+      "action": "Inspect headers on /healthz",
+      "expected": "nosniff, frame-options, HSTS, CSP present",
+      "actual": "nosniff: True, frame: True, hsts: True, csp: True",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-DAT-01",
+      "feature": "PostgreSQL Date Representation Integrity",
+      "role": "System DB",
+      "action": "Verify grant_date and certificate_date columns",
+      "expected": "Strict calendar Date type, never timestamp with timezone",
+      "actual": "grant_date=Date/None, certificate_date=Date/None, filing_date=DateTime",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-DAT-02",
+      "feature": "Foreign Key Integrity & Zero Orphaned Files",
+      "role": "System DB",
+      "action": "SELECT IpFile with non-matching ip_record_id",
+      "expected": "Zero orphaned files",
+      "actual": "Total files: 19, Orphaned files: 0",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-DAT-03",
+      "feature": "13 Asynchronous Pipeline Jobs Integrity",
+      "role": "System DB",
+      "action": "SELECT ProcessingJob for QA records",
+      "expected": "13 completed pipeline jobs per record",
+      "actual": "All 13 jobs completed (classify, qr, extract, understand, verify, identity, duplicate, conflict, association, quality, final_verification, analytics, orchestrator)",
+      "http_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "test_id": "TC-DAT-04",
+      "feature": "Legitimate Production Records Preservation",
+      "role": "System DB",
+      "action": "Verify 16 baseline records remain untouched",
+      "expected": "Baseline count == 16",
+      "actual": "Exact baseline records count: 16",
+      "http_status": 200,
+      "verdict": "PASS"
+    }
+  ],
+  "performance_metrics": {
+    "healthz_ms": 231.66,
+    "readyz_ms": 89.43,
+    "login_super_admin_ms": 959.5,
+    "login_hod_admin_ms": 968.69,
+    "login_faculty_ms": 1389.82,
+    "file_download_ms": 206.89,
+    "patent_grant_ms": 312.4
+  },
+  "db_summary": {
+    "total_ip_records": 19,
+    "baseline_records_preserved": 16,
+    "qa_records_created": 3,
+    "qa_records": [
+      {
+        "id": "1d26ff7a-f817-4367-8ee8-da365eef44b3",
+        "purpose": "Live Benchmark & Clarification QA",
+        "state": "NEEDS_REVIEW",
+        "institutional_status": "CLARIFICATION"
+      },
+      {
+        "id": "5c7bf164-1750-45aa-84e1-7897726fed5d",
+        "purpose": "Complete Approval & Grant QA",
+        "state": "GRANTED",
+        "verification_status": "VERIFIED"
+      },
+      {
+        "id": "2c785d72-1864-4968-9468-f0961b540a7c",
+        "purpose": "Complete Rejection & Resubmission QA",
+        "state": "NEEDS_REVIEW",
+        "institutional_status": "REJECTED"
+      }
+    ],
+    "total_ip_files": 19,
+    "orphaned_files": 0,
+    "alembic_version": "012"
+  }
+}
