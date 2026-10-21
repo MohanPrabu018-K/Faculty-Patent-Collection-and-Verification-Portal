@@ -109,11 +109,23 @@ def _plant_event(uid: str, token: str, hours_valid: float = 1.0):
     asyncio.run(_run())
 
 
+@pytest.fixture(autouse=True)
+def _guard_no_external_network(monkeypatch):
+    import httpx
+    def _boom(*args, **kwargs):
+        raise AssertionError("Unexpected external HTTP call in test_password_reset.py")
+    monkeypatch.setattr(httpx, "AsyncClient", _boom)
+
+
 def _enable_fake_smtp(monkeypatch, captured=None, fail_send=False):
     """Point the app at a fake SMTP transport (nothing is really sent)."""
     import smtplib
 
-    from app.core.config import smtp_settings
+    from app.core.config import brevo_settings, smtp_settings
+
+    # Explicitly disable Brevo so the SMTP code path is exercised
+    monkeypatch.setattr(brevo_settings, "brevo_api_key", "")
+    monkeypatch.setattr(brevo_settings, "brevo_sender_email", "")
 
     class _FakeSMTP:
         def __init__(self, *args, **kwargs):
@@ -224,8 +236,10 @@ def test_smtp_disabled_returns_honest_unavailable_for_any_email(client, temp_use
     """
     import smtplib
 
-    from app.core.config import smtp_settings
+    from app.core.config import brevo_settings, smtp_settings
 
+    monkeypatch.setattr(brevo_settings, "brevo_api_key", "")
+    monkeypatch.setattr(brevo_settings, "brevo_sender_email", "")
     monkeypatch.setattr(smtp_settings, "smtp_enabled", False)
     monkeypatch.setattr(smtp_settings, "smtp_host", "")
 
@@ -267,10 +281,13 @@ def test_reset_link_format_uses_configured_frontend_url(client, temp_user, monke
     """
     import smtplib
 
-    from app.core.config import smtp_settings
+    from app.core.config import brevo_settings, smtp_settings
     from app.core.security import verify_password
 
     captured = {}
+
+    monkeypatch.setattr(brevo_settings, "brevo_api_key", "")
+    monkeypatch.setattr(brevo_settings, "brevo_sender_email", "")
 
     class _FakeSMTP:
         def __init__(self, *args, **kwargs):

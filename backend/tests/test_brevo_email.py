@@ -221,6 +221,17 @@ class TestBrevoConfiguration:
         assert tx.active_email_provider() == "smtp"
         assert tx.is_email_configured() is True
 
+    def test_brevo_api_alias_recognized(self, monkeypatch):
+        """Confirm that BREVO_API is recognized as the Brevo API key via validation_alias."""
+        import os
+        from app.core.config import BrevoSettings
+        monkeypatch.setenv("BREVO_API", "xkeysib-alias-key")
+        monkeypatch.delenv("BREVO_API_KEY", raising=False)
+        monkeypatch.setenv("BREVO_SENDER_EMAIL", "mohanprabu018@gmail.com")
+        settings = BrevoSettings()
+        assert settings.brevo_api_key == "xkeysib-alias-key"
+        assert settings.brevo_sender_email == "mohanprabu018@gmail.com"
+
 
 # --------------------------------------------------------------------------
 # BREVO API CONTRACT (mocked transport)
@@ -390,6 +401,24 @@ class TestForgotPasswordViaBrevo:
                 assert verify_password(emailed_token, (events[0].details or {})["token_hash"])
 
         asyncio.run(_check())
+
+    def test_secret_redaction_in_logs_and_events(self, client, temp_user, monkeypatch, caplog):
+        """Assert that neither Brevo API key nor the generated reset token is leaked in logs."""
+        import logging
+        caplog.set_level(logging.DEBUG)
+        _enable_brevo(monkeypatch)
+        monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+        r = client.post("/api/v1/auth/forgot-password", json={"email": temp_user["email"]})
+        assert r.status_code == 200
+
+        log_text = caplog.text
+        assert "xkeysib-test-key" not in log_text
+
+        sent = _FakeAsyncClient.last_instance.calls[0]["json"]
+        import re
+        token = re.search(r"/reset\?token=([A-Za-z0-9_\-]+)", sent["htmlContent"]).group(1)
+        assert token not in log_text
 
     def test_full_reset_cycle_after_brevo_request(self, client, temp_user, monkeypatch):
         """End-to-end at the API level: Brevo-accepted request -> emailed token

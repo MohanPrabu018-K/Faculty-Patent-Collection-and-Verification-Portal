@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from typing import List
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # APP_ENV values that switch on production safety guards.
@@ -42,6 +42,12 @@ def _load_local_env_file() -> None:
             os.environ[key] = json.dumps(parts)
         else:
             os.environ[key] = value
+
+    # Normalize BREVO_API and BREVO_API_KEY so both aliases are populated in os.environ
+    if "BREVO_API" in os.environ and "BREVO_API_KEY" not in os.environ:
+        os.environ["BREVO_API_KEY"] = os.environ["BREVO_API"]
+    elif "BREVO_API_KEY" in os.environ and "BREVO_API" not in os.environ:
+        os.environ["BREVO_API"] = os.environ["BREVO_API_KEY"]
 
 
 
@@ -358,8 +364,14 @@ class BrevoSettings(BaseSettingsBase):
     configured. An empty ``brevo_api_key`` (or empty sender) means the
     provider is unavailable.
     """
-    brevo_api_key: str = Field(default="", alias="BREVO_API_KEY")
-    brevo_sender_email: str = Field(default="", alias="BREVO_SENDER_EMAIL")
+    brevo_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("BREVO_API_KEY", "BREVO_API"),
+    )
+    brevo_sender_email: str = Field(
+        default="",
+        validation_alias=AliasChoices("BREVO_SENDER_EMAIL", "BREVO_SENDER", "BREVO_FROM_EMAIL"),
+    )
     brevo_sender_name: str = Field(default="Faculty Patent Portal", alias="BREVO_SENDER_NAME")
     brevo_timeout_seconds: float = Field(default=15.0, alias="BREVO_TIMEOUT_SECONDS")
 
