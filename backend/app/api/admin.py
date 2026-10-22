@@ -79,6 +79,64 @@ async def _ensure_single_active_hod(
         )
 
 
+async def _resolve_department(
+    db: AsyncSession, identifier: str | None
+) -> Department | None:
+    """Safe department identifier resolver supporting UUID, department code, and name.
+
+    Supports 'AIDS' and existing 'AIADS' code as compatible identifiers.
+    Returns the canonical Department ORM entity or None.
+    """
+    if not identifier:
+        return None
+    raw = str(identifier).strip()
+    if not raw:
+        return None
+
+    # 1. Direct ID / UUID match
+    dept = (await db.execute(select(Department).where(Department.id == raw))).scalar_one_or_none()
+    if dept:
+        return dept
+
+    # 2. Case-insensitive code match (including alias: 'AIDS' <-> 'AIADS')
+    dept = (await db.execute(select(Department).where(func.lower(Department.code) == raw.lower()))).scalar_one_or_none()
+    if dept:
+        return dept
+
+    if raw.upper() == "AIDS":
+        dept = (await db.execute(select(Department).where(func.lower(Department.code) == "aiads"))).scalar_one_or_none()
+        if dept:
+            return dept
+    elif raw.upper() == "AIADS":
+        dept = (await db.execute(select(Department).where(func.lower(Department.code) == "aids"))).scalar_one_or_none()
+        if dept:
+            return dept
+
+    # 3. Case-insensitive exact name match
+    dept = (await db.execute(select(Department).where(func.lower(Department.name) == raw.lower()))).scalar_one_or_none()
+    if dept:
+        return dept
+
+    # 4. Partial name match for Artificial Intelligence and Data Science
+    if raw.lower() in (
+        "artificial intelligence and data science",
+        "artificial intelligence & data science",
+        "ai and data science",
+        "ai & data science",
+    ):
+        dept = (
+            await db.execute(
+                select(Department).where(
+                    func.lower(Department.name).like("%artificial intelligence and data science%")
+                )
+            )
+        ).scalar_one_or_none()
+        if dept:
+            return dept
+
+    return None
+
+
 async def _record_display_map(db: AsyncSession, record_ids: list[str]) -> dict[str, dict]:
     """User-facing display info for records (Bugs 4+5).
 
@@ -374,10 +432,14 @@ async def create_faculty(request: Request, current_user: dict = Depends(get_curr
         if desig_row and (desig_row.title or "").strip().upper() == "HOD":
             role = "hod_admin"
 
+    # Resolve department identifier (UUID, code e.g. 'AIDS'/'AIADS', or name)
+    resolved_dept = await _resolve_department(db, body.get("department_id"))
+    department_id = resolved_dept.id if resolved_dept else body.get("department_id")
+
     # Item 7: only one ACTIVE HOD per department (backend validation; the
     # partial unique index is the final backstop).
-    if role == "hod_admin" and body.get("is_active", True) and body.get("department_id"):
-        await _ensure_single_active_hod(db, body.get("department_id"))
+    if role == "hod_admin" and body.get("is_active", True) and department_id:
+        await _ensure_single_active_hod(db, department_id)
 
     user = User(
         id=str(uuid.uuid4()),
@@ -387,7 +449,7 @@ async def create_faculty(request: Request, current_user: dict = Depends(get_curr
         full_name=body["full_name"],
         role=role,
         faculty_id=body.get("faculty_id") or str(uuid.uuid4()),
-        department_id=body.get("department_id"),
+        department_id=department_id,
         designation_id=designation_id,
         joining_date=_parse_datetime(body.get("joining_date")),
         status=body.get("status", "active"),
@@ -456,7 +518,10 @@ async def update_faculty(faculty_id: str, request: Request, current_user: dict =
     # Item 7: validate the POST-update identity BEFORE mutating. Mutating
     # first would let query autoflush trip the DB backstop with a 500
     # instead of this human-readable 409.
-    new_department_id = body.get("department_id", user.department_id)
+    new_department_id = user.department_id
+    if "department_id" in body:
+        resolved_dept = await _resolve_department(db, body.get("department_id"))
+        new_department_id = resolved_dept.id if resolved_dept else body.get("department_id")
     new_is_active = body.get("is_active", user.is_active)
     new_role = user.role
     if "designation_id" in body:
@@ -467,9 +532,11 @@ async def update_faculty(faculty_id: str, request: Request, current_user: dict =
             new_role = "faculty"
     if new_role == "hod_admin" and new_is_active and new_department_id:
         await _ensure_single_active_hod(db, new_department_id, exclude_user_id=user.id)
-    for field in ("email", "official_email", "full_name", "faculty_id", "is_active", "department_id", "designation_id", "status"):
+    for field in ("email", "official_email", "full_name", "faculty_id", "is_active", "designation_id", "status"):
         if field in body:
             setattr(user, field, body[field])
+    if "department_id" in body:
+        user.department_id = new_department_id
     if "joining_date" in body:
         user.joining_date = _parse_datetime(body.get("joining_date"))
     # Sync role to designation if designation changed

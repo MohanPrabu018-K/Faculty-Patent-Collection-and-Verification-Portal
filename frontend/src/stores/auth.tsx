@@ -22,8 +22,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       setUser(await api.me());
     } catch (error) {
-      if (error instanceof ApiError && (error.status === 401 || error.status === 403)) setUser(null);
-      else setUser(null);
+      if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+        setUser(null);
+      }
+      // Keep existing session on transient network or 5xx errors to avoid route bouncing
     } finally {
       setLoading(false);
     }

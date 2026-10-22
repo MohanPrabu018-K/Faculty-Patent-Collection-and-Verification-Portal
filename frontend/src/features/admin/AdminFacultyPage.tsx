@@ -21,6 +21,18 @@ const REQUIRED_DEPTS = [
   "Artificial Intelligence and Machine Learning",
 ];
 
+function formatDepartmentLabel(dept: { name?: unknown; code?: unknown }): string {
+  const name = String(dept?.name ?? '');
+  const code = String(dept?.code ?? '').trim();
+  if (name.toLowerCase().includes('artificial intelligence and data science') || code.toUpperCase() === 'AIADS' || code.toUpperCase() === 'AIDS') {
+    return `${name} (AIDS)`;
+  }
+  if (code && !name.includes(`(${code})`)) {
+    return `${name} (${code})`;
+  }
+  return name;
+}
+
 const EMPTY_FORM = { full_name: '', official_email: '', faculty_id: '', department_id: '', designation_id: '', joining_date: '', is_active: true, password: '' };
 
 function isEmail(value: unknown): value is string {
@@ -100,7 +112,7 @@ export function AdminFacultyPage() {
   const allowedDesigs = rawDesigList.filter((d: any) => ["Faculty", "HOD"].includes(String(d.title || d.name)));
   const desigList = allowedDesigs.length >= 2 ? allowedDesigs.filter((d: any) => ["Faculty", "HOD"].includes(String(d.title || d.name))) : rawDesigList.filter((d: any) => ["Faculty", "HOD"].includes(String(d.title)));
   // If still empty (e.g. seed not loaded yet), synthesize from required list for UI correctness
-  const displayDeptList = deptList.length ? deptList : REQUIRED_DEPTS.map((n, i) => ({ id: `dept-${i}`, name: n }));
+  const displayDeptList = deptList.length ? deptList : REQUIRED_DEPTS.map((n, i) => ({ id: `dept-${i}`, name: n, code: n.includes('Data Science') ? 'AIADS' : undefined }));
   const displayDesigList = desigList.length ? desigList : [{ id: 'desig-faculty', title: 'Faculty', name: 'Faculty' }, { id: 'desig-hod', title: 'HOD', name: 'HOD' }];
 
   const openEdit = (r: FacultyRow) => {
@@ -132,7 +144,7 @@ export function AdminFacultyPage() {
         <input className="toolbar-input" placeholder="Search name, ID, email (debounced 400ms)" value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} aria-label="Search faculty" />
         <select className="toolbar-input" value={dept} onChange={(e) => { setDept(e.target.value); setPage(1); }} aria-label="Filter department">
           <option value="">All departments</option>
-          {displayDeptList.map((d: any) => <option key={String((d as any).id)} value={String((d as any).id)}>{String((d as any).name)}</option>)}
+          {displayDeptList.map((d: any) => <option key={String((d as any).id)} value={String((d as any).id)}>{formatDepartmentLabel(d)}</option>)}
         </select>
         <select className="toolbar-input" value={active} onChange={(e) => { setActive(e.target.value); setPage(1); }} aria-label="Filter status">
           <option value="">Any status</option>
@@ -241,7 +253,7 @@ export function AdminFacultyPage() {
           <FormField label="Department">
             <select className="toolbar-input" value={String(form.department_id ?? '')} onChange={(e) => setForm({ ...form, department_id: e.target.value })}>
               <option value="">—</option>
-              {displayDeptList.map((d: any) => <option key={String(d.id)} value={String(d.id)}>{String(d.name)}</option>)}
+              {displayDeptList.map((d: any) => <option key={String(d.id)} value={String(d.id)}>{formatDepartmentLabel(d)}</option>)}
             </select>
           </FormField>
           <FormField label="Designation (Faculty=HOD gives HOD permissions)">

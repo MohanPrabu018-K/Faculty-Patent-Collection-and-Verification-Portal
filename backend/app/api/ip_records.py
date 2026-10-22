@@ -40,11 +40,11 @@ def _record_to_dict(record: IpRecord) -> dict:
         "department_id": record.department_id,
         "designation_id": record.designation_id,
         "master_ip_id": record.master_ip_id,
-        "filing_date": record.filing_date.isoformat() if record.filing_date else None,
+        "filing_date": api_date_only(record.filing_date),
         "registration_date": record.registration_date.isoformat() if getattr(record, "registration_date", None) else None,
         "grant_date": api_date_only(record.grant_date),
         "certificate_date": api_date_only(getattr(record, "certificate_date", None)),
-        "published_date": record.published_date.isoformat() if record.published_date else None,
+        "published_date": api_date_only(record.published_date or getattr(record, "publication_date", None)),
         "created_at": record.created_at.isoformat() if record.created_at else None,
         "updated_at": record.updated_at.isoformat() if record.updated_at else None,
     }

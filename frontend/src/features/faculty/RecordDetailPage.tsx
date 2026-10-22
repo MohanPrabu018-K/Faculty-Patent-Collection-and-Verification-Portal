@@ -74,7 +74,15 @@ export function RecordDetailPage() {
   const { user } = useAuth();
   const showTechnicalDetails = user?.role !== 'faculty';
   const [draft, setDraft] = useState<Record<string, string>>({});
-  const { data, isLoading, error } = useQuery({ queryKey: ['faculty-record', recordId], queryFn: () => api.facultyRecordStatus(recordId || ''), enabled: Boolean(recordId) });
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['faculty-record', recordId],
+    queryFn: () => api.facultyRecordStatus(recordId || ''),
+    enabled: Boolean(recordId),
+    refetchInterval: (query) => {
+      const status = String((query.state.data as Record<string, unknown> | undefined)?.processing_status ?? '');
+      return status === 'PENDING' || status === 'QUEUED' || status === 'PROCESSING' ? 2000 : false;
+    },
+  });
 
   const review = useMutation({
     mutationFn: (corrections: Record<string, unknown>) => api.facultyRecordReview(recordId || '', corrections),
@@ -404,16 +412,17 @@ export function RecordDetailPage() {
                   <span>{field.label}</span>
                   <input
                     className="toolbar-input"
-                    defaultValue={display(field.value)}
+                    value={
+                      draft[field.key] !== undefined
+                        ? draft[field.key]
+                        : field.value !== null && field.value !== undefined && field.value !== '' && field.value !== 'Not available'
+                        ? String(field.value)
+                        : ''
+                    }
                     placeholder="Not available"
                     onChange={(event) => {
                       const value = event.target.value;
-                      setDraft((prev) => {
-                        const next = { ...prev };
-                        if (value === '' || value === 'Not available') delete next[field.key];
-                        else next[field.key] = value;
-                        return next;
-                      });
+                      setDraft((prev) => ({ ...prev, [field.key]: value }));
                     }}
                   />
                 </label>

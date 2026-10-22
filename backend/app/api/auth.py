@@ -119,6 +119,7 @@ def _set_auth_cookies(
     response: Response,
     token: str,
     csrf_token: str,
+    refresh_token: str | None = None,
 ) -> None:
     """
     Set authentication and CSRF cookies.
@@ -134,6 +135,17 @@ def _set_auth_cookies(
         max_age=app_settings.jwt_access_token_minutes * 60,
     )
 
+    if refresh_token:
+        response.set_cookie(
+            key="refresh_token",
+            value=refresh_token,
+            httponly=True,
+            secure=app_settings.cookie_secure,
+            samesite=app_settings.cookie_samesite,
+            path="/",
+            max_age=app_settings.jwt_refresh_token_days * 86400,
+        )
+
     _set_csrf_cookie(
         response,
         csrf_token,
@@ -148,19 +160,13 @@ def _clear_auth_cookies(response: Response) -> None:
     were set with, otherwise browsers keep a SameSite=None; Secure cookie.
     """
 
-    response.delete_cookie(
-        key="access_token",
-        path="/",
-        secure=app_settings.cookie_secure,
-        samesite=app_settings.cookie_samesite,
-    )
-
-    response.delete_cookie(
-        key="csrf_token",
-        path="/",
-        secure=app_settings.cookie_secure,
-        samesite=app_settings.cookie_samesite,
-    )
+    for key in ("access_token", "refresh_token", "csrf_token"):
+        response.delete_cookie(
+            key=key,
+            path="/",
+            secure=app_settings.cookie_secure,
+            samesite=app_settings.cookie_samesite,
+        )
 
 
 @router.post("/login", status_code=status.HTTP_200_OK)
@@ -244,6 +250,20 @@ async def login(
         faculty_id=user.faculty_id or "",
         department_id=user.department_id or "",
         full_name=user.full_name,
+        token_type="access",
+    )
+
+    refresh_token_val = generate_jwt_token(
+        subject=user.id,
+        secret=app_settings.secret_key,
+        algorithm=app_settings.jwt_algorithm,
+        minutes=app_settings.jwt_refresh_token_days * 24 * 60,
+        email=user.email,
+        role=user.role,
+        faculty_id=user.faculty_id or "",
+        department_id=user.department_id or "",
+        full_name=user.full_name,
+        token_type="refresh",
     )
 
     csrf_token = generate_csrf_token()
@@ -252,6 +272,7 @@ async def login(
         status_code=status.HTTP_200_OK,
         content={
             "access_token": token,
+            "refresh_token": refresh_token_val,
             "token_type": "bearer",
             "expires_in": app_settings.jwt_access_token_minutes * 60,
             "csrf_token": csrf_token,
@@ -270,6 +291,7 @@ async def login(
         response,
         token,
         csrf_token,
+        refresh_token=refresh_token_val,
     )
 
     logger.info(
@@ -297,17 +319,34 @@ async def logout(response: Response):
 
 
 @router.post("/refresh", status_code=status.HTTP_200_OK)
-async def refresh_token(request: Request):
+async def refresh_token(request: Request, db: AsyncSession = Depends(get_async_session)):
     """
-    Refresh JWT token using the existing authentication cookie.
+    Refresh JWT access token using a valid refresh token from cookie, header, or body.
     """
 
-    token = request.cookies.get("access_token")
+    token = None
+
+    if request.headers.get("content-type", "").startswith("application/json"):
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                token = body.get("refresh_token") or body.get("token")
+        except Exception:
+            pass
 
     if not token:
-        return {
-            "message": "Token refresh endpoint - implement logic"
-        }
+        token = request.cookies.get("refresh_token")
+
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[7:].strip()
+
+    if not token:
+        token = request.cookies.get("access_token")
+
+    if not token:
+        raise AuthenticationError("Authentication credentials missing")
 
     payload = decode_jwt_token(
         token,
@@ -327,16 +366,37 @@ async def refresh_token(request: Request):
             "Invalid token payload: missing subject"
         )
 
+    # Validate against active user record in database
+    user = (await db.execute(select(User).where(User.id == subject))).scalar_one_or_none()
+    if not user:
+        raise AuthenticationError("User account not found")
+    if not user.is_active:
+        raise AuthenticationError("Account is deactivated")
+
     new_token = generate_jwt_token(
-        subject=subject,
+        subject=user.id,
         secret=app_settings.secret_key,
         algorithm=app_settings.jwt_algorithm,
         minutes=app_settings.jwt_access_token_minutes,
-        email=payload.get("email", ""),
-        role=payload.get("role", "faculty"),
-        faculty_id=payload.get("faculty_id", ""),
-        department_id=payload.get("department_id", ""),
-        full_name=payload.get("full_name", ""),
+        email=user.email,
+        role=user.role,
+        faculty_id=user.faculty_id or "",
+        department_id=user.department_id or "",
+        full_name=user.full_name,
+        token_type="access",
+    )
+
+    new_refresh_token = generate_jwt_token(
+        subject=user.id,
+        secret=app_settings.secret_key,
+        algorithm=app_settings.jwt_algorithm,
+        minutes=app_settings.jwt_refresh_token_days * 24 * 60,
+        email=user.email,
+        role=user.role,
+        faculty_id=user.faculty_id or "",
+        department_id=user.department_id or "",
+        full_name=user.full_name,
+        token_type="refresh",
     )
 
     csrf_token = (
@@ -348,9 +408,18 @@ async def refresh_token(request: Request):
         status_code=status.HTTP_200_OK,
         content={
             "access_token": new_token,
+            "refresh_token": new_refresh_token,
             "token_type": "bearer",
             "expires_in": app_settings.jwt_access_token_minutes * 60,
             "csrf_token": csrf_token,
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "full_name": user.full_name,
+                "role": user.role,
+                "faculty_id": user.faculty_id,
+                "department_id": user.department_id,
+            },
         },
     )
 
@@ -358,6 +427,7 @@ async def refresh_token(request: Request):
         response,
         new_token,
         csrf_token,
+        refresh_token=new_refresh_token,
     )
 
     return response

@@ -36,6 +36,9 @@ async def get_current_user(
     if not payload:
         raise AuthenticationError("Invalid or expired authentication token")
 
+    if payload.get("token_type") == "refresh":
+        raise AuthenticationError("Invalid token type: refresh token cannot be used as access token")
+
     user_id: str = payload.get("sub")
     user_role: str = payload.get("role", "faculty")
     faculty_id: str | None = payload.get("faculty_id")

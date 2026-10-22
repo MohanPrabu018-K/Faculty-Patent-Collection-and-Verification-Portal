@@ -291,25 +291,22 @@ def _update_ip_record_from_agents(ip_record, result):
                         # would destroy evidence instead of resolving anything.
                         setattr(ip_record, key, value)
                 for key in ("filing_date", "grant_date", "published_date", "registration_date", "certificate_date"):
-                    # BUG 7 / Migration 009 & 012: grant_date and certificate_date are
-                    # DATE columns - persist the calendar date, never a timestamp.
-                    # A bare year or unparseable value is skipped, never persisted.
-                    #
-                    # registration_date matters for design registrations: the
-                    # certificate's "Design No. / Date" pair is the date the
-                    # design was registered, and the extraction service emits
-                    # it as registration_date.
-                    #
-                    # certificate_date records the certificate issue date
-                    # (e.g. 03/05/2024 for design certificates), stored distinctly
-                    # without conflating with grant_date or published_date.
-                    value = _coerce_record_datetime(_collapse_value(extracted_data.get(key)))
+                    # Preserve verified existing values: do not overwrite a field that is already verified.
+                    if getattr(ip_record, "verification_status", None) == "VERIFIED" and getattr(ip_record, key, None) is not None:
+                        continue
+                    lookup_key = key
+                    raw_val = extracted_data.get(lookup_key)
+                    if raw_val is None and key == "published_date":
+                        raw_val = extracted_data.get("publication_date")
+                    value = _coerce_record_datetime(_collapse_value(raw_val))
                     if value is not None:
                         if key in ("grant_date", "certificate_date"):
                             value = _as_grant_date(value)
                             if value is None:
                                 continue
                         setattr(ip_record, key, value)
+                        if key == "published_date":
+                            ip_record.publication_date = value
                 inventors = _collapse_value(extracted_data.get("inventors"))
                 if inventors:
                     ip_record.contributor_name = ", ".join(inventors) if isinstance(inventors, list) else str(inventors)
@@ -920,6 +917,7 @@ def _create_or_link_master_record(ip_record, result):
                 design_number=design_number,
                 title=ip_record.title,
                 filing_date=ip_record.filing_date,
+                publication_date=ip_record.published_date or ip_record.publication_date,
                 registration_date=ip_record.registration_date,
                 grant_date=ip_record.grant_date,
                 certificate_date=ip_record.certificate_date,
@@ -928,6 +926,13 @@ def _create_or_link_master_record(ip_record, result):
             )
             session.add(master)
             session.flush()
+        else:
+            if not master.publication_date and (ip_record.published_date or ip_record.publication_date):
+                master.publication_date = ip_record.published_date or ip_record.publication_date
+            if not master.filing_date and ip_record.filing_date:
+                master.filing_date = ip_record.filing_date
+            if not master.grant_date and ip_record.grant_date:
+                master.grant_date = ip_record.grant_date
 
         # Link the IpRecord to the master record.
         ip_record.master_ip_id = master.id

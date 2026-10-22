@@ -127,6 +127,7 @@ function readCsrfToken(): string | undefined {
 // valid Bearer from the cookie double-submit CSRF check (a Bearer token
 // is not ambient authority, unlike cookies).
 let memAccessToken: string | null = null;
+let memRefreshToken: string | null = null;
 let memCsrfToken: string | null = null;
 
 function readStoredCsrfToken(): string | undefined {
@@ -152,7 +153,45 @@ function isCsrfFailure(status: number, body: string): boolean {
   return status === 400 && body.includes('CSRF_TOKEN_INVALID');
 }
 
-async function request<T>(path: string, init: RequestInit = {}, retryCsrf = true): Promise<T> {
+let refreshPromise: Promise<LoginResponse | null> | null = null;
+
+async function performTokenRefresh(): Promise<LoginResponse | null> {
+  if (!memRefreshToken && typeof document !== 'undefined' && !document.cookie) {
+    return null;
+  }
+  if (refreshPromise) return refreshPromise;
+  refreshPromise = (async () => {
+    try {
+      const hdrs: Record<string, string> = { 'Content-Type': 'application/json' };
+      const body: Record<string, string> = {};
+      if (memRefreshToken) body['refresh_token'] = memRefreshToken;
+      const res = await fetch(`${API_BASE}/auth/refresh`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: hdrs,
+        body: Object.keys(body).length ? JSON.stringify(body) : undefined,
+      });
+      if (!res.ok) {
+        memAccessToken = null;
+        memRefreshToken = null;
+        memCsrfToken = null;
+        return null;
+      }
+      const data = (await res.json()) as LoginResponse;
+      if (data?.access_token) memAccessToken = data.access_token;
+      if (data?.refresh_token) memRefreshToken = data.refresh_token;
+      if (data?.csrf_token) memCsrfToken = data.csrf_token;
+      return data;
+    } catch {
+      return null;
+    } finally {
+      refreshPromise = null;
+    }
+  })();
+  return refreshPromise;
+}
+
+async function request<T>(path: string, init: RequestInit = {}, retryCsrf = true, retryAuth = true): Promise<T> {
   const { headers: _headers, ...rest } = init;
   const method = (init.method || 'GET').toUpperCase();
   const headers: Record<string, string> = withAuthHeader({
@@ -173,6 +212,29 @@ async function request<T>(path: string, init: RequestInit = {}, retryCsrf = true
     const response = await send(headers);
     if (!response.ok) {
       const body = await response.text();
+
+      // Transparent token refresh on 401: deduplicate concurrent refreshes,
+      // update credentials, and retry exactly once.
+      if (response.status === 401 && retryAuth && !path.startsWith('/auth/')) {
+        const refreshed = await performTokenRefresh();
+        if (refreshed) {
+          const retryHeaders = withAuthHeader({
+            ...(_headers as Record<string, string> | undefined),
+          });
+          if (method !== 'GET') retryHeaders['Content-Type'] = retryHeaders['Content-Type'] ?? 'application/json';
+          if (method !== 'GET' && !path.startsWith('/auth/')) {
+            const csrf = readStoredCsrfToken();
+            if (csrf && !retryHeaders['X-CSRF-Token']) retryHeaders['X-CSRF-Token'] = csrf;
+          }
+          const retryRes = await send(retryHeaders);
+          if (retryRes.ok) {
+            if (retryRes.status === 204) return undefined as T;
+            return retryRes.json() as Promise<T>;
+          }
+          throw new ApiError(retryRes.status, (await retryRes.text()) || `Request failed with status ${retryRes.status}`);
+        }
+      }
+
       // Recoverable CSRF desync (stale in-memory token, rotated/expired
       // cookie after refresh or long-idle page): bootstrap a fresh CSRF pair
       // and retry exactly once. Never retried for /auth/* itself, so this
@@ -246,6 +308,7 @@ async function multipartRequest<T>(path: string, formData: FormData, csrfToken?:
 
 export type LoginResponse = {
   access_token: string;
+  refresh_token?: string;
   token_type: string;
   expires_in: number;
   csrf_token: string;
@@ -256,6 +319,7 @@ export const api = {
   login: async (email: string, password: string, csrfToken?: string) => {
     const res = await requestWithBody<LoginResponse>('/auth/login', { email, password }, { method: 'POST', headers: csrfToken ? { 'X-CSRF-Token': csrfToken } : undefined });
     if (res?.access_token) memAccessToken = res.access_token;
+    if (res?.refresh_token) memRefreshToken = res.refresh_token;
     if (res?.csrf_token) memCsrfToken = res.csrf_token;
     return res;
   },
@@ -264,13 +328,13 @@ export const api = {
       return await request('/auth/logout', { method: 'POST' });
     } finally {
       memAccessToken = null;
+      memRefreshToken = null;
       memCsrfToken = null;
     }
   },
   refresh: async () => {
-    const res = await request<LoginResponse>('/auth/refresh', { method: 'POST' });
-    if ((res as LoginResponse)?.access_token) memAccessToken = (res as LoginResponse).access_token;
-    if ((res as LoginResponse)?.csrf_token) memCsrfToken = (res as LoginResponse).csrf_token;
+    const res = await performTokenRefresh();
+    if (!res) throw new ApiError(401, 'Failed to refresh authentication token');
     return res;
   },
   me: () => request<AuthUser>('/auth/me'),

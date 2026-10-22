@@ -81,8 +81,9 @@ def generate_jwt_token(
     faculty_id: str = "",
     department_id: str = "",
     full_name: str = "",
+    token_type: str = "access",
 ) -> str:
-    """Generate a JWT token."""
+    """Generate a JWT token with optional token_type ('access' or 'refresh')."""
     import jwt
     import time
 
@@ -96,6 +97,7 @@ def generate_jwt_token(
             "faculty_id": faculty_id,
             "department_id": department_id,
             "full_name": full_name,
+            "token_type": token_type,
             "iat": issued_at,
             "exp": expires_at,
             "jti": secrets.token_urlsafe(16),
@@ -112,6 +114,17 @@ def decode_jwt_token(token: str, secret: str, algorithm: str = "HS256") -> dict[
 
     try:
         payload = jwt.decode(token, secret, algorithms=[algorithm])
+        return payload
+    except Exception:
+        return None
+
+
+def decode_jwt_token_allow_expired(token: str, secret: str, algorithm: str = "HS256") -> dict[str, Any] | None:
+    """Decode token claims ignoring expiration."""
+    import jwt
+
+    try:
+        payload = jwt.decode(token, secret, algorithms=[algorithm], options={"verify_exp": False})
         return payload
     except Exception:
         return None

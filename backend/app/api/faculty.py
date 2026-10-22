@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, UploadFile, File, Request, status, Query
 from fastapi.responses import JSONResponse
@@ -23,6 +24,7 @@ from app.models.base import (
     IpFile,
     IpRecord,
     MasterIpContributor,
+    MasterIpRecord,
     ProcessingJob,
     User,
 )
@@ -567,11 +569,7 @@ async def my_ip_records(
                 "patentee": r.patentee,
                 "verification_status": r.verification_status,
                 "processing_status": r.processing_status,
-                "filing_date": (
-                    r.filing_date.isoformat()
-                    if r.filing_date
-                    else None
-                ),
+                "filing_date": api_date_only(r.filing_date),
                 "registration_date": (
                     r.registration_date.isoformat()
                     if r.registration_date
@@ -579,11 +577,7 @@ async def my_ip_records(
                 ),
                 "grant_date": api_date_only(r.grant_date),
                 "certificate_date": api_date_only(r.certificate_date),
-                "published_date": (
-                    r.published_date.isoformat()
-                    if r.published_date
-                    else None
-                ),
+                "published_date": api_date_only(r.published_date or getattr(r, "publication_date", None)),
                 "department_id": r.department_id,
                 "designation_id": r.designation_id,
                 "evidence": r.evidence,
@@ -878,11 +872,7 @@ async def get_record_status(
         "processing_status": (
             ip_record.processing_status
         ),
-        "filing_date": (
-            ip_record.filing_date.isoformat()
-            if ip_record.filing_date
-            else None
-        ),
+        "filing_date": api_date_only(ip_record.filing_date),
         "registration_date": (
             ip_record.registration_date.isoformat()
             if ip_record.registration_date
@@ -890,11 +880,7 @@ async def get_record_status(
         ),
         "grant_date": api_date_only(ip_record.grant_date),
         "certificate_date": api_date_only(ip_record.certificate_date),
-        "published_date": (
-            ip_record.published_date.isoformat()
-            if ip_record.published_date
-            else None
-        ),
+        "published_date": api_date_only(ip_record.published_date or getattr(ip_record, "publication_date", None)),
         "contributor_name": (
             ip_record.contributor_name
         ),
@@ -1134,6 +1120,10 @@ async def submit_record_review(
 
                 parsed = normalize_date(value)
                 record.filing_date = parsed
+                if record.master_ip_id:
+                    master_rec = (await db.execute(select(MasterIpRecord).where(MasterIpRecord.id == record.master_ip_id))).scalar_one_or_none()
+                    if master_rec:
+                        master_rec.filing_date = parsed
             except Exception:
                 pass
 
@@ -1141,6 +1131,8 @@ async def submit_record_review(
             field in (
                 "grant_date",
                 "published_date",
+                "publication_date",
+                "filing_date",
             )
             and isinstance(value, str)
             and value
@@ -1148,11 +1140,49 @@ async def submit_record_review(
             try:
                 from app.services.extraction import normalize_date
 
-                setattr(
-                    record,
-                    field,
-                    normalize_date(value),
+                parsed_d = normalize_date(value)
+                dt_val = (
+                    datetime.combine(parsed_d, datetime.min.time())
+                    if parsed_d
+                    else None
                 )
+                if field in ("published_date", "publication_date"):
+                    record.published_date = dt_val
+                    record.publication_date = dt_val
+                    if record.master_ip_id:
+                        master_rec = (
+                            await db.execute(
+                                select(MasterIpRecord).where(
+                                    MasterIpRecord.id == record.master_ip_id
+                                )
+                            )
+                        ).scalar_one_or_none()
+                        if master_rec:
+                            master_rec.publication_date = dt_val
+                elif field == "filing_date":
+                    record.filing_date = dt_val
+                    if record.master_ip_id:
+                        master_rec = (
+                            await db.execute(
+                                select(MasterIpRecord).where(
+                                    MasterIpRecord.id == record.master_ip_id
+                                )
+                            )
+                        ).scalar_one_or_none()
+                        if master_rec:
+                            master_rec.filing_date = dt_val
+                elif field == "grant_date":
+                    record.grant_date = parsed_d
+                    if record.master_ip_id:
+                        master_rec = (
+                            await db.execute(
+                                select(MasterIpRecord).where(
+                                    MasterIpRecord.id == record.master_ip_id
+                                )
+                            )
+                        ).scalar_one_or_none()
+                        if master_rec:
+                            master_rec.grant_date = parsed_d
             except Exception:
                 pass
 

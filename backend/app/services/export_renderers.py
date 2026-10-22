@@ -5,7 +5,7 @@ import io
 import json
 import re
 import zipfile
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Iterable
 from xml.sax.saxutils import escape
 
@@ -45,6 +45,16 @@ def _date_only(value: Any) -> str:
     """
     if value is None or value == "":
         return ""
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            try:
+                from zoneinfo import ZoneInfo
+                value = value.astimezone(ZoneInfo("Asia/Kolkata"))
+            except Exception:
+                pass
+        return value.strftime("%Y-%m-%d")
+    if isinstance(value, date):
+        return value.strftime("%Y-%m-%d")
     text = value.isoformat() if hasattr(value, "isoformat") else str(value)
     match = re.match(r"^(\d{4}-\d{2}-\d{2})", text)
     return match.group(1) if match else text

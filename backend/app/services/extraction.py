@@ -61,7 +61,7 @@ FIELD_BLANK_LINE = r"(?:\n\s*\n|$)"
 # DATE NORMALIZATION
 # ============================================================
 
-def normalize_date(raw: str) -> date | None:
+def normalize_date(raw: Any) -> date | None:
     """Normalize a date string.
 
     Indian Patent Office documents use DD/MM/YYYY
@@ -71,36 +71,57 @@ def normalize_date(raw: str) -> date | None:
     if not raw:
         return None
 
+    if isinstance(raw, datetime):
+        return raw.date()
+    if isinstance(raw, date):
+        return raw
+    if not isinstance(raw, str):
+        raw = str(raw)
+
     raw = _clean_inline_text(raw)
+    # Strip ordinal suffixes: 1st, 2nd, 3rd, 4th, 12th, 22nd, etc.
+    cleaned_date = re.sub(r"(?<=\d)(st|nd|rd|th)\b", "", raw, flags=re.IGNORECASE)
+    # Remove phrases like 'day of' or weekday names
+    cleaned_date = re.sub(r"\bday\s+of\b", "", cleaned_date, flags=re.IGNORECASE)
+    cleaned_date = re.sub(r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", "", cleaned_date, flags=re.IGNORECASE)
+    cleaned_date = _clean_inline_text(cleaned_date)
 
     formats = [
         "%Y-%m-%d",
         "%d/%m/%Y",
         "%d-%m-%Y",
         "%d.%m.%Y",
+        "%d/%m/%y",
+        "%d-%m-%y",
+        "%d.%m.%y",
         "%Y/%m/%d",
         "%Y.%m.%d",
         "%B %d, %Y",
         "%b %d, %Y",
+        "%B %d %Y",
+        "%b %d %Y",
         "%d %B %Y",
         "%d %b %Y",
+        "%d %B, %Y",
+        "%d %b, %Y",
         "%Y %m %d",
     ]
 
-    for fmt in formats:
-        try:
-            return datetime.strptime(raw, fmt).date()
-        except ValueError:
-            continue
+    for candidate in (cleaned_date, raw):
+        for fmt in formats:
+            try:
+                return datetime.strptime(candidate, fmt).date()
+            except ValueError:
+                continue
 
     # Conservative OCR cleanup.
     cleaned = re.sub(
         r"[^0-9A-Za-z/\-, ]+",
         "",
-        raw,
+        cleaned_date,
     ).strip()
 
-    if cleaned != raw:
+    if cleaned not in (cleaned_date, raw):
         for fmt in formats:
             try:
                 return datetime.strptime(
@@ -614,11 +635,18 @@ class StructuredExtractionService:
                     qr_data,
                 )
 
+        _DATE_TOKEN = (
+            r"(\d{1,2}(?:st|nd|rd|th)?[\s/.\-]+(?:[A-Za-z]+|\d{1,2})[\s/.\-]+(?:\d{4}|\d{2})"
+            r"|\d{4}[\s/.\-]+\d{1,2}[\s/.\-]+\d{1,2}"
+            r"|\d{1,2}(?:st|nd|rd|th)?\s+(?:day\s+of\s+)?[A-Za-z]+,?\s+\d{4}"
+            r"|[A-Za-z]+\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})"
+        )
+
         filing_patterns = [
-            r"filing\s+date\s*[:\-]\s*([^\n]+)",
-            r"application\s+date\s*[:\-]\s*([^\n]+)",
-            r"date\s+of\s+filing(?:\s+of\s+application)?"
-            r"\s*[:\-]\s*([^\n]+)",
+            rf"(?:\(22\)\s*)?(?:date\s+of\s+filing(?:\s+of\s+application)?|filing\s+date|application\s+date)\s*[:\-]?\s*(?:\n\s*)?{_DATE_TOKEN}",
+            r"(?:\(22\)\s*)?date\s+of\s+filing(?:\s+of\s+application)?\s*[:\-]?\s*([^\n]+)",
+            r"filing\s+date\s*[:\-]?\s*([^\n]+)",
+            r"application\s+date\s*[:\-]?\s*([^\n]+)",
         ]
 
         for pattern in filing_patterns:
@@ -659,18 +687,29 @@ class StructuredExtractionService:
                 )
                 break
 
-        publication_match = re.search(
-            r"publication\s+date\s*[:\-]\s*([^\n]+)",
-            text,
-            re.IGNORECASE,
-        )
+        publication_patterns = [
+            rf"(?:\(43\)|\(45\))?\s*(?:date\s+of\s+publication(?:\s+of\s+application)?|publication\s+date|published\s+date)\s*[:\-]?\s*(?:\n\s*)?{_DATE_TOKEN}",
+            r"(?:\(43\)|\(45\))\s*(?:date\s+of\s+publication(?:\s+of\s+application)?|publication\s+date|published\s+date)\s*[:\-]?\s*(?:\n\s*)?([^\n]+)",
+            r"date\s+of\s+publication(?:\s+of\s+application)?\s*[:\-]?\s*([^\n]+)",
+            r"publication\s+date\s*[:\-]?\s*([^\n]+)",
+            r"published\s+date\s*[:\-]?\s*([^\n]+)",
+        ]
 
-        if publication_match:
-            normalized = normalize_date(
-                _clean_inline_text(
-                    publication_match.group(1)
-                )
+        for pattern in publication_patterns:
+            publication_match = re.search(
+                pattern,
+                text,
+                re.IGNORECASE,
             )
+
+            if not publication_match:
+                continue
+
+            raw = _clean_inline_text(
+                publication_match.group(1)
+            )
+
+            normalized = normalize_date(raw)
 
             if normalized:
                 self.evidence_tracker.add(
@@ -680,26 +719,23 @@ class StructuredExtractionService:
                     0.6,
                     qr_data,
                 )
+                break
 
-        # Bug 9: grant-date phrasings vary across certificate/journal forms.
-        # The separator after the label is optional (e.g. "Granted on
-        # 15 March 2024", "Date of Grant 22/10/2024"), and Indian forms add a
-        # qualifier ("Date of Grant of Patent: ..."). Separator-less variants
-        # capture a strict date-shaped token (never rest-of-line) so stray
-        # text cannot produce a false date; a bare 4-digit year is still
-        # accepted at low confidence via the dedicated year pattern.
-        _DATE_TOKEN = (
-            r"(\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}"
-            r"|\d{4}[/.\-]\d{1,2}[/.\-]\d{1,2}"
-            r"|\d{1,2}\s+[A-Za-z]+\s*,?\s*\d{4}"
-            r"|[A-Za-z]+\s+\d{1,2}\s*,?\s*\d{4})"
-        )
+            year = normalize_year(raw)
+            if year:
+                self.evidence_tracker.add(
+                    "published_date",
+                    year,
+                    "ocr_text",
+                    0.3,
+                    qr_data,
+                )
+                break
+
         grant_patterns = [
-            rf"grant\s+date\s*[:\-]?\s*{_DATE_TOKEN}",
-            rf"date\s+of\s+grant(?:\s+of\s+[A-Za-z]+)?\s*[:\-]?\s*{_DATE_TOKEN}",
-            rf"granted\s+on\s*[:\-]?\s*{_DATE_TOKEN}",
-            rf"date\s+granted\s*[:\-]?\s*{_DATE_TOKEN}",
-            rf"granted\s*[:\-]\s*{_DATE_TOKEN}",
+            rf"(?:\(45\)\s*)?(?:date\s+of\s+(?:grant|publication\s+of\s+patent\s+grant)(?:\s+of\s+[A-Za-z]+)?|grant\s+date|date\s+granted|granted\s+on)\s*[:\-]?\s*(?:\n\s*)?{_DATE_TOKEN}",
+            rf"granted\s*[:\-]\s*(?:\n\s*)?{_DATE_TOKEN}",
+            r"(?:\(45\)\s*)?(?:date\s+of\s+(?:grant|publication\s+of\s+patent\s+grant)|grant\s+date|date\s+granted|granted\s+on)\s*[:\-]?\s*(?:\n\s*)?([^\n]+)",
         ]
 
         for pattern in grant_patterns:
