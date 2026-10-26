@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, Query, Request, status
@@ -15,14 +16,14 @@ from app.core.exceptions import NotFoundError, PortalError
 from app.core.logging import log_audit
 from app.services.export_renderers import api_date_only
 from app.services.storage import get_storage_service
-from app.models.base import IpRecord
+from app.models.base import IpFile, IpRecord
 
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/v1/ip-records", tags=["ip-records"])
 
 
-def _record_to_dict(record: IpRecord) -> dict:
+def _record_to_dict(record: IpRecord) -> dict[str, Any]:
     return {
         "id": record.id,
         "ip_type": record.ip_type,
@@ -52,7 +53,7 @@ def _record_to_dict(record: IpRecord) -> dict:
 
 @router.get("/", status_code=status.HTTP_200_OK)
 async def list_ip_records(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     ip_type: str | None = Query(None),
     verification_status: str | None = Query(None),
     processing_status: str | None = Query(None),
@@ -60,7 +61,7 @@ async def list_ip_records(
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_async_session),
-):
+) -> dict[str, Any]:
     """List IP records with filters.
 
     Faculty see their own records; super admin sees all with filters.
@@ -109,9 +110,9 @@ async def list_ip_records(
 @router.get("/{record_id}", status_code=status.HTTP_200_OK)
 async def get_ip_record(
     record_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_session),
-):
+) -> dict[str, Any]:
     """Get a specific IP record."""
     user_role = current_user.get("role", "")
     user_id = current_user.get("id")
@@ -125,7 +126,7 @@ async def get_ip_record(
     return _record_to_dict(record)
 
 
-def _resolve_requested_file(files: list, file_id: str | None) -> IpFile | None:
+def _resolve_requested_file(files: list[IpFile], file_id: str | None) -> IpFile | None:
     for f in files:
         if not file_id or f.id == file_id:
             return f
@@ -136,10 +137,10 @@ def _resolve_requested_file(files: list, file_id: str | None) -> IpFile | None:
 async def download_ip_record_file(
     record_id: str,
     request: Request,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     file_id: str | None = Query(None, description="specific stored file; defaults to the first file on the record"),
     db: AsyncSession = Depends(get_async_session),
-):
+) -> FileResponse:
     """Download the raw stored file for an IP record (AA1, blueprint §14).
 
     Authorization (IDOR-safe):
@@ -210,9 +211,9 @@ async def download_ip_record_file(
 async def update_ip_record(
     record_id: str,
     request: Request,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_session),
-):
+) -> dict[str, Any]:
     """Update an IP record (admin or owner)."""
     user_role = current_user.get("role", "")
     user_id = current_user.get("id")

@@ -1,9 +1,11 @@
 import secrets
 import smtplib
-import structlog
 from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from typing import Any
+
+import structlog
 
 from app.api.deps import check_rate_limit, get_current_user
 from app.core.config import app_settings, brevo_settings, rate_limit_settings, smtp_settings
@@ -174,7 +176,7 @@ async def login(
     request: Request,
     body: LoginRequest,
     db: AsyncSession = Depends(get_async_session),
-):
+) -> Response:
     """
     Login endpoint.
 
@@ -304,7 +306,7 @@ async def login(
 
 
 @router.post("/logout")
-async def logout(response: Response):
+async def logout(response: Response) -> dict[str, str]:
     """
     Logout endpoint.
 
@@ -319,7 +321,7 @@ async def logout(response: Response):
 
 
 @router.post("/refresh", status_code=status.HTTP_200_OK)
-async def refresh_token(request: Request, db: AsyncSession = Depends(get_async_session)):
+async def refresh_token(request: Request, db: AsyncSession = Depends(get_async_session)) -> Response:
     """
     Refresh JWT access token using a valid refresh token from cookie, header, or body.
     """
@@ -435,8 +437,8 @@ async def refresh_token(request: Request, db: AsyncSession = Depends(get_async_s
 
 @router.get("/me", status_code=status.HTTP_200_OK)
 async def me(
-    current_user: dict = Depends(get_current_user),
-):
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     """
     Get current authenticated user information.
     """
@@ -445,7 +447,7 @@ async def me(
 
 
 @router.post("/csrf", status_code=status.HTTP_200_OK)
-async def get_csrf_token(response: Response):
+async def get_csrf_token(response: Response) -> dict[str, str]:
     """
     Generate and set a CSRF token.
 
@@ -471,12 +473,12 @@ async def get_csrf_token(response: Response):
     }
 
 
-@router.post("/forgot-password", status_code=status.HTTP_200_OK)
+@router.post("/forgot-password", status_code=status.HTTP_200_OK, response_model=None)
 async def forgot_password(
     request: Request,
     body: ForgotPasswordRequest,
     db: AsyncSession = Depends(get_async_session),
-):
+) -> Any:
     """
     Request a password reset token.
 
@@ -541,7 +543,7 @@ async def forgot_password(
 
         from app.models.base import SecurityEvent
         security_event = SecurityEvent(
-            id=str(secrets.token_urlsafe(16)),
+            id=secrets.token_urlsafe(16),
             event_type="password_reset_requested",
             user_id=user.id,
             details={
@@ -606,7 +608,7 @@ async def forgot_password(
 async def reset_password(
     body: ResetPasswordRequest,
     db: AsyncSession = Depends(get_async_session),
-):
+) -> dict[str, str]:
     """
     Reset password using a valid token from forgot-password.
     """

@@ -1,0 +1,97 @@
+{
+  "deployment": {
+    "backend_health": {
+      "healthz_status": 200,
+      "readyz_status": 200,
+      "openapi_status": 200
+    },
+    "frontend": {
+      "status": 200,
+      "server": "cloudflare",
+      "assets": [
+        "/assets/index-Cp6k5oJ4.js",
+        "/assets/client-Cd6iZYEC.js"
+      ]
+    },
+    "frontend_bundle_features": {
+      "bundle": "/assets/index-Cp6k5oJ4.js",
+      "has_poll_interval": false,
+      "has_publication_date": false,
+      "has_refresh_promise": false
+    }
+  },
+  "bug1_dates": {
+    "status": "PASS (Backend Serialization & Model Gate)",
+    "total_records_inspected": 18,
+    "all_dates_conforming_iso": true,
+    "sample_records": [
+      {
+        "id": "30539176-6ef4-4c25-8aaa-4abfb4c40b48",
+        "ip_type": "DESIGN_REGISTRATION",
+        "title": "INTERNET OF THINGS BASED GRID ENERGY MAN",
+        "filing_date": null,
+        "published_date": null,
+        "grant_date": null,
+        "certificate_date": "2025-09-03"
+      },
+      {
+        "id": "190d976a-98c9-4b6b-a3a1-93a85e5b3b5b",
+        "ip_type": "DESIGN_REGISTRATION",
+        "title": "AI BASED GOGGLES FOR VISUALLY IMPAIRED",
+        "filing_date": null,
+        "published_date": null,
+        "grant_date": null,
+        "certificate_date": "2024-05-03"
+      },
+      {
+        "id": "f6b7771e-bcc8-46dc-93b1-ddf839f8aa54",
+        "ip_type": "DESIGN_REGISTRATION",
+        "title": "ARTIFICIAL INTELLIGENCE ENABLED SECURITY",
+        "filing_date": null,
+        "published_date": null,
+        "grant_date": null,
+        "certificate_date": null
+      },
+      {
+        "id": "db082455-bc8d-4da2-bdd9-a48f7ece3f02",
+        "ip_type": "UNKNOWN_OTHER",
+        "title": "",
+        "filing_date": null,
+        "published_date": null,
+        "grant_date": null,
+        "certificate_date": null
+      },
+      {
+        "id": "699ea85d-27c3-47e5-b819-ca74ca63ddfa",
+        "ip_type": "UNKNOWN_OTHER",
+        "title": "",
+        "filing_date": null,
+        "published_date": null,
+        "grant_date": null,
+        "certificate_date": null
+      }
+    ]
+  },
+  "bug2_faculty_navigation": {},
+  "bug3_aids_hod": {
+    "status": "PASS",
+    "aids_department_found": true,
+    "aids_uuid": "5c1432c4-0fab-47f2-9659-dc8ac218a651",
+    "active_hod_email": "qa.aids.hod.live@faculty.edu",
+    "canonical_uuid_409": true,
+    "code_aids_409": true,
+    "code_aiads_409": true,
+    "name_alias_409": true
+  },
+  "bug4_auth_refresh": {
+    "status": "PASS",
+    "token_type_separation": true,
+    "access_token_type": "access",
+    "refresh_token_type": "refresh",
+    "refresh_token_rejected_as_access_token": true,
+    "refresh_via_body_status": 200,
+    "refresh_via_cookie_status": 200,
+    "refresh_missing_creds_status": 401,
+    "logout_status": 200
+  }
+}

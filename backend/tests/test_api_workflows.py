@@ -23,9 +23,9 @@ class TestAuthWorkflow:
         assert response.status_code == 200
         assert response.json()["message"] == "Successfully logged out"
 
-    def test_refresh_endpoint(self):
+    def test_refresh_endpoint_requires_credentials(self):
         response = client.post("/api/v1/auth/refresh")
-        assert response.status_code == 200
+        assert response.status_code == 401
 
 
 class TestFacultyWorkflow:

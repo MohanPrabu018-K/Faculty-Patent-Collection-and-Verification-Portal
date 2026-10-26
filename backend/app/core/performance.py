@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
 import structlog
+from starlette.responses import Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 logger = structlog.get_logger()
 
@@ -47,7 +49,7 @@ class AsyncLRUCache(Generic[T]):
             "expired": 0,
         }
     
-    def _make_key(self, key: str | tuple) -> str:
+    def _make_key(self, key: str | tuple[Any, ...]) -> str:
         """Create cache key from various input types."""
         if isinstance(key, str):
             return key
@@ -59,7 +61,7 @@ class AsyncLRUCache(Generic[T]):
         """Check if cache entry is expired."""
         return time.time() > entry.expires_at
     
-    def _evict_lru(self):
+    def _evict_lru(self) -> None:
         """Evict least recently used entry."""
         if self._access_order:
             lru_key = self._access_order.pop(0)
@@ -67,13 +69,13 @@ class AsyncLRUCache(Generic[T]):
                 del self._cache[lru_key]
                 self._stats["evictions"] += 1
     
-    def _update_access(self, key: str):
+    def _update_access(self, key: str) -> None:
         """Update LRU access order."""
         if key in self._access_order:
             self._access_order.remove(key)
         self._access_order.append(key)
     
-    async def get(self, key: str | tuple) -> T | None:
+    async def get(self, key: str | tuple[Any, ...]) -> T | None:
         """Get value from cache."""
         cache_key = self._make_key(key)
         
@@ -100,10 +102,10 @@ class AsyncLRUCache(Generic[T]):
     
     async def set(
         self,
-        key: str | tuple,
+        key: str | tuple[Any, ...],
         value: T,
         ttl: float | None = None,
-    ):
+    ) -> None:
         """Set value in cache."""
         cache_key = self._make_key(key)
         ttl = ttl or self.default_ttl
@@ -120,7 +122,7 @@ class AsyncLRUCache(Generic[T]):
             )
             self._update_access(cache_key)
     
-    async def delete(self, key: str | tuple) -> bool:
+    async def delete(self, key: str | tuple[Any, ...]) -> bool:
         """Delete key from cache."""
         cache_key = self._make_key(key)
         
@@ -132,7 +134,7 @@ class AsyncLRUCache(Generic[T]):
                 return True
             return False
     
-    async def clear(self):
+    async def clear(self) -> None:
         """Clear all cache entries."""
         async with self._lock:
             self._cache.clear()
@@ -173,17 +175,17 @@ _object_cache = AsyncLRUCache[Any](max_size=1000, default_ttl=300.0)  # 5 min fo
 _analytics_cache = AsyncLRUCache[Any](max_size=100, default_ttl=600.0)  # 10 min for analytics
 
 
-async def get_query_cache() -> AsyncLRUCache:
+async def get_query_cache() -> AsyncLRUCache[Any]:
     """Get query cache instance."""
     return _query_cache
 
 
-async def get_object_cache() -> AsyncLRUCache:
+async def get_object_cache() -> AsyncLRUCache[Any]:
     """Get object cache instance."""
     return _object_cache
 
 
-async def get_analytics_cache() -> AsyncLRUCache:
+async def get_analytics_cache() -> AsyncLRUCache[Any]:
     """Get analytics cache instance."""
     return _analytics_cache
 
@@ -191,17 +193,17 @@ async def get_analytics_cache() -> AsyncLRUCache:
 # --- Cache Decorators ---
 
 def cached(
-    cache: AsyncLRUCache | None = None,
+    cache: AsyncLRUCache[Any] | None = None,
     ttl: float | None = None,
-    key_builder: Callable[..., str | tuple] | None = None,
-):
+    key_builder: Callable[..., str | tuple[Any, ...]] | None = None,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Decorator to cache async function results."""
     if cache is None:
         cache = _object_cache
     
-    def decorator(func: Callable) -> Callable:
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(func)
-        async def wrapper(*args, **kwargs):
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
             # Build cache key
             if key_builder:
                 cache_key = key_builder(*args, **kwargs)
@@ -228,14 +230,17 @@ def cached(
     return decorator
 
 
-def invalidate_cache(cache: AsyncLRUCache | None = None, key_builder: Callable | None = None):
+def invalidate_cache(
+    cache: AsyncLRUCache[Any] | None = None,
+    key_builder: Callable[..., Any] | None = None,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Decorator to invalidate cache after function execution."""
     if cache is None:
         cache = _object_cache
     
-    def decorator(func: Callable) -> Callable:
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(func)
-        async def wrapper(*args, **kwargs):
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
             result = await func(*args, **kwargs)
             
             if key_builder:
@@ -252,9 +257,9 @@ def invalidate_cache(cache: AsyncLRUCache | None = None, key_builder: Callable |
 class ConnectionPoolManager:
     """Manages database connection pools with health checks."""
     
-    def __init__(self):
+    def __init__(self) -> None:
         self._pools: dict[str, Any] = {}
-        self._configs: dict[str, dict] = {}
+        self._configs: dict[str, dict[str, Any]] = {}
     
     def configure_pool(
         self,
@@ -264,7 +269,7 @@ class ConnectionPoolManager:
         max_size: int = 20,
         timeout: float = 30.0,
         command_timeout: float = 60.0,
-    ):
+    ) -> None:
         """Configure a connection pool."""
         self._configs[name] = {
             "dsn": dsn,
@@ -274,7 +279,7 @@ class ConnectionPoolManager:
             "command_timeout": command_timeout,
         }
     
-    async def get_pool(self, name: str):
+    async def get_pool(self, name: str) -> Any:
         """Get or create connection pool."""
         if name not in self._pools:
             config = self._configs.get(name)
@@ -290,7 +295,7 @@ class ConnectionPoolManager:
         
         return self._pools[name]
     
-    async def close_all(self):
+    async def close_all(self) -> None:
         """Close all connection pools."""
         for pool in self._pools.values():
             if pool:
@@ -366,7 +371,7 @@ class PaginationParams:
     per_page: int = 20
     max_per_page: int = 100
     
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self.page = max(1, self.page)
         self.per_page = min(max(1, self.per_page), self.max_per_page)
         self.offset = (self.page - 1) * self.per_page
@@ -385,10 +390,10 @@ class PaginatedResponse(Generic[T]):
 
 
 async def paginate_query(
-    query_func: Callable,
-    count_func: Callable,
+    query_func: Callable[[int, int], Any],
+    count_func: Callable[[], Any],
     params: PaginationParams,
-) -> PaginatedResponse:
+) -> PaginatedResponse[Any]:
     """Execute paginated query."""
     # Get total count
     total = await count_func()
@@ -425,16 +430,16 @@ class BatchProcessor(Generic[T]):
         self.processor = processor
         self._buffer: list[T] = []
         self._lock = asyncio.Lock()
-        self._flush_task: asyncio.Task | None = None
+        self._flush_task: asyncio.Task[None] | None = None
     
-    async def add(self, item: T):
+    async def add(self, item: T) -> None:
         """Add item to batch."""
         async with self._lock:
             self._buffer.append(item)
             if len(self._buffer) >= self.batch_size:
                 await self._flush()
     
-    async def _flush(self):
+    async def _flush(self) -> None:
         """Flush buffer to processor."""
         if not self._buffer or not self.processor:
             return
@@ -449,22 +454,22 @@ class BatchProcessor(Generic[T]):
             # Re-add failed items
             self._buffer = batch + self._buffer
     
-    async def flush(self):
+    async def flush(self) -> None:
         """Force flush buffer."""
         async with self._lock:
             await self._flush()
     
-    async def start(self):
+    async def start(self) -> None:
         """Start periodic flush task."""
         if self._flush_task is None:
             self._flush_task = asyncio.create_task(self._periodic_flush())
     
-    async def _periodic_flush(self):
+    async def _periodic_flush(self) -> None:
         while True:
             await asyncio.sleep(self.flush_interval)
             await self.flush()
     
-    async def stop(self):
+    async def stop(self) -> None:
         """Stop periodic flush and flush remaining."""
         if self._flush_task:
             self._flush_task.cancel()
@@ -479,9 +484,9 @@ class BatchProcessor(Generic[T]):
 
 async def start_cache_cleanup_task(
     interval: float = 300.0,  # 5 minutes
-):
+) -> asyncio.Task[None]:
     """Start background cache cleanup task."""
-    async def cleanup():
+    async def cleanup() -> None:
         while True:
             try:
                 await asyncio.sleep(interval)
@@ -520,11 +525,11 @@ def should_compress(response: Response, minimum_size: int = 500) -> bool:
 class PerformanceMonitor:
     """Monitor API performance metrics."""
     
-    def __init__(self):
+    def __init__(self) -> None:
         self._metrics: dict[str, list[float]] = {}
         self._lock = asyncio.Lock()
     
-    async def record(self, endpoint: str, duration_ms: float):
+    async def record(self, endpoint: str, duration_ms: float) -> None:
         """Record request duration."""
         async with self._lock:
             if endpoint not in self._metrics:
@@ -577,17 +582,17 @@ async def get_performance_monitor() -> PerformanceMonitor:
 class PerformanceMonitoringMiddleware:
     """Middleware to monitor request performance."""
     
-    def __init__(self, app: ASGIApp):
+    def __init__(self, app: ASGIApp) -> None:
         self.app = app
     
-    async def __call__(self, scope, receive, send):
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
         
         start_time = time.time()
         
-        async def send_wrapper(message):
+        async def send_wrapper(message: Message) -> None:
             if message["type"] == "http.response.start":
                 duration = (time.time() - start_time) * 1000
                 path = scope.get("path", "/")
@@ -599,7 +604,7 @@ class PerformanceMonitoringMiddleware:
 
 # --- Setup Function ---
 
-def setup_performance_optimization(app: Any):
+def setup_performance_optimization(app: Any) -> None:
     """Setup performance optimizations for FastAPI app."""
     # Add performance monitoring middleware
     app.add_middleware(PerformanceMonitoringMiddleware)

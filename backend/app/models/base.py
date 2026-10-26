@@ -89,32 +89,32 @@ MATCH_STATUS_CHOICES = (
 )
 
 
-def ip_type_enum():
+def ip_type_enum() -> SqlEnum:
     """Return SQLAlchemy IpTypeEnum class."""
     return SqlEnum(*IP_TYPE_CHOICES, name="ip_type_enum")
 
 
-def processing_status_enum():
+def processing_status_enum() -> SqlEnum:
     """Return SQLAlchemy ProcessingStatusEnum class."""
     return SqlEnum(*PROCESSING_STATUS_CHOICES, name="processing_status_enum")
 
 
-def verification_status_enum():
+def verification_status_enum() -> SqlEnum:
     """Return SQLAlchemy VerificationStatusEnum class."""
     return SqlEnum(*VERIFICATION_STATUS_CHOICES, name="verification_status_enum")
 
 
-def association_status_enum():
+def association_status_enum() -> SqlEnum:
     """Return SQLAlchemy AssociationStatusEnum class."""
     return SqlEnum(*ASSOCIATION_STATUS_CHOICES, name="association_status_enum")
 
 
-def conflict_status_enum():
+def conflict_status_enum() -> SqlEnum:
     """Return SQLAlchemy ConflictStatusEnum class."""
     return SqlEnum(*CONFLICT_STATUS_CHOICES, name="conflict_status_enum")
 
 
-def user_role_enum():
+def user_role_enum() -> SqlEnum:
     """Return SQLAlchemy UserRoleEnum class."""
     return SqlEnum(*USER_ROLE_CHOICES, name="user_role_enum")
 
@@ -218,7 +218,7 @@ class IpRecord(Base):
     certificate_date = Column(Date, nullable=True)
 
     @property
-    def effective_filing_date(self):
+    def effective_filing_date(self) -> datetime | None:
         """Effective filing date: returns filing_date if present; for design registrations,
         registration_date serves as effective filing/priority date when filing_date is not present.
         Preserves stored filing_date without modification."""
@@ -700,7 +700,7 @@ class MasterIpRecord(Base):
     certificate_date = Column(Date, nullable=True)
 
     @property
-    def effective_filing_date(self):
+    def effective_filing_date(self) -> datetime | None:
         """Effective filing date: returns filing_date if present; for design registrations,
         registration_date serves as effective filing/priority date when filing_date is not present.
         Preserves stored filing_date without modification."""

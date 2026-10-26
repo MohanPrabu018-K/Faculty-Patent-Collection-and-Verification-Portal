@@ -565,7 +565,7 @@ class IdentityResolutionService:
                 )
 
         # 2. Confirmed internal match
-        has_corroborating_evidence = bool(
+        has_corroborating_evidence = (
             best.institution_match
             or best.department_match
             or best.prior_association_match

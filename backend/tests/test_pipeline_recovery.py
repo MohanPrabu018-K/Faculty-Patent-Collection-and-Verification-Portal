@@ -62,8 +62,13 @@ def ctx(monkeypatch, tmp_path):
         session.close()
 
     calls: list[str] = []
+    from app.services.storage import reset_storage_service
+    reset_storage_service()
     # requeue_stuck_pipelines imports upload_settings locally at call time, so
     # the settings object's attribute is what must be redirected.
+    monkeypatch.setattr(
+        app_config.upload_settings, "storage_backend", "local"
+    )
     monkeypatch.setattr(
         app_config.upload_settings, "local_storage_root", str(tmp_path)
     )
@@ -74,6 +79,8 @@ def ctx(monkeypatch, tmp_path):
     )
 
     yield {"record_id": record_id, "user_id": user_id, "calls": calls, "tmp": tmp_path}
+
+    reset_storage_service()
 
     session = get_session()
     try:

@@ -205,9 +205,16 @@ def test_status_qr_data_is_list():
     dash = client.get("/api/v1/faculty/dashboard", headers=FAC_A)
     assert dash.status_code == 200
     recs = dash.json().get("recent_records", [])
+    token_to_use = FAC_A
+    if not recs:
+        token_a1 = {"Authorization": f"Bearer {_tok('fac-a-001', 'faculty', 'dept-a', 'FACA001')}"}
+        dash_a1 = client.get("/api/v1/faculty/dashboard", headers=token_a1)
+        if dash_a1.status_code == 200 and dash_a1.json().get("recent_records"):
+            recs = dash_a1.json()["recent_records"]
+            token_to_use = token_a1
     if not recs:
         pytest.skip("Faculty A has no records in the staging DB")
     rid = recs[0]["id"]
-    status = client.get(f"/api/v1/faculty/{rid}/status", headers=FAC_A)
+    status = client.get(f"/api/v1/faculty/{rid}/status", headers=token_to_use)
     assert status.status_code == 200
     assert isinstance(status.json().get("qr_data"), list)

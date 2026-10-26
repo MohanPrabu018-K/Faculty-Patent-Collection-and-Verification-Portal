@@ -6,7 +6,7 @@ from app.core.config import AppSettings, DatabaseSettings, OcrSpaceSettings, Upl
 _DEFAULTS_ENV_KEYS = ("DEBUG", "APP_ENV", "API_PREFIX", "APP_NAME", "CORS_ORIGINS")
 
 
-def test_app_settings_defaults(monkeypatch):
+def test_app_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in _DEFAULTS_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
     settings = AppSettings()
@@ -16,18 +16,18 @@ def test_app_settings_defaults(monkeypatch):
     assert "http://localhost:5173" in settings.cors_origins
 
 
-def test_database_settings_defaults():
+def test_database_settings_defaults() -> None:
     settings = DatabaseSettings()
     assert "postgresql" in settings.database_url
 
 
-def test_ocr_space_settings_defaults():
+def test_ocr_space_settings_defaults() -> None:
     settings = OcrSpaceSettings()
     assert settings.api_url == "https://api.ocr.space/parse/image"
     assert settings.language == "eng"
 
 
-def test_upload_settings_defaults(monkeypatch):
+def test_upload_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("STORAGE_BACKEND", raising=False)
     settings = UploadSettings()
     assert settings.storage_backend == "local"
@@ -37,7 +37,7 @@ def test_upload_settings_defaults(monkeypatch):
     assert settings.s3_endpoint_url == ""
 
 
-def test_rate_limit_settings_defaults():
+def test_rate_limit_settings_defaults() -> None:
     settings = RateLimitSettings()
     assert settings.login_per_ip == 10
     assert settings.login_per_account == 5

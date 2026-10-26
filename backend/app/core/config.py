@@ -1,7 +1,7 @@
 import json
 import os
 from pathlib import Path
-from typing import List
+from typing import Any, List, Self
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -88,7 +88,7 @@ class BaseSettingsBase(BaseSettings):
 
     @field_validator("cors_origins", mode="before")
     @classmethod
-    def _split_cors_origins(cls, value):
+    def _split_cors_origins(cls, value: Any) -> Any:
         """Accept CORS_ORIGINS as a comma-separated string (env var) or a JSON
         array. `https://a.example, https://b.example` and `["https://a.example"]`
         both work."""
@@ -149,7 +149,7 @@ class AppSettings(BaseSettingsBase):
         return normalized
 
     @model_validator(mode="after")
-    def _cookie_samesite_browser_guard(self):
+    def _cookie_samesite_browser_guard(self) -> Self:
         """Coerce an unusable SameSite=None-without-Secure combo to Lax.
 
         Browsers reject `Set-Cookie: ...; SameSite=None` without the Secure
@@ -168,7 +168,7 @@ class AppSettings(BaseSettingsBase):
         return self
 
     @model_validator(mode="after")
-    def _production_guards(self):
+    def _production_guards(self) -> Self:
         """Fail fast when APP_ENV is a production environment but the security
         configuration still holds development defaults. Never triggers for
         APP_ENV=development / test."""
@@ -205,7 +205,7 @@ class DatabaseSettings(BaseSettingsBase):
         return value
 
     @model_validator(mode="after")
-    def _production_db_guard(self):
+    def _production_db_guard(self) -> Self:
         if (self.app_env or "").strip().lower() not in _PROD_ENVS:
             return self
         url = self.database_url or ""
@@ -296,7 +296,7 @@ class UploadSettings(BaseSettingsBase):
     google_drive_service_account_json: str = Field(default="", alias="GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON")
 
     @model_validator(mode="after")
-    def _validate_storage_backend(self):
+    def _validate_storage_backend(self) -> Self:
         backend = (self.storage_backend or "local").strip().lower()
         if backend in ("gdrive", "googledrive"):
             import os
@@ -433,7 +433,7 @@ smtp_settings = SmtpSettings()
 scheduler_settings = SchedulerSettings()
 
 
-def get_settings():
+def get_settings() -> dict[str, Any]:
     return {
         "app": app_settings,
         "database": database_settings,

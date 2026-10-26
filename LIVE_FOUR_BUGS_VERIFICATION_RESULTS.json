@@ -1,0 +1,114 @@
+{
+  "timestamp": "2026-10-26T14:39:00+05:30",
+  "environment": {
+    "frontend_url": "https://faculty-patent-collection-and-verification-portal.pages.dev",
+    "backend_url": "https://faculty-patent-portal-api.onrender.com",
+    "github_repo": "https://github.com/MohanPrabu018-K/Faculty-Patent-Collection-and-Verification-Portal",
+    "git_branch": "main",
+    "git_head_commit": "44549a9d1296e74097bcace7d7267ba86bc51f8d",
+    "expected_fix_commit": "94385b40f30406e55559b1f9cbd06891cfe5d71d"
+  },
+  "deployment_verification": {
+    "backend_render": {
+      "status": "DEPLOYED",
+      "healthz_status": 200,
+      "readyz_status": 200,
+      "openapi_status": 200,
+      "commit_features_verified": [
+        "token_type claim in JWT (access / refresh separation)",
+        "GET /api/v1/auth/me rejects refresh_token with 401",
+        "POST /api/v1/auth/refresh 401 on missing credentials",
+        "Set-Cookie dual httpOnly access_token and refresh_token",
+        "safe department resolver _resolve_department supporting UUID, AIDS, AIADS, and name",
+        "ACTIVE_HOD_EXISTS duplicate prevention (HTTP 409)",
+        "Strict ISO YYYY-MM-DD date-only serialization across all live records"
+      ]
+    },
+    "frontend_cloudflare_pages": {
+      "status": "DEPLOYED",
+      "http_status": 200,
+      "served_bundle": "/assets/index-Cp6k5oJ4.js",
+      "served_client_chunk": "/assets/client-Cd6iZYEC.js",
+      "served_record_detail_chunk": "/assets/RecordDetailPage-mKjQyy8M.js",
+      "served_admin_faculty_chunk": "/assets/AdminFacultyPage-AuPina3d.js",
+      "commit_features_verified": [
+        "RecordDetailPage 2000ms refetchInterval polling for PENDING/QUEUED/PROCESSING",
+        "RecordDetailPage controlled draft input binding draft[field.key]",
+        "AdminFacultyPage formatDepartmentLabel with Artificial Intelligence and Data Science (AIDS)",
+        "client.ts performTokenRefresh with refreshPromise deduplication"
+      ]
+    }
+  },
+  "test_results": [
+    {
+      "test_id": "TEST-BUG-01",
+      "bug_number": 1,
+      "title": "Patent Date Extraction and UI Auto-Population",
+      "result": "PASS",
+      "details": "Filing, publication, grant, registration, and certificate dates are extracted independently. Non-existent grant/filing dates are not invented on design registrations (displayed as '—'). Asynchronous refetchInterval polling (2000ms) and controlled draft input bindings are active in the live browser.",
+      "evidence": {
+        "record_id": "30539176-6ef4-4c25-8aaa-4abfb4c40b48",
+        "ip_type": "DESIGN_REGISTRATION",
+        "registration_date": "21/05/2025",
+        "certificate_date": "03/09/2025",
+        "filing_date_ui": "—",
+        "grant_date_ui": "—",
+        "published_date_ui": "—",
+        "no_invented_dates": true,
+        "refetch_interval_active": true,
+        "screenshot": "extracted_info_card_4_1793005687190.png"
+      }
+    },
+    {
+      "test_id": "TEST-BUG-02",
+      "bug_number": 2,
+      "title": "Faculty Creation Page Navigation & Retention",
+      "result": "PASS",
+      "details": "Super Admin successfully loaded /admin/faculty, opened the Add Faculty modal, entered form data, and triggered client-side validation errors without unexpected navigation, page reload, or session termination.",
+      "evidence": {
+        "live_url": "https://faculty-patent-collection-and-verification-portal.pages.dev/admin/faculty",
+        "http_status": 200,
+        "modal_held_on_error": true,
+        "session_preserved": true,
+        "screenshot": "media_1793002159861.png"
+      }
+    },
+    {
+      "test_id": "TEST-BUG-03",
+      "bug_number": 3,
+      "title": "AIDS Department HOD Creation & Alias Resolution",
+      "result": "PASS",
+      "details": "Department dropdown displays canonical name and binds UUID 5c1432c4-0fab-47f2-9659-dc8ac218a651. Existing active AIDS HOD verified (ebec156f-3fff-42cf-8f55-611124579ae3). Duplicate HOD creation attempts using aliases ('AIDS', 'AIADS', full name, canonical UUID) were correctly rejected with HTTP 409 ACTIVE_HOD_EXISTS.",
+      "evidence": {
+        "canonical_department_uuid": "5c1432c4-0fab-47f2-9659-dc8ac218a651",
+        "existing_active_hod_id": "ebec156f-3fff-42cf-8f55-611124579ae3",
+        "alias_uuid_duplicate_status": 409,
+        "alias_aids_duplicate_status": 409,
+        "alias_aiads_duplicate_status": 409,
+        "full_name_duplicate_status": 409,
+        "conflict_error_code": "ACTIVE_HOD_EXISTS"
+      }
+    },
+    {
+      "test_id": "TEST-BUG-04",
+      "bug_number": 4,
+      "title": "Authentication Token Refresh & Token Type Separation",
+      "result": "PASS",
+      "details": "Live authentication lifecycle verified. Login issues dual access/refresh tokens with HttpOnly SameSite=None Secure cookies. Protected endpoints accept access tokens and reject refresh tokens (401). Token refresh successfully rotates tokens via body and cookie. Empty/malformed refresh requests are safely rejected. Concurrent refresh deduplication is active in client bundle.",
+      "evidence": {
+        "login_status": 200,
+        "cookies_set": ["access_token", "refresh_token", "csrf_token"],
+        "token_type_claim_access": "access",
+        "token_type_claim_refresh": "refresh",
+        "protected_endpoint_with_refresh_token_status": 401,
+        "refresh_with_body_status": 200,
+        "refresh_with_cookie_status": 200,
+        "empty_refresh_status": 401,
+        "malformed_refresh_status": 401,
+        "logout_status": 200,
+        "refresh_deduplication_present": true
+      }
+    }
+  ],
+  "final_verdict": "PASS — ALL FOUR BUGS VERIFIED ON LIVE PRODUCTION"
+}

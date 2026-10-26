@@ -56,7 +56,7 @@ def run_document_pipeline(file_path: str, ip_record_id: str) -> dict[str, Any]:
         return {"status": "FAILURE", "error": str(e)}
 
 
-def _persist_orchestrator_result(ip_record_id: str, result):
+def _persist_orchestrator_result(ip_record_id: str, result: Any) -> None:
     session = get_session()
     try:
         ip_record = session.execute(select(IpRecord).where(IpRecord.id == ip_record_id)).scalar_one_or_none()
@@ -142,7 +142,7 @@ def _persist_orchestrator_result(ip_record_id: str, result):
         session.close()
 
 
-def _pipeline_has_blockers(result) -> bool:
+def _pipeline_has_blockers(result: Any) -> bool:
     """True when duplicate/conflict/identity signals must stop the workflow."""
     return any(
         (
@@ -157,7 +157,7 @@ def _pipeline_has_blockers(result) -> bool:
     )
 
 
-def _other_internal_user_ids_sync(session, ip_record) -> list[str]:
+def _other_internal_user_ids_sync(session: Any, ip_record: IpRecord) -> list[str]:
     """OTHER internal faculty for a record (uploader excluded, HODs excluded).
 
     Sync variant of the exact business rule for the pipeline persist step.
@@ -199,7 +199,7 @@ def _enum_safe_verification_status(status: str | None) -> str:
     return "VERIFICATION_REQUIRED"
 
 
-def _collapse_value(value):
+def _collapse_value(value: Any) -> Any:
     if isinstance(value, list):
         if not value:
             return None
@@ -212,7 +212,7 @@ def _collapse_value(value):
     return value
 
 
-def _as_grant_date(value):
+def _as_grant_date(value: Any) -> date | None:
     """BUG 7: coerce a pipeline grant-date value to a calendar date.
 
     The grant_date columns are DATE (migration 009): datetimes are
@@ -227,7 +227,7 @@ def _as_grant_date(value):
     return None
 
 
-def _coerce_record_datetime(value):
+def _coerce_record_datetime(value: Any) -> datetime | None:
     """Coerce an extracted date-ish value for a DateTime column.
 
     Bug 9: extraction may yield date objects, ISO strings, or (year
@@ -248,7 +248,7 @@ def _coerce_record_datetime(value):
     return None
 
 
-def _json_safe(value):
+def _json_safe(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: _json_safe(v) for k, v in value.items()}
     if isinstance(value, list):
@@ -258,7 +258,7 @@ def _json_safe(value):
     return value
 
 
-def _update_ip_record_from_agents(ip_record, result):
+def _update_ip_record_from_agents(ip_record: IpRecord, result: Any) -> None:
     session = get_session()
     try:
         for agent_output in result.agent_outputs:
@@ -333,7 +333,7 @@ def _update_ip_record_from_agents(ip_record, result):
         session.close()
 
 
-def _update_processing_jobs(ip_record_id: str, result):
+def _update_processing_jobs(ip_record_id: str, result: Any) -> None:
     session = get_session()
     try:
         for agent_output in result.agent_outputs:
@@ -358,7 +358,7 @@ def _update_processing_jobs(ip_record_id: str, result):
         session.close()
 
 
-def _update_processing_job_status(ip_record_id: str, status: str, error: str | None = None):
+def _update_processing_job_status(ip_record_id: str, status: str, error: str | None = None) -> None:
     session = get_session()
     try:
         job = session.execute(select(ProcessingJob).where(ProcessingJob.ip_record_id == ip_record_id, ProcessingJob.job_type == "orchestrator")).scalar_one_or_none()
@@ -375,7 +375,7 @@ def _update_processing_job_status(ip_record_id: str, status: str, error: str | N
         session.close()
 
 
-def _update_orchestrator_job_status(ip_record_id: str, result):
+def _update_orchestrator_job_status(ip_record_id: str, result: Any) -> None:
     if result.overall_status == "completed":
         status = "SUCCESS"
     elif result.overall_status in {"completed_with_errors", "completed_partial"}:
@@ -401,7 +401,7 @@ def _update_orchestrator_job_status(ip_record_id: str, result):
         session.close()
 
 
-def _create_verification_attempts(ip_record, result):
+def _create_verification_attempts(ip_record: IpRecord, result: Any) -> None:
     session = get_session()
     try:
         for agent_output in result.agent_outputs:
@@ -416,7 +416,7 @@ def _create_verification_attempts(ip_record, result):
         session.close()
 
 
-def _create_final_verification_attempt(ip_record, result):
+def _create_final_verification_attempt(ip_record: IpRecord, result: Any) -> None:
     """Persist the final verification decision as a VerificationAttempt and update MasterIpRecord."""
     session = get_session()
     try:
@@ -465,7 +465,7 @@ def _create_final_verification_attempt(ip_record, result):
         session.close()
 
 
-def _create_duplicate_cases(ip_record, result):
+def _create_duplicate_cases(ip_record: IpRecord, result: Any) -> None:
     session = get_session()
     try:
         for agent_output in result.agent_outputs:
@@ -531,7 +531,7 @@ def _create_duplicate_cases(ip_record, result):
         session.close()
 
 
-def _create_conflict_cases(ip_record, result):
+def _create_conflict_cases(ip_record: IpRecord, result: Any) -> None:
     session = get_session()
     try:
         for agent_output in result.agent_outputs:
@@ -546,7 +546,7 @@ def _create_conflict_cases(ip_record, result):
         session.close()
 
 
-def _extract_contributor_names(result) -> list[dict[str, Any]]:
+def _extract_contributor_names(result: Any) -> list[dict[str, Any]]:
     """Extract structured contributor entries from the OCRExtractionAgent.
 
     Returns a list of dicts with keys: name, designation, department, institution.
@@ -622,7 +622,7 @@ def _resolve_contributor_match(
     if not matched_entity:
         return None, None, "CONFIRMED_EXTERNAL", "EXTERNAL", True
 
-    best = matched_entity.get("best_match") or {}
+    best: dict[str, Any] = matched_entity.get("best_match") or {}
     if not isinstance(best, dict):
         best = {}
     matched_user_id = (
@@ -657,7 +657,7 @@ def _resolve_contributor_match(
         return None, None, "CONFIRMED_EXTERNAL", "EXTERNAL", True
 
 
-def _is_human_reviewed(contributor, session) -> bool:
+def _is_human_reviewed(contributor: IpContributor, session: Any) -> bool:
     """Determine whether an IpContributor record carries an explicit human review decision."""
     if getattr(contributor, "source", None) == "HUMAN_REVIEW":
         return True
@@ -674,7 +674,7 @@ def _is_human_reviewed(contributor, session) -> bool:
     return False
 
 
-def _create_contributors(ip_record, result):
+def _create_contributors(ip_record: IpRecord, result: Any) -> None:
     """Persist extracted contributors with INTERNAL/PROBABLE/EXTERNAL classification.
 
     Identity resolution results (FacultyIdentityResolutionAgent) are used to
@@ -861,7 +861,7 @@ def _create_contributors(ip_record, result):
         session.close()
 
 
-def _master_identifier_present(ip_record) -> bool:
+def _master_identifier_present(ip_record: IpRecord) -> bool:
     """Whether the record carries any canonical master-linking identifier."""
     return bool(
         ip_record.patent_number
@@ -870,7 +870,7 @@ def _master_identifier_present(ip_record) -> bool:
     )
 
 
-def _create_or_link_master_record(ip_record, result):
+def _create_or_link_master_record(ip_record: IpRecord, result: Any) -> None:
     """Create (or link to) a canonical MasterIpRecord for a verified identifier.
 
     A master record represents one underlying patent/design, deduplicated across
@@ -993,7 +993,7 @@ def _create_or_link_master_record(ip_record, result):
 
 
 
-def _capture_profile_snapshot(ip_record):
+def _capture_profile_snapshot(ip_record: IpRecord) -> None:
     """Capture an immutable faculty profile snapshot for historical preservation.
 
     Stores the faculty's name, department, and designation at the moment the IP
@@ -1049,7 +1049,7 @@ def _map_overall_status(overall_status: str) -> str:
     return {"completed": "COMPLETED", "completed_partial": "AWAITING_REVIEW", "completed_with_errors": "AWAITING_REVIEW", "human_review_required": "AWAITING_REVIEW", "failed": "FAILED"}.get(overall_status, "FAILED")
 
 
-def _derive_workflow_state(ip_record, result) -> str:
+def _derive_workflow_state(ip_record: IpRecord, result: Any) -> str:
     """Derive and advance the workflow state using the state machine.
 
     This consolidates verification, conflict, duplicate, and review signals into a

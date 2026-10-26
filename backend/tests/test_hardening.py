@@ -209,6 +209,9 @@ def ref_record():
     from sqlalchemy import select as _select
 
     async def _pick():
+        from app.models.base import Department, IpFile, IpRecord, User
+        from app.core.security import hash_password
+
         async with get_async_session_context() as db:
             rows = (
                 await db.execute(
@@ -231,7 +234,62 @@ def ref_record():
                     "filename": f.original_filename,
                     "historical_dept": bool(r.historical_department_id),
                 }
-        return None
+        # In disposable/clean-room databases, synthesize a test PDF fixture and record
+        root.mkdir(parents=True, exist_ok=True)
+        synthetic_key = "synthetic_test_cert.pdf"
+        synthetic_path = root / synthetic_key
+        synthetic_path.write_bytes(b"%PDF-1.4 synthetic test certificate\n%%EOF")
+
+        async with get_async_session_context() as db:
+            d = (await db.execute(_select(Department).where(Department.id == "dept-a"))).scalar_one_or_none()
+            if not d:
+                db.add(Department(id="dept-a", name="Department A", code="DEPTA", is_active=True))
+                await db.commit()
+            u = (await db.execute(_select(User).where(User.id == "fac-a-001"))).scalar_one_or_none()
+            if not u:
+                db.add(User(id="fac-a-001", email="fac-a-001@faculty.edu", full_name="Faculty A", role="faculty", faculty_id="FACA001", department_id="dept-a", password_hash=hash_password("Pass123!"), is_active=True))
+                await db.commit()
+            rec = (await db.execute(_select(IpRecord).where(IpRecord.id == "test-hardening-rec-001"))).scalar_one_or_none()
+            if not rec:
+                rec = IpRecord(
+                    id="test-hardening-rec-001",
+                    ip_type="PATENT",
+                    title="Synthetic Hardening Test Patent",
+                    patent_number="IN2024001",
+                    uploader_id="fac-a-001",
+                    department_id="dept-a",
+                    historical_department_id="dept-a",
+                    historical_department_name="Department A",
+                    workflow_state="VERIFICATION_PENDING",
+                    verification_status="UNVERIFIED",
+                    processing_status="COMPLETED",
+                    qr_data='[]',
+                )
+                db.add(rec)
+                await db.commit()
+            fl = (await db.execute(_select(IpFile).where(IpFile.id == "test-hardening-file-001"))).scalar_one_or_none()
+            if not fl:
+                fl = IpFile(
+                    id="test-hardening-file-001",
+                    ip_record_id=rec.id,
+                    uploaded_by="fac-a-001",
+                    storage_key=synthetic_key,
+                    original_filename=synthetic_key,
+                    file_extension=".pdf",
+                    file_size_bytes=len(b"%PDF-1.4 synthetic test certificate\n%%EOF"),
+                    mime_type="application/pdf",
+                    upload_status="COMPLETED",
+                )
+                db.add(fl)
+                await db.commit()
+            return {
+                "record_id": rec.id,
+                "uploader_id": rec.uploader_id,
+                "department_id": rec.department_id,
+                "file_id": fl.id,
+                "filename": fl.original_filename,
+                "historical_dept": bool(rec.historical_department_id),
+            }
 
     return asyncio.run(_pick())
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import JSONResponse
@@ -33,9 +34,9 @@ async def upload_certificate(
     request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_session),
-):
+) -> JSONResponse:
     """Upload a patent/design certificate file."""
     client_ip = request.client.host if request.client else "unknown"
     # E2E_TEST override: multiply upload rate limit by 100x for concurrent testing.
@@ -213,7 +214,7 @@ async def upload_certificate(
         background=background_tasks,
     )
 @router.get("/config", status_code=status.HTTP_200_OK)
-async def upload_config(current_user: dict = Depends(get_current_user)):
+async def upload_config(current_user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     """Effective upload configuration for all authenticated roles.
 
     Bug 12: the frontend must render the *configured* limit
@@ -235,9 +236,9 @@ async def upload_config(current_user: dict = Depends(get_current_user)):
 @router.get("/{ip_record_id}/status", status_code=status.HTTP_200_OK)
 async def get_upload_status(
     ip_record_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_session),
-):
+) -> dict[str, Any]:
     """Get the processing status of an uploaded certificate."""
     user_id = current_user.get("id")
     user_role = current_user.get("role", "faculty")

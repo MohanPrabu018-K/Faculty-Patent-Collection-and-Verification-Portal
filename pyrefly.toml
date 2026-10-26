@@ -1,0 +1,14 @@
+preset = "default"
+python-version = "3.12"
+python-platform = "windows"
+python-interpreter-path = "backend/.venv/Scripts/python.exe"
+search-path = ["backend"]
+site-package-path = ["backend/.venv/Lib/site-packages"]
+project-includes = ["backend"]
+
+[errors]
+"unannotated-return" = false
+"unannotated-parameter" = false
+"missing-type-argument" = false
+"empty-container" = false
+"unnecessary-cast" = false

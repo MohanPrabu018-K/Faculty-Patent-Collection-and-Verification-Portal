@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -38,7 +38,7 @@ def create_scheduler() -> AsyncIOScheduler:
 
 
 @asynccontextmanager
-async def lifespan_scheduler(app) -> AsyncGenerator[None, None]:
+async def lifespan_scheduler(app: Any) -> AsyncGenerator[None, None]:
     """
     FastAPI lifespan handler for scheduler and performance cache startup/shutdown.
     
@@ -191,8 +191,8 @@ async def _run_pipeline_recovery_job() -> None:
 
     if summary.get("requeued") or summary.get("skipped_missing_file"):
         logger.info(
-            "Pipeline recovery requeued stranded jobs",
-            stuck_found=summary.get("stuck_found"),
-            requeued=len(summary.get("requeued") or []),
-            skipped_missing_file=len(summary.get("skipped_missing_file") or []),
+            "Pipeline recovery requeued stranded jobs (stuck_found=%s, requeued=%s, skipped_missing_file=%s)",
+            summary.get("stuck_found"),
+            len(summary.get("requeued") or []),
+            len(summary.get("skipped_missing_file") or []),
         )

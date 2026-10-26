@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy import func, inspect as sa_inspect, or_, select, delete
@@ -89,7 +90,7 @@ async def _resolve_department(
     """
     if not identifier:
         return None
-    raw = str(identifier).strip()
+    raw = identifier.strip()
     if not raw:
         return None
 
@@ -137,7 +138,7 @@ async def _resolve_department(
     return None
 
 
-async def _record_display_map(db: AsyncSession, record_ids: list[str]) -> dict[str, dict]:
+async def _record_display_map(db: AsyncSession, record_ids: list[str]) -> dict[str, dict[str, Any]]:
     """User-facing display info for records (Bugs 4+5).
 
     {record_id: {title, number, filename, display_name}} from persisted data
@@ -158,7 +159,7 @@ async def _record_display_map(db: AsyncSession, record_ids: list[str]) -> dict[s
     first_file: dict[str, str] = {}
     for f in files:
         first_file.setdefault(f.ip_record_id, f.original_filename)
-    out: dict[str, dict] = {}
+    out: dict[str, dict[str, Any]] = {}
     for r in recs:
         number = r.patent_number or r.design_number or r.application_number or r.serial_number
         out[r.id] = {
@@ -194,7 +195,7 @@ def _validate_enum_filter(field_name: str, value: str | None, choices: tuple[str
 _SENSITIVE_COLUMNS = {"password_hash"}
 
 
-def _model_to_dict(obj, exclude: set[str] | None = None) -> dict:
+def _model_to_dict(obj: Any, exclude: set[str] | None = None) -> dict[str, Any]:
     """Flatten one ORM instance into a flat JSON-serializable dict of its mapped
     columns.
 
@@ -205,7 +206,7 @@ def _model_to_dict(obj, exclude: set[str] | None = None) -> dict:
     if obj is None:
         return {}
     skip = _SENSITIVE_COLUMNS | (exclude or set())
-    out: dict = {}
+    out: dict[str, Any] = {}
     for attr in sa_inspect(obj).mapper.column_attrs:
         if attr.key in skip:
             continue
@@ -214,12 +215,12 @@ def _model_to_dict(obj, exclude: set[str] | None = None) -> dict:
     return out
 
 
-async def _serialize_count(session: AsyncSession, query):
+async def _serialize_count(session: AsyncSession, query: Any) -> int:
     result = await session.execute(query)
     return result.scalar_one()
 
 
-def _parse_datetime(value):
+def _parse_datetime(value: Any) -> datetime | None:
     """Parse an ISO-8601 date/datetime string, returning None for empty values."""
     if not value:
         return None
@@ -232,7 +233,7 @@ def _parse_datetime(value):
 
 
 @router.get("/dashboard", status_code=status.HTTP_200_OK)
-async def get_admin_dashboard(current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def get_admin_dashboard(current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     # Consolidate user counts into two parallel queries instead of 4 sequential ones.
     user_q = await db.execute(
         select(
@@ -297,13 +298,13 @@ async def get_admin_dashboard(current_user: dict = Depends(get_current_user), db
 
 
 @router.get("/dashboard/activity", status_code=status.HTTP_200_OK)
-async def get_recent_activity(current_user: dict = Depends(get_current_user), limit: int = Query(50, ge=1, le=200), db: AsyncSession = Depends(get_async_session)):
+async def get_recent_activity(current_user: dict[str, Any] = Depends(get_current_user), limit: int = Query(50, ge=1, le=200), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     rows = await db.execute(select(Notification).order_by(Notification.created_at.desc()).limit(limit))
     return {"activities": [_model_to_dict(row) for row in rows.scalars().all()], "count": limit}
 
 
 @router.get("/queues/verifications", status_code=status.HTTP_200_OK)
-async def get_verification_queue(current_user: dict = Depends(get_current_user), status: str | None = Query(None), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)):
+async def get_verification_queue(current_user: dict[str, Any] = Depends(get_current_user), status: str | None = Query(None), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     offset, limit = _page_slice(page, per_page)
     query = select(VerificationAttempt).order_by(VerificationAttempt.created_at.desc())
     count_query = select(func.count()).select_from(VerificationAttempt)
@@ -316,7 +317,7 @@ async def get_verification_queue(current_user: dict = Depends(get_current_user),
 
 
 @router.get("/queues/conflicts", status_code=status.HTTP_200_OK)
-async def get_conflict_queue(current_user: dict = Depends(get_current_user), conflict_type: str | None = Query(None), priority: str | None = Query(None), status: str | None = Query(None), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)):
+async def get_conflict_queue(current_user: dict[str, Any] = Depends(get_current_user), conflict_type: str | None = Query(None), priority: str | None = Query(None), status: str | None = Query(None), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     offset, limit = _page_slice(page, per_page)
     query = select(ConflictCase).order_by(ConflictCase.created_at.desc())
     count_query = select(func.count()).select_from(ConflictCase)
@@ -332,7 +333,7 @@ async def get_conflict_queue(current_user: dict = Depends(get_current_user), con
 
 
 @router.get("/queues/associations", status_code=status.HTTP_200_OK)
-async def get_association_queue(current_user: dict = Depends(get_current_user), status: str | None = Query(None), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)):
+async def get_association_queue(current_user: dict[str, Any] = Depends(get_current_user), status: str | None = Query(None), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     offset, limit = _page_slice(page, per_page)
     query = select(AssociationRequest).order_by(AssociationRequest.created_at.desc())
     count_query = select(func.count()).select_from(AssociationRequest)
@@ -345,7 +346,7 @@ async def get_association_queue(current_user: dict = Depends(get_current_user), 
 
 
 @router.get("/faculty", status_code=status.HTTP_200_OK)
-async def list_faculty(current_user: dict = Depends(get_current_user), search: str | None = Query(None), department_id: str | None = Query(None), designation_id: str | None = Query(None), is_active: bool | None = Query(None), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)):
+async def list_faculty(current_user: dict[str, Any] = Depends(get_current_user), search: str | None = Query(None), department_id: str | None = Query(None), designation_id: str | None = Query(None), is_active: bool | None = Query(None), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     offset, limit = _page_slice(page, per_page)
     query = select(User).where(User.role.in_(["faculty", "hod_admin"]))
     count_query = select(func.count()).select_from(User).where(User.role.in_(["faculty", "hod_admin"]))
@@ -406,7 +407,7 @@ async def list_faculty(current_user: dict = Depends(get_current_user), search: s
 
 
 @router.post("/faculty", status_code=status.HTTP_201_CREATED)
-async def create_faculty(request: Request, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def create_faculty(request: Request, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     body = await request.json()
     from app.core.security import generate_temporary_password, hash_password
 
@@ -471,7 +472,7 @@ async def create_faculty(request: Request, current_user: dict = Depends(get_curr
         raise
     await db.refresh(user)
     log_audit(actor=current_user.get("id"), action="FACULTY_CREATED", target_type="user", target_id=user.id, status="success", after={"email": user.email, "faculty_id": user.faculty_id})
-    response_payload: dict = {"id": user.id, "email": user.email, "faculty_id": user.faculty_id, "message": "Faculty created"}
+    response_payload: dict[str, Any] = {"id": user.id, "email": user.email, "faculty_id": user.faculty_id, "message": "Faculty created"}
     if temporary_password is not None:
         response_payload["temporary_password"] = temporary_password
         response_payload["temporary_password_generated"] = True
@@ -479,7 +480,7 @@ async def create_faculty(request: Request, current_user: dict = Depends(get_curr
 
 
 @router.get("/faculty/{faculty_id}", status_code=status.HTTP_200_OK)
-async def get_faculty(faculty_id: str, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def get_faculty(faculty_id: str, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     result = await db.execute(
         select(User, Department.name, Designation.name)
         .outerjoin(Department, User.department_id == Department.id)
@@ -508,7 +509,7 @@ async def get_faculty(faculty_id: str, current_user: dict = Depends(get_current_
 
 
 @router.patch("/faculty/{faculty_id}", status_code=status.HTTP_200_OK)
-async def update_faculty(faculty_id: str, request: Request, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def update_faculty(faculty_id: str, request: Request, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     body = await request.json()
     result = await db.execute(select(User).where(User.id == faculty_id, User.role.in_(["faculty", "hod_admin"])))
     user = result.scalar_one_or_none()
@@ -562,7 +563,7 @@ async def update_faculty(faculty_id: str, request: Request, current_user: dict =
 
 
 @router.delete("/faculty/{faculty_id}", status_code=status.HTTP_200_OK)
-async def delete_faculty(faculty_id: str, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def delete_faculty(faculty_id: str, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     """Delete a faculty/HOD account with safe relationship handling (item 6).
 
     Refuses (409) when the account owns uploaded records or participates in
@@ -641,7 +642,7 @@ async def delete_faculty(faculty_id: str, current_user: dict = Depends(get_curre
 
 
 @router.post("/faculty/{faculty_id}/activate", status_code=status.HTTP_200_OK)
-async def activate_faculty(faculty_id: str, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def activate_faculty(faculty_id: str, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     # BUG 6 root-cause fix: activation previously skipped the single-HOD
     # check, so an HOD created inactive could be activated alongside an
     # existing active HOD. Activation is now gated identically to creation.
@@ -668,7 +669,7 @@ async def activate_faculty(faculty_id: str, current_user: dict = Depends(get_cur
 
 
 @router.post("/faculty/{faculty_id}/deactivate", status_code=status.HTTP_200_OK)
-async def deactivate_faculty(faculty_id: str, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def deactivate_faculty(faculty_id: str, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     user = (await db.execute(select(User).where(User.id == faculty_id, User.role.in_(["faculty", "hod_admin"])))).scalar_one_or_none()
     if not user:
         raise NotFoundError("Faculty", faculty_id)
@@ -680,7 +681,7 @@ async def deactivate_faculty(faculty_id: str, current_user: dict = Depends(get_c
 
 
 @router.post("/faculty/{faculty_id}/reset-credentials", status_code=status.HTTP_200_OK)
-async def reset_faculty_credentials(faculty_id: str, request: Request, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def reset_faculty_credentials(faculty_id: str, request: Request, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
     new_password = body.get("password") or str(uuid.uuid4())
     from app.core.security import hash_password
@@ -695,7 +696,7 @@ async def reset_faculty_credentials(faculty_id: str, request: Request, current_u
 
 
 @router.get("/departments", status_code=status.HTTP_200_OK)
-async def list_departments(current_user: dict = Depends(get_current_user), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)):
+async def list_departments(current_user: dict[str, Any] = Depends(get_current_user), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     offset, limit = _page_slice(page, per_page)
     total = await _serialize_count(db, select(func.count()).select_from(Department))
     rows = await db.execute(select(Department).order_by(Department.name).offset(offset).limit(limit))
@@ -703,7 +704,7 @@ async def list_departments(current_user: dict = Depends(get_current_user), page:
 
 
 @router.post("/departments", status_code=status.HTTP_201_CREATED)
-async def create_department(request: Request, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def create_department(request: Request, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     body = await request.json()
     dept = Department(id=str(uuid.uuid4()), name=body["name"], code=body.get("code"), is_active=body.get("is_active", True))
     db.add(dept)
@@ -712,7 +713,7 @@ async def create_department(request: Request, current_user: dict = Depends(get_c
 
 
 @router.patch("/departments/{dept_id}", status_code=status.HTTP_200_OK)
-async def update_department(dept_id: str, request: Request, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def update_department(dept_id: str, request: Request, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     body = await request.json()
     result = await db.execute(select(Department).where(Department.id == dept_id))
     dept = result.scalar_one_or_none()
@@ -726,14 +727,14 @@ async def update_department(dept_id: str, request: Request, current_user: dict =
 
 
 @router.delete("/departments/{dept_id}", status_code=status.HTTP_200_OK)
-async def delete_department(dept_id: str, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def delete_department(dept_id: str, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     await db.execute(delete(Department).where(Department.id == dept_id))
     await db.commit()
     return {"id": dept_id, "deleted": True}
 
 
 @router.get("/designations", status_code=status.HTTP_200_OK)
-async def list_designations(current_user: dict = Depends(get_current_user), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)):
+async def list_designations(current_user: dict[str, Any] = Depends(get_current_user), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     offset, limit = _page_slice(page, per_page)
     total = await _serialize_count(db, select(func.count()).select_from(Designation))
     rows = await db.execute(select(Designation).order_by(Designation.title).offset(offset).limit(limit))
@@ -741,7 +742,7 @@ async def list_designations(current_user: dict = Depends(get_current_user), page
 
 
 @router.post("/designations", status_code=status.HTTP_201_CREATED)
-async def create_designation(request: Request, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def create_designation(request: Request, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     body = await request.json()
     desg = Designation(id=str(uuid.uuid4()), title=body["title"], level=body.get("level"), is_active=body.get("is_active", True))
     db.add(desg)
@@ -750,7 +751,7 @@ async def create_designation(request: Request, current_user: dict = Depends(get_
 
 
 @router.patch("/designations/{desg_id}", status_code=status.HTTP_200_OK)
-async def update_designation(desg_id: str, request: Request, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def update_designation(desg_id: str, request: Request, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     body = await request.json()
     result = await db.execute(select(Designation).where(Designation.id == desg_id))
     desg = result.scalar_one_or_none()
@@ -764,14 +765,14 @@ async def update_designation(desg_id: str, request: Request, current_user: dict 
 
 
 @router.delete("/designations/{desg_id}", status_code=status.HTTP_200_OK)
-async def delete_designation(desg_id: str, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def delete_designation(desg_id: str, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     await db.execute(delete(Designation).where(Designation.id == desg_id))
     await db.commit()
     return {"id": desg_id, "deleted": True}
 
 
 @router.get("/settings", status_code=status.HTTP_200_OK)
-async def admin_settings(current_user: dict = Depends(get_current_user)):
+async def admin_settings(current_user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     """Read-only view of the portal's operational configuration.
 
     Secrets (DB URL, JWT secret, OCR.Space API key) are never returned — only
@@ -851,7 +852,7 @@ async def admin_settings(current_user: dict = Depends(get_current_user)):
 
 
 @router.patch("/settings", status_code=status.HTTP_200_OK)
-async def admin_update_settings(request: Request, current_user: dict = Depends(get_current_user)):
+async def admin_update_settings(request: Request, current_user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     from app.core.runtime_settings import MAX_UPLOAD_MB, MIN_UPLOAD_MB, get_max_upload_mb, set_max_upload_mb
     from app.core.config import upload_settings as _us
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
@@ -871,7 +872,7 @@ async def admin_update_settings(request: Request, current_user: dict = Depends(g
 
 @router.get("/ip-records", status_code=status.HTTP_200_OK)
 async def admin_list_ip_records(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     search: str | None = Query(None, description="search title/numbers/applicant/faculty"),
     ip_type: str | None = Query(None),
     verification_status: str | None = Query(None),
@@ -888,7 +889,7 @@ async def admin_list_ip_records(
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_async_session),
-):
+) -> dict[str, Any]:
     offset, limit = _page_slice(page, per_page)
     _validate_enum_filter("ip_type", ip_type, IP_TYPE_CHOICES)
     _validate_enum_filter("verification_status", verification_status, VERIFICATION_STATUS_CHOICES)
@@ -928,7 +929,7 @@ async def admin_list_ip_records(
         # Date-only input (YYYY-MM-DD) is treated as inclusive (whole day).
         parsed = _parse_datetime(date_to)
         if parsed:
-            if "T" not in str(date_to):
+            if "T" not in date_to:
                 parsed = parsed.replace(hour=23, minute=59, second=59, microsecond=999999)
             query = query.where(IpRecord.created_at <= parsed)
             count_query = count_query.where(IpRecord.created_at <= parsed)
@@ -976,7 +977,7 @@ async def admin_list_ip_records(
     records = (await db.execute(query.order_by(IpRecord.created_at.desc()).offset(offset).limit(limit))).scalars().all()
 
     uploader_ids = {r.uploader_id for r in records if r.uploader_id}
-    name_map = {}
+    name_map: dict[str, tuple[str, str | None]] = {}
     if uploader_ids:
         name_map = {
             u.id: (u.full_name, u.faculty_id)
@@ -997,7 +998,7 @@ async def admin_list_ip_records(
 
 
 @router.get("/ip-records/{record_id}", status_code=status.HTTP_200_OK)
-async def admin_get_ip_record(record_id: str, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def admin_get_ip_record(record_id: str, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     result = await db.execute(select(IpRecord).where(IpRecord.id == record_id))
     record = result.scalar_one_or_none()
     if not record:
@@ -1015,7 +1016,7 @@ async def admin_get_ip_record(record_id: str, current_user: dict = Depends(get_c
 
 
 @router.patch("/ip-records/{record_id}", status_code=status.HTTP_200_OK)
-async def admin_update_ip_record(record_id: str, request: Request, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def admin_update_ip_record(record_id: str, request: Request, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     body = await request.json()
     result = await db.execute(select(IpRecord).where(IpRecord.id == record_id))
     record = result.scalar_one_or_none()
@@ -1042,9 +1043,9 @@ async def admin_update_ip_record(record_id: str, request: Request, current_user:
 async def admin_grant_patent(
     record_id: str,
     request: Request,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_session),
-):
+) -> dict[str, Any]:
     """Grant a patent (simplified business rule: Super Admin's ONLY decision).
 
     All pre-grant gates are validated server-side, never trusting the
@@ -1162,7 +1163,7 @@ async def admin_grant_patent(
 
 
 @router.get("/duplicates", status_code=status.HTTP_200_OK)
-async def admin_list_duplicates(current_user: dict = Depends(get_current_user), status: str | None = Query(None), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)):
+async def admin_list_duplicates(current_user: dict[str, Any] = Depends(get_current_user), status: str | None = Query(None), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     offset, limit = _page_slice(page, per_page)
     query = select(DuplicateCase)
     count_query = select(func.count()).select_from(DuplicateCase)
@@ -1186,7 +1187,7 @@ async def admin_list_duplicates(current_user: dict = Depends(get_current_user), 
 
 
 @router.post("/duplicates/{case_id}/resolve", status_code=status.HTTP_200_OK)
-async def admin_resolve_duplicate(case_id: str, request: Request, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def admin_resolve_duplicate(case_id: str, request: Request, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     body = await request.json()
     result = await db.execute(select(DuplicateCase).where(DuplicateCase.id == case_id))
     case = result.scalar_one_or_none()
@@ -1202,7 +1203,7 @@ async def admin_resolve_duplicate(case_id: str, request: Request, current_user: 
 
 
 @router.get("/conflicts", status_code=status.HTTP_200_OK)
-async def admin_list_conflicts(current_user: dict = Depends(get_current_user), conflict_type: str | None = Query(None), status: str | None = Query(None), priority: str | None = Query(None), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)):
+async def admin_list_conflicts(current_user: dict[str, Any] = Depends(get_current_user), conflict_type: str | None = Query(None), status: str | None = Query(None), priority: str | None = Query(None), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     offset, limit = _page_slice(page, per_page)
     query = select(ConflictCase)
     count_query = select(func.count()).select_from(ConflictCase)
@@ -1226,7 +1227,7 @@ async def admin_list_conflicts(current_user: dict = Depends(get_current_user), c
 
 
 @router.post("/conflicts/{conflict_id}/resolve", status_code=status.HTTP_200_OK)
-async def admin_resolve_conflict(conflict_id: str, request: Request, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def admin_resolve_conflict(conflict_id: str, request: Request, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     body = await request.json()
     result = await db.execute(select(ConflictCase).where(ConflictCase.id == conflict_id))
     case = result.scalar_one_or_none()
@@ -1241,7 +1242,7 @@ async def admin_resolve_conflict(conflict_id: str, request: Request, current_use
 
 
 @router.post("/conflicts/{conflict_id}/assign", status_code=status.HTTP_200_OK)
-async def admin_assign_conflict(conflict_id: str, request: Request, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def admin_assign_conflict(conflict_id: str, request: Request, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     body = await request.json()
     result = await db.execute(select(ConflictCase).where(ConflictCase.id == conflict_id))
     case = result.scalar_one_or_none()
@@ -1255,7 +1256,7 @@ async def admin_assign_conflict(conflict_id: str, request: Request, current_user
 
 
 @router.get("/associations", status_code=status.HTTP_200_OK)
-async def admin_list_associations(current_user: dict = Depends(get_current_user), status: str | None = Query(None), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)):
+async def admin_list_associations(current_user: dict[str, Any] = Depends(get_current_user), status: str | None = Query(None), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     offset, limit = _page_slice(page, per_page)
     query = select(AssociationRequest)
     count_query = select(func.count()).select_from(AssociationRequest)
@@ -1290,7 +1291,7 @@ async def admin_list_associations(current_user: dict = Depends(get_current_user)
     for a in assocs:
         row = _model_to_dict(a)
 
-        def _uname(uid):
+        def _uname(uid: str | None) -> dict[str, str | None]:
             u = umap.get(uid) if uid else None
             return {
                 "id": uid,
@@ -1307,12 +1308,12 @@ async def admin_list_associations(current_user: dict = Depends(get_current_user)
 
 @router.get("/reports/pending-associations", status_code=status.HTTP_200_OK)
 async def admin_pending_associations_report(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     status: str | None = Query(None, description="association status; defaults to PENDING"),
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_async_session),
-):
+) -> dict[str, Any]:
     """Enriched pending-association report: faculty ↔ IP record pairs awaiting action.
 
     Dynamically generated from AssociationRequest rows (never hardcoded):
@@ -1327,14 +1328,14 @@ async def admin_pending_associations_report(
     rows = (await db.execute(base.order_by(AssociationRequest.created_at.desc()).offset(offset).limit(limit))).scalars().all()
 
     user_ids = {r.requesting_faculty_id for r in rows if r.requesting_faculty_id} | {r.target_faculty_id for r in rows if r.target_faculty_id} | {r.requester_id for r in rows if r.requester_id} | {r.recipient_id for r in rows if r.recipient_id}
-    umap = {}
+    umap: dict[str, User] = {}
     if user_ids:
         umap = {u.id: u for u in (await db.execute(select(User).where(User.id.in_(list(user_ids))))).scalars().all()}
     rec_ids = [r.ip_record_id for r in rows if r.ip_record_id]
     recs = (await db.execute(select(IpRecord).where(IpRecord.id.in_(rec_ids)))).scalars().all() if rec_ids else []
     rmap = {r.id: r for r in recs}
 
-    def _uname(uid: str | None):
+    def _uname(uid: str | None) -> dict[str, str | None]:
         u = umap.get(uid) if uid else None
         return {"id": uid, "full_name": u.full_name if u else None, "email": u.email if u else None, "faculty_id": u.faculty_id if u else None}
 
@@ -1371,7 +1372,7 @@ async def admin_pending_associations_report(
 
 
 @router.get("/verifications", status_code=status.HTTP_200_OK)
-async def admin_list_verifications(current_user: dict = Depends(get_current_user), status: str | None = Query(None), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)):
+async def admin_list_verifications(current_user: dict[str, Any] = Depends(get_current_user), status: str | None = Query(None), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     offset, limit = _page_slice(page, per_page)
     query = select(VerificationAttempt)
     count_query = select(func.count()).select_from(VerificationAttempt)
@@ -1392,7 +1393,7 @@ async def admin_list_verifications(current_user: dict = Depends(get_current_user
 
 
 @router.get("/master-ip-records", status_code=status.HTTP_200_OK)
-async def admin_list_master_records(current_user: dict = Depends(get_current_user), search: str | None = Query(None, description="search title/numbers"), ip_type: str | None = Query(None), workflow_state: str | None = Query(None), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)):
+async def admin_list_master_records(current_user: dict[str, Any] = Depends(get_current_user), search: str | None = Query(None, description="search title/numbers"), ip_type: str | None = Query(None), workflow_state: str | None = Query(None), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     offset, limit = _page_slice(page, per_page)
     query = select(MasterIpRecord)
     count_query = select(func.count()).select_from(MasterIpRecord)
@@ -1418,7 +1419,7 @@ async def admin_list_master_records(current_user: dict = Depends(get_current_use
     # Batch-fetch contributors and linked counts for all master records
     # instead of N×2 individual queries (N+1 optimization).
     master_ids = [m.id for m in rows]
-    contribs_map: dict[str, list] = {}
+    contribs_map: dict[str, list[dict[str, Any]]] = {}
     linked_map: dict[str, int] = {}
     if master_ids:
         all_contribs = (await db.execute(

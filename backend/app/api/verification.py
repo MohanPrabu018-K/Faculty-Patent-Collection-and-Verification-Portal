@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, Query, Request, status
@@ -31,8 +32,8 @@ router = APIRouter(prefix="/api/v1/verification", tags=["verification"])
 
 @router.post("/pipeline/requeue-stalled", status_code=status.HTTP_200_OK)
 async def requeue_stalled_pipelines(
-    current_user: dict = Depends(require_super_admin),
-):
+    current_user: dict[str, Any] = Depends(require_super_admin),
+) -> dict[str, Any]:
     """Re-drive orchestrator jobs stranded at QUEUED/PROCESSING.
 
     The upload path schedules the 11-agent pipeline with FastAPI
@@ -78,7 +79,7 @@ async def requeue_stalled_pipelines(
 
 
 @router.get("/sources", status_code=status.HTTP_200_OK)
-async def list_verification_sources(current_user: dict = Depends(get_current_user), country: str | None = Query(None), ip_type: str | None = Query(None)):
+async def list_verification_sources(current_user: dict[str, Any] = Depends(get_current_user), country: str | None = Query(None), ip_type: str | None = Query(None)) -> dict[str, Any]:
     registry = get_verification_registry()
     sources = []
     for adapter in registry._adapters.values():
@@ -88,14 +89,14 @@ async def list_verification_sources(current_user: dict = Depends(get_current_use
 
 
 @router.post("/verify", status_code=status.HTTP_200_OK)
-async def verify_ip_record(request: Request, current_user: dict = Depends(get_current_user), ip_type: str = Query(...), identifier: str = Query(...), title: str | None = Query(None), applicant: str | None = Query(None), inventor: str | None = Query(None), filing_date: str | None = Query(None), country: str | None = Query(None), source: str | None = Query(None), db: AsyncSession = Depends(get_async_session)):
+async def verify_ip_record(request: Request, current_user: dict[str, Any] = Depends(get_current_user), ip_type: str = Query(...), identifier: str = Query(...), title: str | None = Query(None), applicant: str | None = Query(None), inventor: str | None = Query(None), filing_date: str | None = Query(None), country: str | None = Query(None), source: str | None = Query(None), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     result = await verify_patent_or_design(ip_type=ip_type, identifier=identifier, title=title, applicant=applicant, inventor=inventor, filing_date=filing_date, country=country, source=source)
     log_audit(actor=current_user.get("id"), action="VERIFICATION_ATTEMPT", target_type="ip_record", target_id=identifier, status="completed" if result.success else "failed", extra={"source": result.source, "status": result.status, "confidence": result.confidence})
     return {"identifier": identifier, "ip_type": ip_type, "status": result.status, "source": result.source, "confidence": result.confidence, "matched_data": result.matched_data, "raw_response": result.raw_response, "error": result.error, "verification_time_ms": result.verification_time_ms}
 
 
 @router.post("/initiate/{record_id}", status_code=status.HTTP_200_OK)
-async def initiate_verification(request: Request, record_id: str, current_user: dict = Depends(get_current_user), source: str | None = Query(None), db: AsyncSession = Depends(get_async_session)):
+async def initiate_verification(request: Request, record_id: str, current_user: dict[str, Any] = Depends(get_current_user), source: str | None = Query(None), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     body = await request.json()
     service = VerificationService()
     result = await service.initiate_verification(ip_record_id=record_id, ip_type=body.get("ip_type", "PATENT"), identifier=body.get("identifier", ""), title=body.get("title"), applicant=body.get("applicant"), inventor=body.get("inventor"), filing_date=body.get("filing_date"), country=body.get("country"), requested_by=current_user.get("id"))
@@ -103,7 +104,7 @@ async def initiate_verification(request: Request, record_id: str, current_user: 
 
 
 @router.get("/attempts", status_code=status.HTTP_200_OK)
-async def list_verification_attempts(current_user: dict = Depends(get_current_user), record_id: str | None = Query(None), source: str | None = Query(None), status: str | None = Query(None), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)):
+async def list_verification_attempts(current_user: dict[str, Any] = Depends(get_current_user), record_id: str | None = Query(None), source: str | None = Query(None), status: str | None = Query(None), page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     query = select(VerificationAttempt)
     if record_id:
         query = query.where(VerificationAttempt.ip_record_id == record_id)
@@ -116,7 +117,7 @@ async def list_verification_attempts(current_user: dict = Depends(get_current_us
     return {"attempts": [_attempt_to_dict(a) for a in attempts], "count": len(attempts), "page": page, "per_page": per_page}
 
 
-def _attempt_to_dict(a: VerificationAttempt) -> dict:
+def _attempt_to_dict(a: VerificationAttempt) -> dict[str, Any]:
     """Flatten one VerificationAttempt into JSON-serializable columns.
 
     ``select(Model)`` rows expose the instance under the model key, so the
@@ -126,7 +127,7 @@ def _attempt_to_dict(a: VerificationAttempt) -> dict:
     """
     from sqlalchemy import inspect as sa_inspect
 
-    out: dict = {}
+    out: dict[str, Any] = {}
     for attr in sa_inspect(a).mapper.column_attrs:
         value = getattr(a, attr.key)
         out[attr.key] = value.isoformat() if hasattr(value, "isoformat") else value
@@ -142,7 +143,7 @@ def _enum_safe_verification_status(status: str | None) -> str:
 
 
 @router.get("/attempts/{attempt_id}", status_code=status.HTTP_200_OK)
-async def get_verification_attempt(attempt_id: str, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def get_verification_attempt(attempt_id: str, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     attempt = (await db.execute(select(VerificationAttempt).where(VerificationAttempt.id == attempt_id))).scalar_one_or_none()
     if not attempt:
         raise NotFoundError("Verification attempt", attempt_id)
@@ -150,7 +151,7 @@ async def get_verification_attempt(attempt_id: str, current_user: dict = Depends
 
 
 @router.post("/attempts/{attempt_id}/retry", status_code=status.HTTP_200_OK)
-async def retry_verification(attempt_id: str, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def retry_verification(attempt_id: str, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     """Re-run automated official verification for the attempt's record.
 
     The previous implementation only bumped ``attempt_number`` and reset the
@@ -371,7 +372,7 @@ async def _pending_internal_approvals(db: AsyncSession, record: IpRecord) -> lis
     return pending
 
 
-async def _approval_summary(db: AsyncSession, record: IpRecord) -> dict:
+async def _approval_summary(db: AsyncSession, record: IpRecord) -> dict[str, Any]:
     """Machine-readable faculty-approval progress for 409s and the HOD UI.
 
     {pending_approvals, pending_count, required_count, accepted_count,
@@ -394,7 +395,7 @@ async def _approval_summary(db: AsyncSession, record: IpRecord) -> dict:
     }
 
 
-def _institutional_to_dict(a: VerificationAttempt) -> dict:
+def _institutional_to_dict(a: VerificationAttempt) -> dict[str, Any]:
     ev = a.evidence or {}
     return {
         "id": a.id,
@@ -412,7 +413,7 @@ def _institutional_to_dict(a: VerificationAttempt) -> dict:
 
 
 @router.get("/institutional/{record_id}", status_code=status.HTTP_200_OK)
-async def list_institutional_verifications(record_id: str, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def list_institutional_verifications(record_id: str, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     role = current_user.get("role", "")
     record = (await db.execute(select(IpRecord).where(IpRecord.id == record_id))).scalar_one_or_none()
     if not record:
@@ -476,7 +477,7 @@ async def list_institutional_verifications(record_id: str, current_user: dict = 
 
 
 @router.post("/institutional/{record_id}", status_code=status.HTTP_200_OK)
-async def submit_institutional_verification(record_id: str, request: Request, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
+async def submit_institutional_verification(record_id: str, request: Request, current_user: dict[str, Any] = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)) -> dict[str, Any]:
     """Record a human institutional verification decision (Super Admin only).
 
     This is the authorized fallback when automated official verification is
@@ -657,7 +658,7 @@ async def submit_institutional_verification(record_id: str, request: Request, cu
     }
 
 
-async def _reevaluate_final_after_institutional(db: AsyncSession, record: IpRecord, hod_user: dict, decided_at: str) -> tuple[str, list[str]]:
+async def _reevaluate_final_after_institutional(db: AsyncSession, record: IpRecord, hod_user: dict[str, Any], decided_at: str) -> tuple[str, list[str]]:
     """Apply the existing final-verification gate after an HOD manual check.
 
     Mirrors the production FinalVerificationAgent conditions without weakening

@@ -67,3 +67,26 @@ testpaths = ["tests"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
+
+[tool.pyrefly]
+preset = "default"
+python-version = "3.12"
+python-platform = "windows"
+python-interpreter-path = "backend/.venv/Scripts/python.exe"
+search-path = ["backend"]
+site-package-path = ["backend/.venv/Lib/site-packages"]
+project-includes = ["backend"]
+
+[tool.pyrefly.errors]
+"unannotated-return" = false
+"unannotated-parameter" = false
+"missing-type-argument" = false
+"empty-container" = false
+"unnecessary-cast" = false
+
+[tool.pyright]
+include = ["backend"]
+extraPaths = ["backend"]
+venvPath = "backend"
+venv = ".venv"
+pythonVersion = "3.12"
