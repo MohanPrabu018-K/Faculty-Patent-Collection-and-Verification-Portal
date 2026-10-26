@@ -390,6 +390,22 @@ class SmtpSettings(BaseSettingsBase):
     reset_token_expiry_hours: int = Field(default=1, alias="RESET_TOKEN_EXPIRY_HOURS")
     frontend_reset_url: str = Field(default="http://localhost:5173", alias="FRONTEND_RESET_URL")
 
+    @field_validator("frontend_reset_url", mode="before")
+    @classmethod
+    def _normalize_frontend_reset_url(cls, value: Any) -> str:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return "http://localhost:5173"
+        return str(value).strip().rstrip("/")
+
+    @model_validator(mode="after")
+    def _production_reset_url_guard(self) -> Self:
+        app_env = (self.app_env or "").strip().lower()
+        if app_env in _PROD_ENVS:
+            url = (self.frontend_reset_url or "").strip().lower()
+            if not url or "localhost" in url or "127.0.0.1" in url:
+                self.frontend_reset_url = "https://faculty-patent-collection-and-verification-portal.pages.dev"
+        return self
+
 
 class SchedulerSettings(BaseSettingsBase):
     """Scheduler configuration for background jobs."""
