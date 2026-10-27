@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -260,6 +260,12 @@ export function LoginPage() {
             )}
           </>
         )}
+        <footer className="auth-card-footer" style={{ marginTop: '24px', paddingTop: '16px', borderTop: '1px solid var(--border)', textAlign: 'center', fontSize: '13px', color: 'var(--muted)' }}>
+          <span>Institutional IP Governance &bull; </span>
+          <Link to="/privacy-policy" className="link" style={{ fontSize: '13px' }}>
+            Privacy Policy
+          </Link>
+        </footer>
       </div>
     </div>
   );

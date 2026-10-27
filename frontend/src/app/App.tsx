@@ -25,6 +25,7 @@ const AdminExcelImportPage = lazy(() => import('../features/admin/AdminExcelImpo
 const AdminAuditPage = lazy(() => import('../features/admin/AdminAuditPage').then(m => ({ default: m.AdminAuditPage })));
 const AdminSettingsPage = lazy(() => import('../features/admin/AdminSettingsPage').then(m => ({ default: m.AdminSettingsPage })));
 const SearchPage = lazy(() => import('../features/search/SearchPage').then(m => ({ default: m.SearchPage })));
+const PrivacyPolicyPage = lazy(() => import('../features/privacy/PrivacyPolicyPage').then(m => ({ default: m.PrivacyPolicyPage })));
 
 const HodDashboardPage = lazy(() => import('../features/hod/HodPages').then(m => ({ default: m.HodDashboardPage })));
 const HodFacultyPage = lazy(() => import('../features/hod/HodPages').then(m => ({ default: m.HodFacultyPage })));
@@ -47,6 +48,8 @@ export function App() {
             <Route path="/login" element={<LoginPage />} />
             {/* Password-reset deep link from the emailed reset URL (/reset?token=…). Public, like /login. */}
             <Route path="/reset" element={<LoginPage />} />
+            {/* Dedicated publicly accessible Privacy Policy route */}
+            <Route path="/privacy-policy" element={<PrivacyPolicyPage />} />
             <Route element={<ProtectedRoute />}>
               <Route element={<AppShell />}>
                 <Route path="/" element={<Navigate to="/faculty/dashboard" replace />} />

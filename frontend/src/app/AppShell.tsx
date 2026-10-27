@@ -80,6 +80,12 @@ export function AppShell() {
             );
           })}
         </nav>
+        <div style={{ marginTop: '24px', paddingTop: '16px', borderTop: '1px solid var(--border)' }}>
+          <NavLink to="/privacy-policy" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`} style={{ fontSize: '13px' }}>
+            <Shield size={16} />
+            <span>Privacy Policy</span>
+          </NavLink>
+        </div>
       </aside>
       <div className="content">
         <header className="topbar">
