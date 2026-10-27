@@ -26,6 +26,12 @@ import urllib.request
 from typing import Any
 
 try:
+    import dotenv
+    dotenv.load_dotenv(dotenv.find_dotenv(usecwd=True))
+except ImportError:
+    pass
+
+try:
     from google_auth_oauthlib.flow import InstalledAppFlow
     from googleapiclient.discovery import build
 except ImportError:
@@ -58,8 +64,12 @@ def print_instructions() -> None:
     print("  5. Navigate to: APIs & Services -> OAuth consent screen.")
     print("     - Select 'External', click 'Create'.")
     print("     - Enter App Name ('Faculty Patent Portal') and your email.")
+    print("     - In 'Scopes', ensure: https://www.googleapis.com/auth/drive.file is added.")
     print("     - In 'Test users', add your own @gmail.com address.")
     print("     - Click Save and Continue.")
+    print("     - CRITICAL: In the OAuth consent screen dashboard, click 'PUBLISH APP' to move")
+    print("       the Publishing status to 'In production'. If left in 'Testing' status,")
+    print("       Google automatically expires refresh tokens after 7 days, causing uploads to fail!")
     print("  6. Navigate to: APIs & Services -> Credentials.")
     print("     - Click '+ CREATE CREDENTIALS' -> 'OAuth client ID'.")
     print("     - Application type: Select 'Desktop app'.")
@@ -193,15 +203,111 @@ def preflight_verify_credentials(client_id: str, client_secret: str) -> tuple[bo
         return True, f"Preflight probe skipped ({e}). Proceeding to OAuth flow."
 
 
-def main() -> None:
-    print_banner()
+def check_google_drive_status(
+    client_id: str,
+    client_secret: str,
+    refresh_token: str,
+    folder_id: str | None = None,
+) -> tuple[bool, str]:
+    """Verify existing credentials and folder without opening a browser or interactive prompt."""
+    token_url = "https://oauth2.googleapis.com/token"
+    data = urllib.parse.urlencode({
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token",
+    }).encode("utf-8")
 
-    parser = argparse.ArgumentParser(description="Generate Google Drive OAuth credentials.")
+    req = urllib.request.Request(
+        token_url,
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            access_token = body.get("access_token")
+    except urllib.error.HTTPError as e:
+        try:
+            err_data = json.loads(e.read().decode("utf-8"))
+            err = err_data.get("error", "")
+            desc = err_data.get("error_description", "")
+        except Exception:
+            err = ""
+            desc = str(e)
+        if err == "invalid_grant":
+            return False, (
+                "AUTH ERROR: Refresh token has expired or been revoked (invalid_grant).\n"
+                "Reauthorization is required. Run 'python scripts/setup_google_drive.py' "
+                "to regenerate a fresh refresh token and update GOOGLE_DRIVE_REFRESH_TOKEN in Render."
+            )
+        if err == "invalid_client":
+            return False, (
+                "AUTH ERROR: Client ID or Client Secret rejected by Google (invalid_client).\n"
+                "Check GOOGLE_DRIVE_CLIENT_ID and GOOGLE_DRIVE_CLIENT_SECRET."
+            )
+        return False, f"AUTH ERROR: Google token endpoint failed (HTTP {e.code}): {desc or err}"
+    except Exception as e:
+        return False, f"NETWORK ERROR: Failed to contact Google OAuth endpoint: {e}"
+
+    if not folder_id:
+        return True, "SUCCESS: OAuth credentials verified and active (folder check skipped, no folder_id provided)."
+
+    # Verify folder access via Drive API
+    drive_url = f"https://www.googleapis.com/drive/v3/files/{urllib.parse.quote(folder_id)}?fields=id,name,trashed&supportsAllDrives=true"
+    req_drive = urllib.request.Request(
+        drive_url,
+        headers={"Authorization": f"Bearer {access_token}"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req_drive, timeout=10) as resp:
+            folder_info = json.loads(resp.read().decode("utf-8"))
+            if folder_info.get("trashed"):
+                return False, f"FOLDER ERROR: Folder '{folder_id}' is in the Google Drive Trash."
+            return True, f"SUCCESS: Google Drive OAuth and Folder '{folder_info.get('name')}' (ID: {folder_id}) are active and healthy."
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return False, f"FOLDER ERROR: Folder '{folder_id}' not found on Google Drive. Check permissions or folder ID."
+        if e.code == 403:
+            return False, f"FOLDER ERROR: Access denied to folder '{folder_id}'. Ensure the authorized Google account has access."
+        return False, f"FOLDER ERROR: Google Drive API returned HTTP {e.code} checking folder."
+    except Exception as e:
+        return False, f"NETWORK ERROR: Failed to contact Google Drive API: {e}"
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate or test Google Drive OAuth credentials.")
     parser.add_argument("-f", "--credentials-file", help="Path to downloaded Google client secrets JSON file")
     parser.add_argument("--client-id", help="Google Cloud OAuth Client ID")
     parser.add_argument("--client-secret", help="Google Cloud OAuth Client Secret")
+    parser.add_argument("--refresh-token", help="Google Cloud OAuth Refresh Token (for --check-status)")
+    parser.add_argument("--folder-id", help="Google Drive Folder ID (for --check-status)")
     parser.add_argument("--skip-preflight", action="store_true", help="Skip pre-flight credential verification")
+    parser.add_argument(
+        "--check-status",
+        action="store_true",
+        help="Non-interactive status check of existing credentials and folder without opening browser",
+    )
     args = parser.parse_args()
+
+    if args.check_status:
+        cid = sanitize_credential(args.client_id or os.environ.get("GOOGLE_DRIVE_CLIENT_ID"))
+        csec = sanitize_credential(args.client_secret or os.environ.get("GOOGLE_DRIVE_CLIENT_SECRET"))
+        rtok = sanitize_credential(args.refresh_token or os.environ.get("GOOGLE_DRIVE_REFRESH_TOKEN"))
+        fid = sanitize_credential(args.folder_id or os.environ.get("GOOGLE_DRIVE_FOLDER_ID"))
+
+        if not cid or not csec or not rtok:
+            print("ERROR: --check-status requires client-id, client-secret, and refresh-token (via args or env).")
+            sys.exit(1)
+
+        ok, msg = check_google_drive_status(cid, csec, rtok, fid)
+        print(f"\n{msg}\n")
+        sys.exit(0 if ok else 1)
+
+    print_banner()
 
     client_id = ""
     client_secret = ""

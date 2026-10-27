@@ -12,7 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import check_rate_limit, get_current_user
 from app.core.config import rate_limit_settings, upload_settings
 from app.core.database import get_async_session
-from app.core.exceptions import PortalError, RateLimitError
+from app.core.exceptions import (
+    PortalError,
+    RateLimitError,
+    StorageAuthenticationError,
+    StorageUploadError,
+)
 from app.core.logging import log_audit
 from app.core.security import validate_filename
 from app.models.base import Department, IpFile, IpRecord, ProcessingJob, User
@@ -114,63 +119,95 @@ async def upload_certificate(
             content_type=file.content_type or "application/octet-stream",
             original_name=original_filename,
         )
+    except PortalError:
+        raise
     except Exception as e:
-        logger.error("file_save_failed", error=str(e), error_type=type(e).__name__, storage_key=storage_key)
-        raise PortalError(message=f"Failed to save file: {e}", error_code="UPLOAD_ERROR", status_code=500)
+        logger.error(
+            "file_save_failed",
+            error=str(e),
+            error_type=type(e).__name__,
+            storage_key=storage_key,
+            exc_info=True,
+        )
+        raise PortalError(
+            message="Failed to save file to storage. Please contact the administrator.",
+            error_code="UPLOAD_ERROR",
+            status_code=500,
+        ) from e
 
     effective_storage_key = getattr(file_path, "storage_key", storage_key)
     drive_file_id = getattr(file_path, "drive_file_id", None)
 
-    evidence_payload: dict[str, object] = {}
-    if drive_file_id:
-        evidence_payload["drive_file_id"] = drive_file_id
-        evidence_payload["storage_backend"] = "gdrive"
+    try:
+        evidence_payload: dict[str, object] = {}
+        if drive_file_id:
+            evidence_payload["drive_file_id"] = drive_file_id
+            evidence_payload["storage_backend"] = "gdrive"
 
-    ip_record = IpRecord(
-        id=str(uuid.uuid4()),
-        ip_type="UNKNOWN_OTHER",
-        uploader_id=user_id,
-        department_id=uploader_department_id,
-        designation_id=uploader_designation_id,
-        historical_department_id=uploader_department_id,
-        historical_department_name=uploader_department_name,
-        processing_status="QUEUED",
-        verification_status="UNVERIFIED",
-        evidence=evidence_payload,
-    )
+        ip_record = IpRecord(
+            id=str(uuid.uuid4()),
+            ip_type="UNKNOWN_OTHER",
+            uploader_id=user_id,
+            department_id=uploader_department_id,
+            designation_id=uploader_designation_id,
+            historical_department_id=uploader_department_id,
+            historical_department_name=uploader_department_name,
+            processing_status="QUEUED",
+            verification_status="UNVERIFIED",
+            evidence=evidence_payload,
+        )
 
-    db.add(ip_record)
-    await db.flush()
+        db.add(ip_record)
+        await db.flush()
 
-    # Persist the SHA-256 file fingerprint for duplicate detection.
-    from app.services.duplicate_detection import calculate_file_fingerprint
-    fingerprint = calculate_file_fingerprint(content)
+        # Persist the SHA-256 file fingerprint for duplicate detection.
+        from app.services.duplicate_detection import calculate_file_fingerprint
+        fingerprint = calculate_file_fingerprint(content)
 
-    ip_file = IpFile(
-        id=str(uuid.uuid4()),
-        ip_record_id=ip_record.id,
-        storage_key=effective_storage_key,
-        original_filename=original_filename,
-        file_extension=file_extension,
-        file_size_bytes=len(content),
-        mime_type=file.content_type,
-        fingerprint=fingerprint,
-        uploaded_by=user_id,
-        upload_status="COMPLETED",
-    )
-    db.add(ip_file)
+        ip_file = IpFile(
+            id=str(uuid.uuid4()),
+            ip_record_id=ip_record.id,
+            storage_key=effective_storage_key,
+            original_filename=original_filename,
+            file_extension=file_extension,
+            file_size_bytes=len(content),
+            mime_type=file.content_type,
+            fingerprint=fingerprint,
+            uploaded_by=user_id,
+            upload_status="COMPLETED",
+        )
+        db.add(ip_file)
 
-    processing_job = ProcessingJob(
-        id=str(uuid.uuid4()),
-        ip_record_id=ip_record.id,
-        job_type="orchestrator",
-        status="QUEUED",
-        max_retries=3,
-    )
-    db.add(processing_job)
+        processing_job = ProcessingJob(
+            id=str(uuid.uuid4()),
+            ip_record_id=ip_record.id,
+            job_type="orchestrator",
+            status="QUEUED",
+            max_retries=3,
+        )
+        db.add(processing_job)
 
-    await db.commit()
-    await db.refresh(ip_record)
+        await db.commit()
+        await db.refresh(ip_record)
+    except Exception as db_exc:
+        await db.rollback()
+        if drive_file_id:
+            try:
+                storage_service.delete_file(effective_storage_key)
+            except Exception as del_err:
+                logger.warning(
+                    "failed_to_cleanup_gdrive_file_after_db_failure",
+                    error=str(del_err),
+                    drive_file_id=drive_file_id,
+                )
+        if isinstance(db_exc, PortalError):
+            raise
+        logger.error("database_persistence_failed_after_upload", error=str(db_exc), exc_info=True)
+        raise PortalError(
+            message="Failed to persist record metadata after upload.",
+            error_code="UPLOAD_ERROR",
+            status_code=500,
+        ) from db_exc
 
     # Schedule the deterministic 11-agent pipeline as a background task.
     # The pipeline runs on the FastAPI process (no Celery/Redis required).

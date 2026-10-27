@@ -28,6 +28,7 @@ from app.core.config import app_settings, upload_settings
 from app.core.database import get_async_session_context
 from app.core.security import generate_jwt_token, hash_password
 from app.main import app
+from app.core.exceptions import StorageAuthenticationError, StorageUploadError
 from app.models.base import AuditLog, IpFile, IpRecord, ProcessingJob, User
 from app.services.storage import GoogleDriveStorage, StorageResult, StorageService, reset_storage_service
 
@@ -586,4 +587,269 @@ def test_pipeline_recovery_restores_from_gdrive(tmp_path, monkeypatch, mock_driv
             session.close()
 
         reset_storage_service()
+
+
+def test_gdrive_upload_fails_fast_on_invalid_grant_without_retries(tmp_path, monkeypatch, mock_drive_service):
+    """Permanent OAuth failure (invalid_grant) must fail fast on attempt 1 without 3 futile retries."""
+    monkeypatch.setattr(upload_settings, "storage_backend", "gdrive")
+    monkeypatch.setattr(upload_settings, "local_storage_root", str(tmp_path))
+    monkeypatch.setattr(upload_settings, "google_drive_folder_id", "folder_test")
+    monkeypatch.setattr(upload_settings, "google_drive_client_id", "cid")
+    monkeypatch.setattr(upload_settings, "google_drive_client_secret", "csec")
+    monkeypatch.setattr(upload_settings, "google_drive_refresh_token", "rtok")
+
+    storage = GoogleDriveStorage(local_root=tmp_path)
+    storage._drive_service = mock_drive_service
+
+    create_req = MagicMock()
+    create_req.execute.side_effect = Exception("invalid_grant: Token has been expired or revoked.")
+    mock_drive_service.files().create.return_value = create_req
+
+    with pytest.raises(StorageAuthenticationError, match="requires reauthorization"):
+        storage.upload_file(
+            data=b"test data",
+            original_name="test.pdf",
+            storage_key="user/test.pdf",
+            content_type="application/pdf",
+        )
+
+    # Must have failed on first attempt without 3 retries
+    assert create_req.execute.call_count == 1
+    assert storage._reauthorization_required is True
+
+    # Immediate fail-fast on second call before even calling files().create
+    with pytest.raises(StorageAuthenticationError, match="requires reauthorization"):
+        storage.upload_file(
+            data=b"test data 2",
+            original_name="test2.pdf",
+            storage_key="user/test2.pdf",
+            content_type="application/pdf",
+        )
+    assert create_req.execute.call_count == 1  # Not called again
+
+
+def test_gdrive_upload_retries_transient_error_and_succeeds(tmp_path, monkeypatch, mock_drive_service):
+    """Transient errors (HTTP 429, 503) are retried with backoff and succeed."""
+    monkeypatch.setattr(upload_settings, "storage_backend", "gdrive")
+    monkeypatch.setattr(upload_settings, "local_storage_root", str(tmp_path))
+    monkeypatch.setattr(upload_settings, "google_drive_folder_id", "folder_test")
+    monkeypatch.setattr(upload_settings, "google_drive_client_id", "cid")
+    monkeypatch.setattr(upload_settings, "google_drive_client_secret", "csec")
+    monkeypatch.setattr(upload_settings, "google_drive_refresh_token", "rtok")
+
+    storage = GoogleDriveStorage(local_root=tmp_path)
+    storage._drive_service = mock_drive_service
+
+    mock_resp_429 = MagicMock(status=429, reason="Too Many Requests")
+    mock_resp_503 = MagicMock(status=503, reason="Service Unavailable")
+
+    create_req = MagicMock()
+    create_req.execute.side_effect = [
+        HttpError(resp=mock_resp_429, content=b"rateLimitExceeded"),
+        HttpError(resp=mock_resp_503, content=b"backendError"),
+        {"id": "drive_recovered_999", "name": "user_doc.pdf"},
+    ]
+    mock_drive_service.files().create.return_value = create_req
+
+    with patch("time.sleep") as mock_sleep:
+        file_id, key = storage.upload_file(
+            data=b"content",
+            original_name="doc.pdf",
+            storage_key="user/doc.pdf",
+            content_type="application/pdf",
+        )
+
+    assert file_id == "drive_recovered_999"
+    assert key == "gdrive/drive_recovered_999/doc.pdf"
+    assert create_req.execute.call_count == 3
+    assert mock_sleep.call_count == 2
+
+
+def test_gdrive_upload_non_retryable_error_fails_immediately(tmp_path, monkeypatch, mock_drive_service):
+    """Non-retryable HTTP 403 Forbidden halts immediately without retries."""
+    monkeypatch.setattr(upload_settings, "storage_backend", "gdrive")
+    monkeypatch.setattr(upload_settings, "local_storage_root", str(tmp_path))
+    monkeypatch.setattr(upload_settings, "google_drive_folder_id", "folder_test")
+    monkeypatch.setattr(upload_settings, "google_drive_client_id", "cid")
+    monkeypatch.setattr(upload_settings, "google_drive_client_secret", "csec")
+    monkeypatch.setattr(upload_settings, "google_drive_refresh_token", "rtok")
+
+    storage = GoogleDriveStorage(local_root=tmp_path)
+    storage._drive_service = mock_drive_service
+
+    mock_resp_403 = MagicMock(status=403, reason="Forbidden")
+    create_req = MagicMock()
+    create_req.execute.side_effect = HttpError(resp=mock_resp_403, content=b"forbidden")
+    mock_drive_service.files().create.return_value = create_req
+
+    with pytest.raises(StorageUploadError, match="Failed to upload file to Google Drive"):
+        storage.upload_file(
+            data=b"content",
+            original_name="doc.pdf",
+            storage_key="user/doc.pdf",
+            content_type="application/pdf",
+        )
+
+    assert create_req.execute.call_count == 1
+
+
+def test_gdrive_check_status_is_sanitized(tmp_path, monkeypatch):
+    """check_status() returns diagnostic info and never exposes secrets or tokens."""
+    monkeypatch.setattr(upload_settings, "storage_backend", "gdrive")
+    monkeypatch.setattr(upload_settings, "local_storage_root", str(tmp_path))
+    monkeypatch.setattr(upload_settings, "google_drive_folder_id", "folder_secret_123")
+    monkeypatch.setattr(upload_settings, "google_drive_client_id", "secret_client_id")
+    monkeypatch.setattr(upload_settings, "google_drive_client_secret", "secret_secret")
+    monkeypatch.setattr(upload_settings, "google_drive_refresh_token", "secret_refresh_token")
+
+    storage = GoogleDriveStorage(local_root=tmp_path)
+    status_info = storage.check_status()
+
+    assert status_info["backend"] == "gdrive"
+    assert status_info["configured"] is True
+    assert status_info["has_folder_id"] is True
+    assert status_info["reauthorization_required"] is False
+
+    # Ensure no secrets leak
+    status_str = str(status_info)
+    assert "secret_client_id" not in status_str
+    assert "secret_secret" not in status_str
+    assert "secret_refresh_token" not in status_str
+
+
+def test_storage_service_save_file_cleans_up_local_file_on_gdrive_failure(tmp_path, monkeypatch, mock_drive_service):
+    """When remote upload fails, any temporary local file is cleaned up so no orphaned files remain."""
+    monkeypatch.setattr(upload_settings, "storage_backend", "gdrive")
+    monkeypatch.setattr(upload_settings, "local_storage_root", str(tmp_path))
+    monkeypatch.setattr(upload_settings, "google_drive_folder_id", "folder_test")
+    monkeypatch.setattr(upload_settings, "google_drive_client_id", "cid")
+    monkeypatch.setattr(upload_settings, "google_drive_client_secret", "csec")
+    monkeypatch.setattr(upload_settings, "google_drive_refresh_token", "rtok")
+
+    service = StorageService()
+    service.gdrive._drive_service = mock_drive_service
+
+    create_req = MagicMock()
+    create_req.execute.side_effect = Exception("invalid_grant: Token has been expired or revoked.")
+    mock_drive_service.files().create.return_value = create_req
+
+    key = "user_orphantest/failed_doc.pdf"
+    expected_local = tmp_path / key
+
+    with pytest.raises(StorageAuthenticationError):
+        service.save_file(
+            storage_key=key,
+            data=b"temporary bytes",
+            content_type="application/pdf",
+        )
+
+    # Local file must NOT remain on disk
+    assert not expected_local.exists()
+
+
+@pytest.mark.asyncio
+async def test_api_upload_storage_auth_error_returns_503_and_no_db_records(tmp_path, monkeypatch, mock_drive_service):
+    """When storage raises StorageAuthenticationError, API returns 503 and leaves NO orphaned DB records."""
+    reset_storage_service()
+    monkeypatch.setattr(upload_settings, "storage_backend", "gdrive")
+    monkeypatch.setattr(upload_settings, "local_storage_root", str(tmp_path))
+    monkeypatch.setattr(upload_settings, "google_drive_folder_id", "folder_test")
+    monkeypatch.setattr(upload_settings, "google_drive_client_id", "cid")
+    monkeypatch.setattr(upload_settings, "google_drive_client_secret", "csec")
+    monkeypatch.setattr(upload_settings, "google_drive_refresh_token", "rtok")
+
+    user_id = f"usr-{uuid.uuid4().hex[:8]}"
+    email = f"{user_id}@university.edu"
+
+    async with get_async_session_context() as db:
+        user = User(
+            id=user_id,
+            email=email,
+            official_email=email,
+            password_hash=hash_password("Pass123!"),
+            full_name="Dr. Failed Uploader",
+            role="faculty",
+            faculty_id=f"FAC-{user_id[:6]}",
+            status="active",
+            is_active=True,
+        )
+        db.add(user)
+        await db.commit()
+
+    token = generate_jwt_token(
+        subject=user_id,
+        secret=app_settings.secret_key,
+        algorithm=app_settings.jwt_algorithm,
+        minutes=30,
+        email=email,
+        role="faculty",
+        faculty_id=user.faculty_id,
+    )
+
+    create_req = MagicMock()
+    create_req.execute.side_effect = Exception("invalid_grant: Token has been expired or revoked.")
+    mock_drive_service.files().create.return_value = create_req
+
+    try:
+        with patch("app.services.storage.GoogleDriveStorage._get_drive_service", return_value=mock_drive_service):
+            with TestClient(app) as client:
+                resp = client.post(
+                    "/api/v1/uploads/",
+                    headers={"Authorization": f"Bearer {token}"},
+                    files={"file": ("certificate.pdf", b"%PDF-1.4 Data", "application/pdf")},
+                )
+
+        assert resp.status_code == 503
+        data = resp.json()
+        assert data["error"] == "STORAGE_AUTH_ERROR"
+        assert "requires reauthorization" in data["message"]
+        # Ensure no raw tokens or client secret leak in message
+        assert "rtok" not in data["message"]
+        assert "csec" not in data["message"]
+
+        # Confirm NO records were inserted into the database
+        async with get_async_session_context() as db:
+            records = (await db.execute(select(IpRecord).where(IpRecord.uploader_id == user_id))).scalars().all()
+            assert len(records) == 0
+
+    finally:
+        async with get_async_session_context() as db:
+            await db.execute(delete(User).where(User.id == user_id))
+            await db.commit()
+        reset_storage_service()
+
+
+def test_gdrive_token_refresh_lifecycle(tmp_path, monkeypatch):
+    """Test refresh_access_token handling for successful refresh and permanent invalid_grant."""
+    from google.auth.exceptions import RefreshError
+
+    monkeypatch.setattr(upload_settings, "storage_backend", "gdrive")
+    monkeypatch.setattr(upload_settings, "local_storage_root", str(tmp_path))
+    monkeypatch.setattr(upload_settings, "google_drive_folder_id", "folder_test")
+    monkeypatch.setattr(upload_settings, "google_drive_client_id", "cid")
+    monkeypatch.setattr(upload_settings, "google_drive_client_secret", "csec")
+    monkeypatch.setattr(upload_settings, "google_drive_refresh_token", "rtok")
+
+    storage = GoogleDriveStorage(local_root=tmp_path)
+
+    # 1. Successful refresh
+    mock_creds = MagicMock()
+    mock_creds.token = "refreshed_access_token_123"
+    storage._credentials = mock_creds
+
+    token = storage.refresh_access_token()
+    assert token == "refreshed_access_token_123"
+    assert storage._reauthorization_required is False
+
+    # 2. Permanent RefreshError (invalid_grant)
+    mock_creds.refresh.side_effect = RefreshError(
+        "('invalid_grant: Token has been expired or revoked.', {'error': 'invalid_grant'})"
+    )
+
+    with pytest.raises(StorageAuthenticationError, match="requires reauthorization"):
+        storage.refresh_access_token()
+
+    assert storage._reauthorization_required is True
+    assert storage._last_auth_error is not None
+
 

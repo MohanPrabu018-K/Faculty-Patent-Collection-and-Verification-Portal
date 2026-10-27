@@ -52,6 +52,10 @@ To achieve **100% free (₹0) operation without a paid Google Workspace subscrip
    - Click **+ ADD USERS**.
    - Enter your own `@gmail.com` address.
    - Click **Save and Continue**.
+7. **CRITICAL STEP — Set Publishing Status to 'In production' (Prevents 7-Day Expiration)**:
+   - Go back to the **APIs & Services** > **OAuth consent screen** overview.
+   - Under **Publishing status**, click the **PUBLISH APP** button and confirm.
+   - **Why this is essential**: If left in "Testing" mode, Google Cloud **automatically revokes all OAuth refresh tokens after exactly 7 days**, causing file uploads to fail with `invalid_grant: Token has been expired or revoked`. When set to "In production", refresh tokens do not expire after 7 days.
 
 ### Step 4: Create OAuth 2.0 Client Credentials
 1. Navigate to **APIs & Services** > **Credentials**.
@@ -76,6 +80,13 @@ The script will:
 3. Automatically capture your long-lived **Refresh Token**.
 4. Create a designated private folder named `Faculty_Patent_Documents` in your Google Drive (or use an existing folder ID).
 5. Output the exact configuration block ready for `.env` or Render.
+
+### Diagnostic Credential Verification
+To non-interactively test if your existing Google Drive credentials, refresh token, and folder access are active:
+
+```bash
+python scripts/setup_google_drive.py --check-status
+```
 
 ---
 

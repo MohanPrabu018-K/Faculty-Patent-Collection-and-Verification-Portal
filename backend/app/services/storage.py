@@ -19,6 +19,9 @@ import hashlib
 import io
 import json
 import os
+import socket
+import ssl
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -26,6 +29,7 @@ from typing import Any
 import structlog
 
 from app.core.config import upload_settings
+from app.core.exceptions import StorageAuthenticationError, StorageUploadError
 
 logger = structlog.get_logger(__name__)
 
@@ -87,6 +91,10 @@ class GoogleDriveStorage:
         self.refresh_token = (upload_settings.google_drive_refresh_token or "").strip()
         self.service_account_json = (upload_settings.google_drive_service_account_json or "").strip()
         self._drive_service: Any = None
+        self._credentials: Any = None
+        self._reauthorization_required: bool = False
+        self._last_auth_error: str | None = None
+        self._lock = threading.Lock()
 
     @property
     def auth_mode(self) -> str:
@@ -102,9 +110,64 @@ class GoogleDriveStorage:
         has_sa = bool(self.service_account_json)
         return bool(self.folder_id and (has_oauth or has_sa))
 
-    def _get_drive_service(self) -> Any:
-        if self._drive_service is not None:
-            return self._drive_service
+    @property
+    def reauthorization_required(self) -> bool:
+        return self._reauthorization_required
+
+    @property
+    def last_auth_error(self) -> str | None:
+        return self._last_auth_error
+
+    def _is_permanent_auth_error(self, exc: Exception) -> bool:
+        """Determine if an exception represents a permanent, non-recoverable OAuth failure."""
+        try:
+            from google.auth.exceptions import RefreshError
+            if isinstance(exc, RefreshError):
+                err_str = str(exc).lower()
+                if any(term in err_str for term in ("invalid_grant", "invalid_client", "unauthorized_client")):
+                    return True
+        except ImportError:
+            pass
+
+        try:
+            from googleapiclient.errors import HttpError
+            if isinstance(exc, HttpError) and exc.resp.status == 401:
+                err_str = str(exc).lower()
+                if any(term in err_str for term in ("invalid_grant", "revoked", "expired", "invalid_token")):
+                    return True
+        except ImportError:
+            pass
+
+        err_str = str(exc).lower()
+        if "invalid_grant" in err_str:
+            return True
+
+        return False
+
+    def _is_retryable_error(self, exc: Exception) -> bool:
+        """Determine if an exception represents a transient failure that should be retried."""
+        if self._is_permanent_auth_error(exc):
+            return False
+
+        try:
+            from googleapiclient.errors import HttpError
+            if isinstance(exc, HttpError):
+                return exc.resp.status in (429, 500, 502, 503, 504)
+        except ImportError:
+            pass
+
+        if isinstance(exc, (TimeoutError, ConnectionError, socket.timeout, ssl.SSLError)):
+            return True
+
+        err_msg = str(exc).lower()
+        if any(term in err_msg for term in ("timeout", "connection reset", "connection refused", "temporarily unavailable", "rate limit")):
+            return True
+
+        return False
+
+    def _get_credentials(self) -> Any:
+        if self._credentials is not None:
+            return self._credentials
 
         credentials = None
 
@@ -131,16 +194,71 @@ class GoogleDriveStorage:
                 )
 
         if credentials is None:
-            raise RuntimeError(
+            raise StorageAuthenticationError(
                 "Google Drive storage is not configured. Provide GOOGLE_DRIVE_FOLDER_ID and "
                 "either OAuth2 credentials (CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN) or "
                 "GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON."
             )
 
-        from googleapiclient.discovery import build
+        self._credentials = credentials
+        return self._credentials
 
-        self._drive_service = build("drive", "v3", credentials=credentials, cache_discovery=False)
-        return self._drive_service
+    def refresh_access_token(self) -> str | None:
+        """Explicitly refresh the OAuth2 access token in a thread-safe manner."""
+        with self._lock:
+            creds = self._get_credentials()
+            from google.auth.transport.requests import Request
+            from google.auth.exceptions import RefreshError
+
+            try:
+                creds.refresh(Request())
+                self._reauthorization_required = False
+                self._last_auth_error = None
+                return creds.token
+            except RefreshError as exc:
+                if self._is_permanent_auth_error(exc):
+                    self._reauthorization_required = True
+                    self._last_auth_error = "invalid_grant: Token has been expired or revoked"
+                    logger.error(
+                        "gdrive_permanent_auth_failure",
+                        error="invalid_grant",
+                        message="Google OAuth refresh token expired or revoked. Reauthorization required.",
+                    )
+                    raise StorageAuthenticationError(
+                        "Google Drive storage requires reauthorization. The OAuth refresh token has expired or been revoked."
+                    ) from exc
+                logger.warning("gdrive_refresh_transient_failure", error=str(exc))
+                raise
+
+    def check_status(self) -> dict[str, Any]:
+        """Return safe, non-sensitive diagnostic status for administrative inspection."""
+        return {
+            "backend": "gdrive",
+            "configured": self.is_configured,
+            "auth_mode": self.auth_mode,
+            "has_folder_id": bool(self.folder_id),
+            "reauthorization_required": self._reauthorization_required,
+            "last_auth_error": self._last_auth_error,
+        }
+
+    def _get_drive_service(self) -> Any:
+        if self._drive_service is not None:
+            return self._drive_service
+
+        if self._reauthorization_required:
+            raise StorageAuthenticationError(
+                "Google Drive storage requires reauthorization. The OAuth refresh token has expired or been revoked."
+            )
+
+        with self._lock:
+            if self._drive_service is not None:
+                return self._drive_service
+
+            credentials = self._get_credentials()
+            from googleapiclient.discovery import build
+
+            self._drive_service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+            return self._drive_service
 
     def upload_file(
         self,
@@ -153,6 +271,11 @@ class GoogleDriveStorage:
 
         Returns (drive_file_id, effective_storage_key).
         """
+        if self._reauthorization_required:
+            raise StorageAuthenticationError(
+                "Google Drive storage requires reauthorization. The OAuth refresh token has expired or been revoked."
+            )
+
         from googleapiclient.http import MediaIoBaseUpload
 
         drive = self._get_drive_service()
@@ -186,7 +309,7 @@ class GoogleDriveStorage:
                 )
                 file_id = created.get("id")
                 if not file_id:
-                    raise RuntimeError("Google Drive API did not return a file ID")
+                    raise StorageUploadError("Google Drive API did not return a file ID")
                 effective_key = f"gdrive/{file_id}/{original_name or Path(storage_key).name}"
                 logger.info(
                     "file_persisted_to_gdrive",
@@ -197,8 +320,33 @@ class GoogleDriveStorage:
                 return file_id, effective_key
             except Exception as e:
                 last_err = e
+                # Permanent auth failure: fail fast immediately without futile retries
+                if self._is_permanent_auth_error(e):
+                    self._reauthorization_required = True
+                    self._last_auth_error = "invalid_grant: Token has been expired or revoked"
+                    logger.error(
+                        "gdrive_permanent_auth_failure",
+                        attempt=attempt,
+                        error="invalid_grant",
+                        storage_key=storage_key,
+                        message="Google OAuth refresh token expired or revoked. Halting retries.",
+                    )
+                    raise StorageAuthenticationError(
+                        "Google Drive storage requires reauthorization. The OAuth refresh token has expired or been revoked."
+                    ) from e
+
+                # Non-retryable error
+                if not self._is_retryable_error(e):
+                    logger.error(
+                        "gdrive_upload_non_retryable_error",
+                        attempt=attempt,
+                        error=str(e),
+                        storage_key=storage_key,
+                    )
+                    raise StorageUploadError(f"Failed to upload file to Google Drive: {e}") from e
+
                 logger.warning(
-                    "gdrive_upload_attempt_failed",
+                    "gdrive_upload_transient_attempt_failed",
                     attempt=attempt,
                     error=str(e),
                     storage_key=storage_key,
@@ -206,7 +354,9 @@ class GoogleDriveStorage:
                 if attempt < 3:
                     time.sleep(1.0 * attempt)
 
-        raise RuntimeError(f"Failed to upload file to Google Drive after 3 attempts: {last_err}") from last_err
+        raise StorageUploadError(
+            f"Failed to upload file to Google Drive after 3 attempts: {last_err}"
+        ) from last_err
 
     def _resolve_file_id(self, storage_key: str) -> str | None:
         """Extract or look up the Google Drive file ID from a storage key."""
@@ -240,6 +390,10 @@ class GoogleDriveStorage:
 
     def download_file(self, storage_key: str, destination_path: Path) -> StorageResult | Path | None:
         """Download file from Google Drive to local destination path."""
+        if self._reauthorization_required:
+            logger.error("gdrive_download_blocked_reauth_required", storage_key=storage_key)
+            return None
+
         from googleapiclient.http import MediaIoBaseDownload
 
         file_id = self._resolve_file_id(storage_key)
@@ -269,14 +423,25 @@ class GoogleDriveStorage:
                 return StorageResult(destination_path, storage_key=storage_key, drive_file_id=file_id)
             except Exception as e:
                 last_err = e
+                if destination_path.exists():
+                    destination_path.unlink(missing_ok=True)
+
+                if self._is_permanent_auth_error(e):
+                    self._reauthorization_required = True
+                    self._last_auth_error = "invalid_grant: Token has been expired or revoked"
+                    logger.error("gdrive_permanent_auth_failure_on_download", error="invalid_grant")
+                    return None
+
+                if not self._is_retryable_error(e):
+                    logger.error("gdrive_download_non_retryable_error", error=str(e))
+                    return None
+
                 logger.warning(
                     "gdrive_download_attempt_failed",
                     attempt=attempt,
                     drive_file_id=file_id,
                     error=str(e),
                 )
-                if destination_path.exists():
-                    destination_path.unlink(missing_ok=True)
                 if attempt < 3:
                     time.sleep(1.0 * attempt)
 
@@ -391,28 +556,33 @@ class StorageService:
             is_prod = os.environ.get("APP_ENV", "").strip().lower() in ("production", "staging", "prod")
             if not self.gdrive.is_configured:
                 if is_prod:
-                    raise RuntimeError(
+                    raise StorageAuthenticationError(
                         "Production STORAGE_BACKEND=gdrive is configured but Google Drive credentials or "
                         "folder ID are missing. Ephemeral fallback is strictly forbidden in production."
                     )
                 logger.warning("gdrive_unconfigured_skipping_remote_sync", storage_key=storage_key)
             else:
-                drive_file_id, effective_storage_key = self.gdrive.upload_file(
-                    data=data,
-                    original_name=original_name or Path(storage_key).name,
-                    storage_key=storage_key,
-                    content_type=content_type,
-                )
-                gdrive_local_path = self._resolve_safe_local_path(effective_storage_key)
-                if gdrive_local_path != local_path:
-                    gdrive_local_path.parent.mkdir(parents=True, exist_ok=True)
-                    try:
-                        import shutil
-                        shutil.copy2(local_path, gdrive_local_path)
-                    except Exception:
-                        with open(gdrive_local_path, "wb") as f:
-                            f.write(data)
-                    local_path = gdrive_local_path
+                try:
+                    drive_file_id, effective_storage_key = self.gdrive.upload_file(
+                        data=data,
+                        original_name=original_name or Path(storage_key).name,
+                        storage_key=storage_key,
+                        content_type=content_type,
+                    )
+                    gdrive_local_path = self._resolve_safe_local_path(effective_storage_key)
+                    if gdrive_local_path != local_path:
+                        gdrive_local_path.parent.mkdir(parents=True, exist_ok=True)
+                        try:
+                            import shutil
+                            shutil.copy2(local_path, gdrive_local_path)
+                        except Exception:
+                            with open(gdrive_local_path, "wb") as f:
+                                f.write(data)
+                        local_path = gdrive_local_path
+                except Exception:
+                    if local_path.exists():
+                        local_path.unlink(missing_ok=True)
+                    raise
 
         elif self.is_s3_enabled:
             try:
@@ -430,6 +600,9 @@ class StorageService:
                 )
             except Exception:
                 logger.error("s3_upload_failed", key=storage_key, exc_info=True)
+                if local_path.exists():
+                    local_path.unlink(missing_ok=True)
+                raise
 
         return StorageResult(
             path=local_path,
@@ -459,7 +632,7 @@ class StorageService:
             is_prod = os.environ.get("APP_ENV", "").strip().lower() in ("production", "staging", "prod")
             if not self.gdrive.is_configured:
                 if is_prod and self.is_gdrive_enabled:
-                    raise RuntimeError(
+                    raise StorageAuthenticationError(
                         "Production STORAGE_BACKEND=gdrive is configured but Google Drive credentials "
                         "are missing. Cannot restore document."
                     )

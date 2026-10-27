@@ -61,6 +61,15 @@ describe('friendlyUploadError unit contract (Bug 12)', () => {
       .toBe('Maximum upload limit is 2 MB.');
   });
 
+  it('maps storage authentication and reauthorization errors to friendly admin message', () => {
+    expect(friendlyUploadError('STORAGE_AUTH_ERROR: Google Drive storage requires reauthorization.'))
+      .toBe('Document storage service authentication failure. The system administrator must reauthorize cloud storage.');
+    expect(friendlyUploadError('invalid_grant: Token has been expired or revoked.'))
+      .toBe('Document storage service authentication failure. The system administrator must reauthorize cloud storage.');
+    expect(friendlyUploadError('Failed to upload file to Google Drive after 3 attempts'))
+      .toBe('Cloud storage service temporarily unavailable. Please try again later or contact the administrator.');
+  });
+
   it('leaves non-size errors untouched', () => {
     expect(friendlyUploadError('Please choose a PDF or image file.', 2097152))
       .toBe('Please choose a PDF or image file.');

@@ -19,6 +19,14 @@ export function formatLimitMb(bytes: number): string {
  * as a fallback. The raw backend JSON is never shown.
  */
 export function friendlyUploadError(message: string, configuredBytes?: number): string {
+  // Google Drive / Cloud Storage authentication & authorization errors
+  if (/STORAGE_AUTH_ERROR|reauthorization|invalid_grant|token has been expired/i.test(message)) {
+    return 'Document storage service authentication failure. The system administrator must reauthorize cloud storage.';
+  }
+  // Cloud storage upload failures
+  if (/STORAGE_UPLOAD_ERROR|failed to upload file to google drive/i.test(message)) {
+    return 'Cloud storage service temporarily unavailable. Please try again later or contact the administrator.';
+  }
   const tooLarge = /too large|UPLOAD_ERROR/i.test(message) && /max/i.test(message);
   if (!tooLarge) return message;
   if (configuredBytes && configuredBytes > 0) {

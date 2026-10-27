@@ -60,6 +60,37 @@ class UploadError(PortalError):
         super().__init__(message=message, error_code="UPLOAD_ERROR", status_code=400)
 
 
+class StorageAuthenticationError(PortalError, RuntimeError):
+    def __init__(
+        self,
+        message: str = "Storage service authentication failed. Reauthorization required by administrator.",
+        details: dict[str, Any] | None = None,
+    ):
+        base_details = {"service": "google_drive", "reauthorization_required": True}
+        if details:
+            base_details.update(details)
+        super().__init__(
+            message=message,
+            error_code="STORAGE_AUTH_ERROR",
+            status_code=503,
+            details=base_details,
+        )
+
+
+class StorageUploadError(PortalError, RuntimeError):
+    def __init__(
+        self,
+        message: str = "Failed to persist document to storage service.",
+        details: dict[str, Any] | None = None,
+    ):
+        super().__init__(
+            message=message,
+            error_code="STORAGE_UPLOAD_ERROR",
+            status_code=500,
+            details=details,
+        )
+
+
 def portal_error_handler(error: PortalError) -> JSONResponse:
     return JSONResponse(status_code=error.status_code, content={"error": error.error_code, "message": error.message, "details": error.details})
 
